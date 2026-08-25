@@ -15,6 +15,7 @@ mitmproxy 嗅探插件。四种嗅探策略（并行生效，哪个先抓到用�
 """
 import json
 import re
+import time
 
 from mitmproxy import http
 
@@ -35,7 +36,7 @@ _BRIDGE_JS_TEMPLATE = """
   }
   function send(payload) {
     try {
-      if (payload.length > 2000000) { return; }
+      if (payload.length > 5000000) { return; }
       fetch("http://127.0.0.1:__PORT__/__sphdl/bridge", {
         method: "POST",
         mode: "no-cors",
@@ -70,7 +71,19 @@ _BRIDGE_JS_TEMPLATE = """
       }
       return orig.apply(bridge, a);
     };
+    send(JSON.stringify({ url: w.location.href, hb: 1 }));  // 握手：代理确认钩子存活
   }
+  // 看门狗：微信可能重建 WeixinJSBridge 对象（页面重载/渲染进程回收后
+  // 新 JS 上下文没有钩子 → 捕获静默停摆）。每 5s 检查一次并补包；
+  // 钩子存活时每 5s 发一次心跳，代理端据此判断钩子页面是否仍存活。
+  setInterval(function () {
+    try {
+      if (window.WeixinJSBridge && !window.WeixinJSBridge.__sphdl_wrapped) { wrap(); }
+      else if (window.WeixinJSBridge && window.WeixinJSBridge.__sphdl_wrapped) {
+        send(JSON.stringify({ url: window.location.href, hb: 1 }));
+      }
+    } catch (e) {}
+  }, 5000);
   if (window.WeixinJSBridge) { wrap(); }
   else {
     var t = 0;
@@ -95,6 +108,14 @@ class SphAddon:
         self.seen = set()          # 去重: (url, decode_key)
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
+        # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
+        #      以前无任何日志，用户只能靠重启引擎碰运气恢复）----
+        self.last_bridge_ts = 0.0  # 最近一次收到任何 bridge POST（含心跳）
+        self.last_capture_ts = 0.0  # 最近一次成功捕获视频
+        self.last_stream_ts = 0.0  # 最近一次视频流（206）经过代理
+        self.bridge_count = 0      # 非心跳 bridge 数据条数
+        self.hb_count = 0          # 心跳条数
+        self.capture_count = 0     # 累计捕获数（含去重跳过前的命中）
         self.media_regex = re.compile(r"get\s+media\(\)\{", re.MULTILINE)
         self.comment_regex = re.compile(
             r"async\s+finderGetCommentDetail\((\w+)\)\s*\{return(.*?)\s*\}\s*async",
@@ -118,8 +139,28 @@ class SphAddon:
         if not (is_js_callback or is_bridge):
             return
         source = "bridge钩子" if is_bridge else "JS回调"
+        body = req.content or b""
+        if is_bridge:
+            # 任何 bridge POST（含心跳）都证明钩子页面存活 → 更新存活时间戳。
+            # 心跳：直接回 OK，不解析、不落日志（每 5s 一条，解析会白白占事件循环）。
+            if b'"hb"' in body:
+                self._touch_bridge(hb=True)
+                flow.response = http.Response.make(
+                    200, b"OK", {"Content-Type": "text/plain"})
+                return
+            self._touch_bridge(hb=False)
+            # 字节预检（C 级快扫）：body 里根本没有 objectDesc 字样时，
+            # 跳过 json.loads + 递归扫描。视频号页面每秒会 POST 多条
+            # 无 objectDesc 的 bridge 调用（log/心跳/finderH5ExtTransfer 等），
+            # 逐条解析是事件循环的主要 CPU 开销——持续播放大视频时
+            # 循环拥塞 → 钩子回传变慢 → 页面 JS 队列堵死 → 捕获静默停摆
+            # （2026-08-25 朋友机 16:52-17:10 事故的主因之一）。
+            if b"object_desc" not in body and b"objectDesc" not in body:
+                flow.response = http.Response.make(
+                    200, b"OK", {"Content-Type": "text/plain"})
+                return
         try:
-            obj = json.loads(req.content)
+            obj = json.loads(body)
             od = find_object_desc_in_json(obj)
             if od is None:
                 od = obj  # 可能直接就是 object_desc 本体
@@ -137,6 +178,13 @@ class SphAddon:
         # 无论成功与否都回 OK，避免影响微信自身
         flow.response = http.Response.make(200, b"OK", {"Content-Type": "text/plain"})
 
+    def _touch_bridge(self, hb: bool):
+        self.last_bridge_ts = time.time()
+        if hb:
+            self.hb_count += 1
+        else:
+            self.bridge_count += 1
+
     # ---------- ② API 直嗅 + ③④ JS 注入 ----------
     def response(self, flow: http.HTTPFlow):
         resp = flow.response
@@ -149,6 +197,9 @@ class SphAddon:
         if resp.status_code not in (200, 206):
             return
         host = flow.request.host
+        # 206 = Range 分片流，视频号 CDN 拉流特征 → 用于看门狗判断"正在播放"
+        if resp.status_code == 206:
+            self.last_stream_ts = time.time()
 
         # ③ 注入点：web-finder 页面的 svg-icons-register JS
         if host.endswith("res.wx.qq.com") and config.INJECT_JS_MARKER in flow.request.path:
@@ -189,6 +240,8 @@ class SphAddon:
             logger.debug("重复视频，跳过")
             return
         self.seen.add(key)
+        self.capture_count += 1
+        self.last_capture_ts = time.time()
         logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")
         if self.on_capture:
             try:

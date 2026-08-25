@@ -329,6 +329,9 @@ class App:
         self._dirty = False
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
+        # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
+        self._hook_warned = False
+        self._last_hb_log = 0.0
         for rid in self.store.order:
             r = self.store.items[rid]
             self._url_to_rid[r.url] = rid
@@ -472,6 +475,7 @@ class App:
         self.tree.tag_configure("tag_waiting", foreground="#0f766e")
         self.tree.tag_configure("tag_stopped", foreground="#9ca3af")
         self.tree.bind("<Double-1>", self._on_tree_dclick)
+        self.tree.bind("<Control-a>", lambda e: self._select_all())
 
         self.btn_download = ttk.Button(btns, text="⬇ 下载选中", width=10,
                                        command=lambda: self._download_selected())
@@ -666,6 +670,10 @@ class App:
             messagebox.showerror("打开失败", str(e))
 
     # ---------------- 列表操作 ----------------
+    def _select_all(self):
+        for iid in self.tree.get_children():
+            self.tree.selection_add(iid)
+
     def _selected_rid(self):
         sel = self.tree.selection()
         if not sel:
@@ -1043,13 +1051,61 @@ class App:
             else "系统代理: 未接管"
         ca_txt = {"installed": "CA: ✓", "missing": "CA: ⚠ 未安装",
                   "unknown": "CA: ?", "checking": "CA: …"}[self.ca_state]
+        if self.engine.running:
+            a = self.addon
+            if a.last_bridge_ts:
+                age = int(time.time() - a.last_bridge_ts)
+                hook_txt = (f"钩子: {age}s前" if age < 120
+                            else f"钩子: {age // 60}分钟前 ⚠")
+            else:
+                hook_txt = "钩子: 无 ⚠"
+        else:
+            hook_txt = "钩子: -"
         done = len(self.store.by_status("done"))
         failed = len(self.store.by_status("failed"))
         waiting = len(self.store.by_status("waiting"))
         total = len(self.store.order)
         self.status_bar.config(
             text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
-                 f"列表: 共 {total} 条 · 待下载 {waiting} · 完成 {done} · 失败 {failed}")
+                 f"{hook_txt}   |   列表: 共 {total} 条 · 待下载 {waiting} · 完成 {done} · 失败 {failed}")
+
+    def _hook_watchdog(self):
+        """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
+        任何钩子数据（心跳/数据）→ 页面大概率已重载/被回收、钩子丢失，
+        捕获处于静默停摆 → 打醒目日志引导用户重新进入页面，替代以前
+        "无日志、只能靠重启引擎碰运气"的状态。"""
+        eng = self.engine
+        if not eng.running:
+            self._hook_warned = False
+            return
+        a = self.addon
+        now = time.time()
+        bridge_age = now - a.last_bridge_ts if a.last_bridge_ts else 1e9
+        stream_age = now - a.last_stream_ts if a.last_stream_ts else 1e9
+        streaming = stream_age < 90  # 90s 内有视频流 = 用户正在播放
+        if streaming and bridge_age > 90 and not self._hook_warned:
+            self._hook_warned = True
+            self.push_log(
+                "warn",
+                "⚠️ 视频在播放，但 90 秒以上没有收到视频号页面的钩子数据"
+                "——页面可能已刷新/被回收、钩子丢失（捕获暂停）。\n"
+                "处理：返回视频号页面重新进入（或重启微信后再播放）；"
+                "也可重启嗅探引擎，下次打开页面会重新注入。")
+        if not streaming or bridge_age < 90:
+            self._hook_warned = False
+        # 周期性心跳日志（60s 一条）：引擎/钩子健康状态可追溯
+        if now - self._last_hb_log >= 60:
+            self._last_hb_log = now
+
+            def _age(t):
+                return "无" if not t else f"{int(now - t)}s前"
+
+            self.push_log(
+                "info",
+                f"💓 嗅探运行中 | 钩子数据 {_age(a.last_bridge_ts)} "
+                f"(心跳×{a.hb_count} / 数据×{a.bridge_count}) | "
+                f"流活动 {_age(a.last_stream_ts)} | "
+                f"页面注入 {a.bridge_hooked_pages} 次 | 捕获 {a.capture_count} 个")
 
     def _poll(self):
         try:
@@ -1066,6 +1122,7 @@ class App:
         if self._dirty:
             self.store.save()
             self._dirty = False
+        self._hook_watchdog()
         self._update_status_bar()
         self.root.after(self.POLL_MS, self._poll)
 
