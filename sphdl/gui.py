@@ -41,7 +41,7 @@ from sphdl.entities import VideoData           # noqa: E402
 from sphdl.logger import logger                # noqa: E402
 from sphdl.pipeline import Pipeline            # noqa: E402
 from sphdl.addon import SphAddon               # noqa: E402
-from sphdl.proxy_manager import ProxyManager   # noqa: E402
+from sphdl.proxy_manager import ProxyManager, restore_proxy   # noqa: E402
 from sphdl.downloader import format_size       # noqa: E402
 
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -193,9 +193,9 @@ class SniffEngine:
         self.pm = None
         if auto_proxy:
             pm = ProxyManager(config.PROXY_HOST, port)
-            if pm.setup():
+            if pm.setup(backup_path=config.PROXY_BACKUP_FILE):
                 self.pm = pm
-                self.app.push_log("ok", f"系统代理已设为 127.0.0.1:{port}（停止时自动恢复）")
+                self.app.push_log("ok", f"系统代理已设为 127.0.0.1:{port}（原代理状态已快照，停止时自动恢复）")
             else:
                 self.app.push_log("warn", "自动设置系统代理失败，请手动将代理设为 127.0.0.1:%d" % port)
 
@@ -416,6 +416,12 @@ class App:
         ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
                         ).pack(side="left", padx=14)
 
+        # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
+        # proxy_backup.json；无快照时兜底关闭代理）。引擎运行中点它会先确认。
+        self.btn_restore_proxy = ttk.Button(eng, text="↩  恢复网络代理", width=13,
+                                            command=self._on_restore_proxy)
+        self.btn_restore_proxy.pack(side="left", padx=14)
+
         ttk.Label(eng, text="CA证书:").pack(side="left", padx=(18, 2))
         self.ca_label = ttk.Label(eng, text="检测中…", foreground="#d97706")
         self.ca_label.pack(side="left")
@@ -519,6 +525,33 @@ class App:
         self._refresh_tree_all()
 
     # ---------------- 引擎控制 ----------------
+    def _on_restore_proxy(self):
+        """应急：恢复网络代理 + 同步重置引擎状态。
+        恢复代理后流量不再经过本工具 → 嗅探必然失效，所以若引擎在运行
+        就一并停止（按钮回到「启动嗅探」），避免界面状态与实际能力不符。
+        代理恢复：有快照 → 按快照恢复（原 Clash/VPN 端口 or 原无代理）；
+        无快照 → 兜底关闭系统代理。"""
+        if self.engine.running and not messagebox.askyesno(
+                "恢复网络代理",
+                "嗅探引擎正在运行。点击后将：\n"
+                "  1) 停止嗅探引擎\n"
+                "  2) 把系统代理恢复到本工具接管前的状态\n"
+                "（进行中的下载不受影响）\n\n继续？"):
+            return
+
+        def _job():
+            # 先停引擎：stop() 内部会恢复代理、释放端口，
+            # 并推送 engine_state → 按钮自动回到「▶ 启动嗅探」
+            if self.engine.running:
+                self.engine.stop()
+            # 再以持久快照为准做一次兜底恢复（文件快照 = 接管前状态）
+            ok, desc = restore_proxy(config.PROXY_BACKUP_FILE)
+            self.push_log("ok" if ok else "error", f"网络代理：{desc}")
+            if ok:
+                self._update_status_bar()
+
+        threading.Thread(target=_job, daemon=True).start()
+
     def _toggle_engine(self):
         if self.engine.running:
             self.btn_engine.config(state="disabled")

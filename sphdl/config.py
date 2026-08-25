@@ -21,6 +21,9 @@ BASE_DIR = _app_home()
 # 默认下载目录
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 
+# 系统代理状态快照（引擎接管代理前保存；「恢复网络代理」按钮据此恢复）
+PROXY_BACKUP_FILE = BASE_DIR / "proxy_backup.json"
+
 # 代理监听
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8899

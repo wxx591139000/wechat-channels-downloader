@@ -219,6 +219,15 @@ def main():
     if args.verbose:
         logger.debug_enabled = True
 
+    # 冻结 exe 双击（不带任何参数）= GUI。
+    # 修复 2026-08-25 事故：exe 无参双击原本落入 run_sniff()——
+    # 无窗口构建下引擎隐形启动 + 系统代理被接管成 8899，且没有任何界面
+    # 可点「停止嗅探」→ 用户/朋友电脑断网且找不到开关（v1.1.1 修复）。
+    # 开发模式不受影响：python main.py 无参仍是嗅探（CLI 开发工作流），
+    # run.bat 无参时会显式传 --gui。
+    if not args.gui and getattr(sys, "frozen", False) and not sys.argv[1:]:
+        args.gui = True
+
     if args.gui:
         logger.debug_enabled = True  # GUI 模式：全流量日志（诊断用，后续可改为开关）
         # 必须走 gui.main()（内含 Windows 单实例互斥检查），

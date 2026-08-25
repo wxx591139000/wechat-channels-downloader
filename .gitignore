@@ -3,6 +3,7 @@ downloads/
 logs/
 config.json
 records.json
+proxy_backup.json
 monitor.log
 unlock_watch.log
 ca.pem
@@ -16,10 +17,15 @@ __pycache__/
 # PyInstaller：中间产物不入库，便携版以 zip 提供
 build/
 build_v11/
+build_v111/
+build_v12/
 dist_v11/
+dist_v111/
+dist_v12/
 dist/v11-stage/
+dist/v12-stage/
 dist/*
-!dist/微信视频号下载器-v1.1-win64-portable.zip
+!dist/微信视频号下载器-v1.2-win64-portable.zip
 
 # 测试临时文件
 tests/_smoke/
