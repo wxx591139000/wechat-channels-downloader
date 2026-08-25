@@ -476,6 +476,8 @@ class App:
                    command=lambda: self._download_all_waiting()).pack(side="left", padx=4)
         ttk.Button(btns, text="重试失败", width=9,
                    command=lambda: self._retry()).pack(side="left", padx=4)
+        ttk.Button(btns, text="↻ 重新下载", width=10,
+                   command=lambda: self._redownload_selected()).pack(side="left", padx=4)
         ttk.Button(btns, text="打开文件", width=9,
                    command=lambda: self._open_file()).pack(side="left", padx=4)
         ttk.Button(btns, text="打开文件夹", width=9,
@@ -689,7 +691,8 @@ class App:
         if not submitted:
             messagebox.showinfo("提示", "选中的记录都不可下载：\n"
                                "· 已完成 / 下载中 / 排队中的无需重复操作\n"
-                               "· 只有「待下载」或「失败」的可以点下载")
+                               "· 只有「待下载」或「失败」的可以点下载\n"
+                               "· 「已完成」但文件打不开/无法播放 → 用『↻ 重新下载』")
 
     def _stop_selected(self):
         rids = self._selected_rids()
@@ -749,6 +752,30 @@ class App:
             self._submit_record(rid)
         self.push_log("info", f"已重新加入下载队列 {len(rids)} 个: "
                       + "、".join(self.store.items[r].title[:15] for r in rids)[:80])
+
+    def _redownload_selected(self):
+        """重新下载：针对 已完成/失败/已停止 的记录（典型场景：
+        「已完成」但文件打不开/无法播放 —— 多为 CDN 提前掐断交付的不完整文件）。
+        重新入队；下载器写 .tmp 成功后原子覆盖旧文件，
+        若失败（如 CDN 链接过期）旧文件保留，状态回到失败。"""
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo("提示", "请先在列表里选中要重新下载的记录（可 Ctrl/Shift 多选）")
+            return
+        allowed = ("done", "failed", "stopped")
+        targets = [r for r in rids if self.store.items[r].status in allowed]
+        if not targets:
+            messagebox.showinfo("提示",
+                "选中的记录都不在可重新下载的状态\n"
+                "（只有「已完成 / 失败 / 已停止」可重新下载；「待下载」直接点『下载』即可）")
+            return
+        for rid in targets:
+            rec = self.store.items[rid]
+            if rec.status == "done" and rec.file and os.path.exists(rec.file):
+                self.push_log("info", f"重新下载（成功后将覆盖旧文件）: {rec.title[:30]}")
+            self._submit_record(rid)
+        self.push_log("info", f"已重新加入下载队列 {len(targets)} 个。"
+                      "注意：CDN 链接可能已过期，若失败请重新嗅探后再下载")
 
     def _open_file(self):
         rid = self._selected_rid()
