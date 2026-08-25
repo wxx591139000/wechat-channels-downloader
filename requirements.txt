@@ -1,0 +1,4 @@
+# 微信视频号下载器依赖
+# 建议使用 Python 3.10+
+mitmproxy>=10.0
+requests>=2.28

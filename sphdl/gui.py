@@ -1,0 +1,1050 @@
+"""
+sphdl GUI —— tkinter 桌面界面（零新增依赖，标准库自带）
+=====================================================
+功能：
+  1. 嗅探引擎（本地代理）一键 启动 / 停止，可选自动设置系统代理
+  2. mitmproxy CA 证书状态检测 + 一键唤起 Windows 证书安装向导
+  3. 下载目录选择与持久化
+  4. 视频下载列表：状态/进度实时刷新、重试、打开文件/文件夹、删除记录/文件
+  5. 实时日志 + 状态栏
+  6. 列表与配置持久化（records.json / config.json），重启后列表不丢
+
+线程模型：
+  - tkinter 主线程只做 UI 刷新（root.after 轮询队列）
+  - 嗅探引擎在独立线程跑 asyncio 事件循环
+  - 下载/解密在 Pipeline 工作线程
+  - 所有跨线程 UI 更新都通过 queue.Queue 投递，绝不跨线程碰 tkinter
+"""
+import datetime
+import json
+import os
+import platform
+import queue
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+# 应用主目录（开发=sphdl/，冻结打包=exe 所在目录 → 便携布局）
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).resolve().parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+from sphdl import config                      # noqa: E402
+from sphdl.entities import VideoData           # noqa: E402
+from sphdl.logger import logger                # noqa: E402
+from sphdl.pipeline import Pipeline            # noqa: E402
+from sphdl.addon import SphAddon               # noqa: E402
+from sphdl.proxy_manager import ProxyManager   # noqa: E402
+from sphdl.downloader import format_size       # noqa: E402
+
+CONFIG_FILE = BASE_DIR / "config.json"
+RECORDS_FILE = BASE_DIR / "records.json"
+MAX_RECORDS = 500
+
+STATUS_TEXT = {
+    "waiting": "待下载",
+    "pending": "排队中",
+    "downloading": "下载中",
+    "decrypting": "解密中",
+    "done": "已完成 ✓",
+    "failed": "失败 ✗",
+    "stopped": "已停止",
+}
+STATUS_TAG = {
+    "done": "tag_done", "failed": "tag_failed", "downloading": "tag_downloading",
+    "decrypting": "tag_decrypting", "pending": "tag_pending",
+    "waiting": "tag_waiting", "stopped": "tag_stopped",
+}
+
+
+# ============================== 配置持久化 ==============================
+class AppConfig:
+    def __init__(self):
+        self.port = config.PROXY_PORT
+        self.download_dir = str(config.DOWNLOAD_DIR)
+        self.auto_proxy = True
+        self._load()
+
+    def _load(self):
+        try:
+            d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            self.port = int(d.get("port", self.port))
+            self.download_dir = d.get("download_dir", self.download_dir)
+            self.auto_proxy = bool(d.get("auto_proxy", True))
+        except Exception:
+            pass
+
+    def save(self):
+        try:
+            CONFIG_FILE.write_text(json.dumps(
+                {"port": self.port, "download_dir": self.download_dir,
+                 "auto_proxy": self.auto_proxy},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+
+# ============================== 下载记录（持久化列表） ==============================
+@dataclass
+class Record:
+    id: str
+    title: str
+    url: str
+    decode_key: str
+    size: int
+    source: str
+    created: str
+    status: str = "pending"
+    file: str = ""
+    error: str = ""
+    progress: int = 0
+    is_image: bool = False
+    video_id: str = ""   # 稳定视频标识（md5sum），用于跨会话去重
+
+
+class RecordStore:
+    def __init__(self, path: Path):
+        self.path = path
+        self.items: dict = {}      # id -> Record
+        self.order: list = []      # 新 → 旧
+        self._load()
+
+    def _load(self):
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            for d in raw[:MAX_RECORDS]:
+                r = Record(**{k: d.get(k, "") for k in
+                              ("id", "title", "url", "decode_key", "size",
+                               "source", "created", "status", "file", "error",
+                               "progress", "is_image", "video_id")})
+                # 上次退出时正在处理中的，标记为失败；
+                # "waiting"（还没开始下载）保持不变，重启后仍可点选下载
+                if r.status in ("pending", "downloading", "decrypting"):
+                    r.status = "failed"
+                    r.error = "已中断（程序重启）"
+                    r.progress = 0
+                self.items[r.id] = r
+                self.order.append(r.id)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            self.items, self.order = {}, []
+
+    def add(self, rec: Record):
+        self.items[rec.id] = rec
+        self.order.insert(0, rec.id)
+        while len(self.order) > MAX_RECORDS:
+            old = self.order.pop()
+            self.items.pop(old, None)
+
+    def update(self, rid, **kw):
+        if rid in self.items:
+            for k, v in kw.items():
+                setattr(self.items[rid], k, v)
+
+    def remove(self, rid):
+        self.items.pop(rid, None)
+        if rid in self.order:
+            self.order.remove(rid)
+
+    def by_status(self, status):
+        return [self.items[i] for i in self.order if i in self.items
+                and self.items[i].status == status]
+
+    def save(self):
+        try:
+            data = [asdict(self.items[i]) for i in self.order if i in self.items]
+            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                                 encoding="utf-8")
+        except Exception:
+            pass
+
+
+# ============================== 嗅探引擎（线程封装） ==============================
+class SniffEngine:
+    def __init__(self, app):
+        self.app = app
+        self.port = config.PROXY_PORT
+        self.master = None
+        self.loop = None
+        self.thread = None
+        self.pm = None
+        self._running = False
+        self.addon = None
+
+    @property
+    def running(self):
+        return self._running
+
+    def start(self, port: int, auto_proxy: bool) -> bool:
+        if self._running or (self.thread and self.thread.is_alive()):
+            return False
+        from mitmproxy import options
+        opts = options.Options(listen_host=config.PROXY_HOST,
+                               listen_port=port, ssl_insecure=True)
+
+        self.pm = None
+        if auto_proxy:
+            pm = ProxyManager(config.PROXY_HOST, port)
+            if pm.setup():
+                self.pm = pm
+                self.app.push_log("ok", f"系统代理已设为 127.0.0.1:{port}（停止时自动恢复）")
+            else:
+                self.app.push_log("warn", "自动设置系统代理失败，请手动将代理设为 127.0.0.1:%d" % port)
+
+        self.port = port
+        self._running = True
+        self.thread = threading.Thread(target=self._run, args=(opts,), daemon=True)
+        self.thread.start()
+
+        # 等待端口真正监听（最多 5 秒）
+        for _ in range(50):
+            if not self._running:
+                break
+            if self._port_open(port):
+                self.app.push_log("ok", f"代理已监听 127.0.0.1:{port}，开始嗅探。请打开微信视频号播放视频")
+                return True
+            time.sleep(0.1)
+        self.app.push_log("error", f"代理启动失败（端口 {port} 可能被占用）")
+        self.stop()
+        return False
+
+    def _port_open(self, port):
+        import socket
+        s = socket.socket()
+        s.settimeout(0.3)
+        try:
+            s.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    def _run(self, opts):
+        import asyncio
+        from mitmproxy import addons
+        from mitmproxy.master import Master
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.loop = loop
+
+        # mitmproxy 11 的 Master.__init__ 及 addons 配置阶段都要求
+        # 事件循环“正在运行”（内部调 asyncio.get_running_loop()）。
+        # 因此把 Master 构造 / 加插件 / run 全部放进 async 函数，
+        # 在 run_until_complete 内部执行（与 CLI 模式一致）。
+        async def _amain():
+            master = Master(opts)
+            master.addons.add(*addons.default_addons())
+            master.addons.add(self.app.addon)
+            self.master = master
+            await master.run()
+
+        try:
+            loop.run_until_complete(_amain())
+        except Exception as e:
+            self.app.push_log("error", f"代理引擎异常退出: {e}")
+        finally:
+            self._running = False
+            try:
+                if self.master is not None:
+                    self.master.shutdown()
+            except Exception:
+                pass
+            # 干净收尾：取消仍在挂起的任务（如 Windows IOCP 的 accept 任务）
+            # 并等待其完成，确保监听端口被释放，避免再次启动时
+            # 出现「端口 8899 可能被占用」。
+            try:
+                pending = asyncio.all_tasks(loop)
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            self.master = None
+            try:
+                loop.close()
+            except Exception:
+                pass
+            self.loop = None
+            # 引擎自行退出（异常/崩溃）而未走 stop()：必须补恢复系统代理，
+            # 否则浏览器/微信会一直指向已死的代理而无法联网。
+            if self.pm is not None:
+                try:
+                    self.pm.cleanup()
+                    self.app.push_log("ok", "系统代理已恢复（引擎已退出）")
+                except Exception:
+                    self.app.push_log("warn",
+                                       "⚠️ 恢复系统代理失败，请到 设置→网络和 Internet→代理 手动关闭")
+                self.pm = None
+            self.app.push_event(("engine_state", False))
+
+    def stop(self):
+        if not self._running:
+            return
+        self._running = False
+        self.app.push_log("info", "正在停止代理引擎...")
+        loop, master = self.loop, self.master
+        if loop and master:
+            try:
+                loop.call_soon_threadsafe(master.should_exit.set)
+            except Exception:
+                pass
+        t = self.thread
+        if t and t.is_alive():
+            t.join(timeout=6)
+        if self.pm:
+            ok = self.pm.cleanup()
+            self.app.push_log("ok" if ok else "warn",
+                              "系统代理已恢复" if ok else "⚠️ 恢复系统代理失败，请到 设置→网络和 Internet→代理 手动关闭")
+            self.pm = None
+        self.app.push_log("ok", "嗅探已停止")
+        self.app.push_event(("engine_state", False))
+
+
+# ============================== 主界面 ==============================
+class App:
+    POLL_MS = 300
+
+    def __init__(self):
+        self.cfg = AppConfig()
+        self.ui_q: "queue.Queue" = queue.Queue()
+        self.log_q: "queue.Queue" = queue.Queue()
+        logger.subscribe(self._on_log)
+
+        self.store = RecordStore(RECORDS_FILE)
+        self.engine = SniffEngine(self)
+
+        self.ca_state = "checking"     # checking / installed / missing / unknown
+        self._dirty = False
+        self._row_of: dict = {}        # record id -> treeview iid
+        self._url_to_rid: dict = {}    # url -> record id
+        for rid in self.store.order:
+            r = self.store.items[rid]
+            self._url_to_rid[r.url] = rid
+
+        self._build_root()
+        self._build_ui()
+
+        # 下载管线 + 嗅探插件（管线独立于代理，停止嗅探后仍可下载/重试）
+        # GUI 模式：捕获只进列表，不自动下载（auto_download=False）
+        self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
+        self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
+                              auto_download=False)
+
+        threading.Thread(target=self._check_ca, daemon=True).start()
+
+        # 兜底：解释器异常退出（未捕获异常等）时尽力恢复系统代理，
+        # 避免浏览器/微信一直指向已死的代理而无法联网。
+        import atexit
+
+        def _safety_proxy_cleanup():
+            try:
+                eng = self.engine
+                if eng.pm is not None and not eng._running:
+                    eng.pm.cleanup()
+                    eng.pm = None
+            except Exception:
+                pass
+
+        atexit.register(_safety_proxy_cleanup)
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(self.POLL_MS, self._poll)
+
+    # ---------------- 跨线程安全工具 ----------------
+    def push_event(self, item):
+        self.ui_q.put(item)
+
+    def push_log(self, level, msg):
+        self.log_q.put((level, msg))
+        logger.log_file(level, msg)  # 同步落盘，进程消失也能查到全过程
+
+    def _on_log(self, level, msg):
+        self.log_q.put((level, msg))
+
+    def _on_capture(self, vd, source):
+        self.push_event(("capture", vd, source))
+
+    def _on_pipeline_event(self, event, vd, *args):
+        self.push_event((event, vd, *args))
+
+    # ---------------- 窗口与控件 ----------------
+    def _build_root(self):
+        self.root = tk.Tk()
+        self.root.title("微信视频号下载器  sphdl")
+        self.root.geometry("1060x700")
+        self.root.minsize(900, 560)
+        try:
+            from tkinter import font as tkfont
+            f = tkfont.nametofont("TkDefaultFont")
+            f.configure(family="Microsoft YaHei UI", size=9)
+            f2 = tkfont.nametofont("TkTextFont")
+            f2.configure(family="Microsoft YaHei UI", size=9)
+        except Exception:
+            pass
+
+    def _build_ui(self):
+        root = self.root
+        main = ttk.Frame(root, padding=8)
+        main.pack(fill="both", expand=True)
+
+        # ===== ① 引擎控制区 =====
+        eng = ttk.LabelFrame(main, text=" 嗅探引擎 ", padding=8)
+        eng.pack(fill="x")
+
+        self.btn_engine = ttk.Button(eng, text="▶  启动嗅探", width=14,
+                                     command=self._toggle_engine)
+        self.btn_engine.pack(side="left")
+
+        ttk.Label(eng, text="代理端口").pack(side="left", padx=(16, 2))
+        self.port_var = tk.StringVar(value=str(self.cfg.port))
+        self.ent_port = ttk.Entry(eng, textvariable=self.port_var, width=7)
+        self.ent_port.pack(side="left")
+
+        self.auto_var = tk.BooleanVar(value=self.cfg.auto_proxy)
+        ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
+                        ).pack(side="left", padx=14)
+
+        ttk.Label(eng, text="CA证书:").pack(side="left", padx=(18, 2))
+        self.ca_label = ttk.Label(eng, text="检测中…", foreground="#d97706")
+        self.ca_label.pack(side="left")
+        ttk.Button(eng, text="安装/检测", width=10,
+                   command=self._on_cert_btn).pack(side="left", padx=8)
+
+        self.eng_label = ttk.Label(eng, text="状态: 已停止", foreground="#6b7280")
+        self.eng_label.pack(side="right")
+
+        # ===== ② 下载目录区 =====
+        dirf = ttk.Frame(main)
+        dirf.pack(fill="x", pady=(8, 0))
+        ttk.Label(dirf, text="下载目录:").pack(side="left")
+        self.dir_var = tk.StringVar(value=self.cfg.download_dir)
+        ttk.Entry(dirf, textvariable=self.dir_var, width=52).pack(side="left", padx=6)
+        ttk.Button(dirf, text="更改…", width=8,
+                   command=self._choose_dir).pack(side="left")
+        ttk.Button(dirf, text="打开文件夹", width=10,
+                   command=self._open_download_dir).pack(side="left", padx=4)
+
+        # ===== ③ 下载列表 =====
+        listf = ttk.LabelFrame(main, text=" 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ",
+                               padding=4)
+        listf.pack(fill="both", expand=True, pady=8)
+
+        # 按钮行先 pack 到底部（若后 pack 默认落到顶部，会挤占表格空间）
+        btns = ttk.Frame(listf)
+        btns.pack(side="bottom", fill="x", pady=(6, 0))
+
+        cols = ("status", "title", "size", "source", "time", "file")
+        self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
+                                 selectmode="extended")
+        heads = {"status": ("状态", 110), "title": ("标题", 250), "size": ("大小", 80),
+                 "source": ("来源", 150), "time": ("时间", 90), "file": ("文件", 190)}
+        for c in cols:
+            self.tree.heading(c, text=heads[c][0])
+            self.tree.column(c, width=heads[c][1],
+                             stretch=(c in ("title", "file")))
+        vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.tree.tag_configure("tag_done", foreground="#15803d")
+        self.tree.tag_configure("tag_failed", foreground="#dc2626")
+        self.tree.tag_configure("tag_downloading", foreground="#2563eb")
+        self.tree.tag_configure("tag_decrypting", foreground="#d97706")
+        self.tree.tag_configure("tag_pending", foreground="#6b7280")
+        self.tree.tag_configure("tag_waiting", foreground="#0f766e")
+        self.tree.tag_configure("tag_stopped", foreground="#9ca3af")
+        self.tree.bind("<Double-1>", self._on_tree_dclick)
+
+        self.btn_download = ttk.Button(btns, text="⬇ 下载选中", width=10,
+                                       command=lambda: self._download_selected())
+        self.btn_download.pack(side="left")
+        ttk.Button(btns, text="停止下载", width=9,
+                   command=lambda: self._stop_selected()).pack(side="left", padx=4)
+        ttk.Button(btns, text="下载全部待下载", width=12,
+                   command=lambda: self._download_all_waiting()).pack(side="left", padx=4)
+        ttk.Button(btns, text="重试失败", width=9,
+                   command=lambda: self._retry()).pack(side="left", padx=4)
+        ttk.Button(btns, text="打开文件", width=9,
+                   command=lambda: self._open_file()).pack(side="left", padx=4)
+        ttk.Button(btns, text="打开文件夹", width=9,
+                   command=lambda: self._open_folder()).pack(side="left")
+        ttk.Button(btns, text="删除记录", width=9,
+                   command=lambda: self._del_record()).pack(side="left", padx=4)
+        ttk.Button(btns, text="删除文件+记录", width=11,
+                   command=lambda: self._del_file()).pack(side="left")
+        ttk.Button(btns, text="清空已完成", width=10,
+                   command=lambda: self._clear_done()).pack(side="right", padx=(4, 0))
+        ttk.Button(btns, text="清空失败", width=9,
+                   command=lambda: self._clear_failed()).pack(side="right")
+
+        # ===== ④ 日志区 =====
+        logf = ttk.LabelFrame(main, text=" 日志 ", padding=4)
+        logf.pack(fill="both", pady=(0, 0))
+        self.log_text = tk.Text(logf, height=9, bg="#0b1020", fg="#d1d5db",
+                                insertbackground="#d1d5db", relief="flat",
+                                font=("Consolas", 9), wrap="word", state="disabled")
+        lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=lsb.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        lsb.pack(side="right", fill="y")
+        for tag, color in (("info", "#7dd3fc"), ("ok", "#86efac"),
+                           ("warn", "#fde047"), ("error", "#fca5a5"), ("dim", "#9ca3af")):
+            self.log_text.tag_configure(tag, foreground=color)
+
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(logf, text="自动滚动", variable=self.auto_scroll_var
+                        ).pack(anchor="e", pady=(4, 0))
+        ttk.Button(logf, text="清空", width=6,
+                   command=self._clear_log).pack(side="right", anchor="e", pady=(4, 0))
+
+        # ===== ⑤ 状态栏 =====
+        self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
+                                    padding=(8, 2))
+        self.status_bar.pack(fill="x", side="bottom")
+
+        self._refresh_tree_all()
+
+    # ---------------- 引擎控制 ----------------
+    def _toggle_engine(self):
+        if self.engine.running:
+            self.btn_engine.config(state="disabled")
+            threading.Thread(target=self._stop_engine_job, daemon=True).start()
+            return
+        # 解析端口
+        try:
+            port = int(self.port_var.get())
+            assert 1 <= port <= 65535
+        except Exception:
+            messagebox.showerror("端口无效", "请输入 1-65535 的端口号")
+            return
+        auto = bool(self.auto_var.get())
+        # CA 证书检查
+        if self.ca_state == "missing":
+            if messagebox.askyesno("CA 证书未安装",
+                                   "检测到未安装 mitmproxy CA 证书。\n"
+                                   "不安装则 HTTPS 流量无法解密，嗅探大概率失败。\n\n"
+                                   "现在打开证书安装向导吗？"):
+                self._launch_cert_wizard()
+                return
+        self.btn_engine.config(state="disabled", text="启动中…")
+        self.cfg.port, self.cfg.auto_proxy = port, auto
+        self.cfg.save()
+        threading.Thread(target=self._start_engine_job, args=(port, auto),
+                         daemon=True).start()
+
+    def _start_engine_job(self, port, auto):
+        ok = self.engine.start(port, auto)
+        self.push_event(("engine_state", ok))
+
+    def _stop_engine_job(self):
+        self.engine.stop()
+        self.push_event(("engine_state", False))
+
+    def _apply_engine_state(self, running: bool):
+        self.btn_engine.config(state="normal",
+                               text="■  停止嗅探" if running else "▶  启动嗅探")
+        self.ent_port.config(state="disabled" if running else "normal")
+        self.ca_label  # noqa
+        self.eng_label.config(text=f"状态: {'运行中 (127.0.0.1:%d)' % self.engine.port if running else '已停止'}",
+                              foreground="#15803d" if running else "#6b7280")
+
+    # ---------------- CA 证书 ----------------
+    def _check_ca(self):
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-ChildItem Cert:\\CurrentUser\\Root, "
+                 "Cert:\\LocalMachine\\Root -ErrorAction SilentlyContinue | "
+                 "Where-Object { $_.Subject -like '*mitmproxy*' } | "
+                 "Measure-Object).Count"],
+                capture_output=True, text=True, timeout=25).stdout.strip()
+            n = int(out.splitlines()[-1]) if out else -1
+            self.ca_state = "installed" if n > 0 else "missing"
+        except Exception:
+            self.ca_state = "unknown"
+        self.push_event(("ca_state", self.ca_state))
+
+    def _apply_ca_state(self, state):
+        self.ca_state = state
+        txt, color = {"installed": ("已安装 ✓", "#15803d"),
+                      "missing": ("未安装 ⚠", "#dc2626"),
+                      "unknown": ("未知 ?", "#d97706"),
+                      "checking": ("检测中…", "#d97706")}[state]
+        self.ca_label.config(text=txt, foreground=color)
+        self._update_status_bar()
+
+    def _on_cert_btn(self):
+        threading.Thread(target=self._check_ca, daemon=True).start()
+        self._launch_cert_wizard()
+
+    def _launch_cert_wizard(self):
+        bat = BASE_DIR / "install-cert.bat"
+        if not bat.exists():
+            self.push_log("error", "找不到 install-cert.bat（证书安装脚本）")
+            return
+        try:
+            subprocess.Popen(f'"{bat}"', shell=True, cwd=str(BASE_DIR))
+        except Exception as e:
+            self.push_log("error", f"无法启动证书安装向导: {e}")
+            return
+        self.push_log("info", "已打开证书安装向导：按向导 5 步完成安装后，回来点『安装/检测』确认")
+
+    # ---------------- 下载目录 ----------------
+    def _choose_dir(self):
+        d = filedialog.askdirectory(initialdir=self.dir_var.get() or str(BASE_DIR),
+                                    title="选择下载目录")
+        if not d:
+            return
+        d = str(Path(d))
+        self.dir_var.set(d)
+        self.cfg.download_dir = d
+        self.cfg.save()
+        try:
+            self.pipeline.download_dir = Path(d)
+            Path(d).mkdir(parents=True, exist_ok=True)
+            self.push_log("ok", f"下载目录已改为: {d}")
+        except Exception as e:
+            self.push_log("error", f"设置下载目录失败: {e}")
+
+    def _open_download_dir(self):
+        d = self.dir_var.get()
+        try:
+            Path(d).mkdir(parents=True, exist_ok=True)
+            os.startfile(d)  # noqa
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
+    # ---------------- 列表操作 ----------------
+    def _selected_rid(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        iid = sel[0]
+        for rid, r_iid in self._row_of.items():
+            if r_iid == iid:
+                return rid
+        return None
+
+    def _selected_rids(self):
+        """当前所有选中的 record id（多选，按列表顺序）。"""
+        sel = set(self.tree.selection())
+        out = []
+        for rid, iid in self._row_of.items():
+            if iid in sel and rid in self.store.items:
+                out.append(rid)
+        # 保持列表从上到下的顺序
+        order = {rid: i for i, rid in enumerate(self.store.order)}
+        out.sort(key=lambda r: order.get(r, 1 << 30))
+        return out
+
+    def _submit_record(self, rid):
+        """把一条记录提交到下载管线（waiting/failed → pending）。"""
+        rec = self.store.items[rid]
+        vd = VideoData(url=rec.url, decode_key=rec.decode_key, size=rec.size,
+                       description=rec.title, is_image=rec.is_image)
+        self.store.update(rid, status="pending", progress=0, error="")
+        self._dirty = True
+        self.pipeline.submit(vd)
+        self._update_row(rid)
+        return True
+
+    def _download_selected(self):
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo("提示", "请先在列表里选中要下载的视频"
+                                       "（可 Ctrl/Shift 多选）")
+            return
+        submitted, skipped = 0, []
+        for rid in rids:
+            rec = self.store.items[rid]
+            if rec.status in ("waiting", "failed", "stopped"):
+                self._submit_record(rid)
+                submitted += 1
+            else:
+                skipped.append(f"{rec.title[:20]}（{STATUS_TEXT.get(rec.status, rec.status)}）")
+        if submitted:
+            self.push_log("ok", f"已加入下载队列 {submitted} 个: "
+                          + "、".join(self.store.items[r].title[:15] for r in rids
+                                     if self.store.items[r].status in
+                                     ("pending", "downloading"))[:80])
+        if skipped:
+            self.push_log("warn", f"跳过 {len(skipped)} 条不可下载的记录: "
+                          + "；".join(skipped[:5])[:100])
+        if not submitted:
+            messagebox.showinfo("提示", "选中的记录都不可下载：\n"
+                               "· 已完成 / 下载中 / 排队中的无需重复操作\n"
+                               "· 只有「待下载」或「失败」的可以点下载")
+
+    def _stop_selected(self):
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo("提示", "请先选中要停止的记录"
+                                       "（排队中/下载中/解密中 可停止）")
+            return
+        stopped, skipped = 0, 0
+        for rid in rids:
+            rec = self.store.items[rid]
+            if rec.status in ("pending", "downloading", "decrypting"):
+                try:
+                    self.pipeline.cancel(rec.url)
+                except Exception:
+                    pass
+                stopped += 1
+                self.store.update(rid, status="stopped", error="用户停止")
+                self._update_row(rid)
+                self._dirty = True
+                self.push_log("ok", f"已停止: {rec.title[:30]}")
+            else:
+                skipped += 1
+        if skipped:
+            self.push_log("warn", f"{skipped} 条状态不可停止（待下载/已完成/已停止等）")
+        if not stopped:
+            messagebox.showinfo("提示", "选中的记录没有正在进行的下载"
+                               "（只有 排队中/下载中/解密中 可以停止）")
+
+    def _download_all_waiting(self):
+        rids = [r.id for r in self.store.by_status("waiting")]
+        if not rids:
+            messagebox.showinfo("提示", "没有待下载的视频")
+            return
+        if not messagebox.askyesno("下载全部待下载",
+                                   f"将 {len(rids)} 个待下载视频全部加入下载队列？\n"
+                                   "（下载速度受 CDN 限制，排队依次执行）"):
+            return
+        for rid in rids:
+            self._submit_record(rid)
+        self.push_log("ok", f"已加入下载队列 {len(rids)} 个（全部待下载）")
+
+    def _retry(self):
+        rids = [r for r in self._selected_rids()
+                if self.store.items[r].status in ("failed", "stopped")]
+        if not rids:
+            sel = self._selected_rid()
+            if not sel:
+                messagebox.showinfo("提示", "请先选中失败的记录（可多选）")
+            else:
+                messagebox.showinfo("提示", "选中的记录不是「失败」状态，"
+                                       "无需重试（待下载的直接点『下载』）")
+            return
+        for rid in rids:
+            rec = self.store.items[rid]
+            if rec.status in ("downloading", "decrypting"):
+                continue
+            self._submit_record(rid)
+        self.push_log("info", f"已重新加入下载队列 {len(rids)} 个: "
+                      + "、".join(self.store.items[r].title[:15] for r in rids)[:80])
+
+    def _open_file(self):
+        rid = self._selected_rid()
+        if not rid:
+            return
+        rec = self.store.items[rid]
+        if not rec.file or not os.path.exists(rec.file):
+            messagebox.showwarning("提示", "文件不存在（可能已被移动或删除）")
+            return
+        try:
+            os.startfile(rec.file)  # noqa
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
+    def _open_folder(self):
+        rid = self._selected_rid()
+        rec = self.store.items.get(rid) if rid else None
+        target = None
+        if rec and rec.file and os.path.exists(rec.file):
+            target = str(Path(rec.file).parent)
+        else:
+            target = self.dir_var.get()
+        try:
+            Path(target).mkdir(parents=True, exist_ok=True)
+            os.startfile(target)  # noqa
+        except Exception as e:
+            messagebox.showerror("打开失败", str(e))
+
+    def _del_record(self):
+        rid = self._selected_rid()
+        if not rid:
+            return
+        rec = self.store.items[rid]
+        if not messagebox.askyesno("删除记录",
+                                   f"删除这条记录？（视频文件会保留）\n\n{rec.title[:40]}"):
+            return
+        self._remove_row(rid)
+        self._dirty = True
+        self.push_log("info", f"已删除记录: {rec.title[:30]}")
+
+    def _del_file(self):
+        rid = self._selected_rid()
+        if not rid:
+            return
+        rec = self.store.items[rid]
+        if not rec.file:
+            messagebox.showinfo("提示", "该记录没有文件")
+            return
+        if not messagebox.askyesno("删除文件",
+                                   f"删除视频文件和记录？\n\n{rec.file}"):
+            return
+        try:
+            if os.path.exists(rec.file):
+                os.remove(rec.file)
+        except Exception as e:
+            messagebox.showerror("删除失败", str(e))
+            return
+        self._remove_row(rid)
+        self._dirty = True
+        self.push_log("info", f"已删除文件+记录: {rec.title[:30]}")
+
+    def _clear_done(self):
+        done = self.store.by_status("done")
+        if not done:
+            messagebox.showinfo("提示", "没有已完成的记录")
+            return
+        if not messagebox.askyesno("清空已完成",
+                                   f"删除 {len(done)} 条已完成记录？（文件保留）"):
+            return
+        for r in done:
+            self._remove_row(r.id)
+        self._dirty = True
+        self.push_log("info", f"已清空 {len(done)} 条已完成记录")
+
+    def _clear_failed(self):
+        failed = self.store.by_status("failed")
+        if not failed:
+            messagebox.showinfo("提示", "没有失败的记录")
+            return
+        if not messagebox.askyesno("清空失败记录",
+                                   f"删除 {len(failed)} 条失败记录？（不删文件）\n"
+                                   "要重下某条请先用『重试失败』，确认不要了再清。"):
+            return
+        for r in failed:
+            self._remove_row(r.id)
+        self._dirty = True
+        self.push_log("info", f"已清空 {len(failed)} 条失败记录")
+
+    def _on_tree_dclick(self, _evt):
+        rid = self._selected_rid()
+        if not rid:
+            return
+        rec = self.store.items[rid]
+        if rec.status == "waiting":
+            # 双击「待下载」行 = 直接下载
+            self._submit_record(rid)
+            self.push_log("ok", f"已开始下载: {rec.title[:30]}")
+        elif rec.status == "done" and rec.file and os.path.exists(rec.file):
+            try:
+                os.startfile(rec.file)  # noqa
+            except Exception as e:
+                messagebox.showerror("打开失败", str(e))
+        elif rec.status in ("failed", "stopped"):
+            if rec.status == "failed":
+                messagebox.showwarning("失败原因", rec.error or "未知错误")
+            else:
+                messagebox.showinfo("已停止", "该视频已被手动停止。"
+                                      "\n点『重试失败』或『下载选中』可重新下载")
+
+    # ---------------- 日志 ----------------
+    def _append_log(self, level, msg):
+        self.log_text.config(state="normal")
+        self.log_text.insert("end", f"[{datetime.datetime.now():%H:%M:%S}] {msg}\n",
+                             level if level in ("info", "ok", "warn", "error") else "dim")
+        n = int(self.log_text.index("end-1c").split(".")[0])
+        if n > 1200:
+            self.log_text.delete("1.0", f"{n - 1000}.0")
+        if self.auto_scroll_var.get():
+            self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _clear_log(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+
+    # ---------------- 树刷新 ----------------
+    def _row_values(self, r: Record):
+        st = STATUS_TEXT.get(r.status, r.status)
+        if r.status == "downloading" and r.progress > 0:
+            st += f" {r.progress}%"
+        if r.status == "failed" and r.error:
+            st += " ✗"
+        title = r.title or "(无标题)"
+        if r.is_image:
+            title = "🖼 " + title  # 图片帖（不是视频），避免误以为是视频
+        return (st, title,
+                format_size(r.size) if r.size else "-",
+                r.source, r.created[5:], Path(r.file).name if r.file else "")
+
+    def _update_row(self, rid):
+        r = self.store.items.get(rid)
+        if not r:
+            return
+        iid = self._row_of.get(rid)
+        if iid and self.tree.exists(iid):
+            self.tree.item(iid, values=self._row_values(r),
+                           tags=(STATUS_TAG.get(r.status, "tag_pending"),))
+
+    def _remove_row(self, rid):
+        self.store.remove(rid)
+        iid = self._row_of.pop(rid, None)
+        if iid and self.tree.exists(iid):
+            self.tree.delete(iid)
+
+    def _add_row(self, r: Record):
+        iid = self.tree.insert("", 0, values=self._row_values(r),
+                               tags=(STATUS_TAG.get(r.status, "tag_pending"),))
+        self._row_of[r.id] = iid
+        self._url_to_rid[r.url] = r.id
+
+    def _refresh_tree_all(self):
+        self.tree.delete(*self.tree.get_children())
+        self._row_of.clear()
+        for rid in self.store.order:
+            r = self.store.items.get(rid)
+            if r:
+                self._add_row(r)
+
+    # ---------------- 事件处理（主线程） ----------------
+    def _handle_event(self, item):
+        kind = item[0]
+        if kind == "engine_state":
+            self._apply_engine_state(bool(item[1]))
+        elif kind == "ca_state":
+            self._apply_ca_state(item[1])
+        elif kind == "capture":
+            vd, source = item[1], item[2]
+            # 跨会话去重：同一视频（video_id=md5sum）或同一 URL 已在列表 → 跳过。
+            # （addon 的内存去重只在本次 GUI 运行内有效，重启后靠这里兜底）
+            if vd.video_id and any(r.video_id == vd.video_id
+                                   for r in self.store.items.values()):
+                self.push_log("info", f"重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
+                return
+            if vd.url in self._url_to_rid:
+                self.push_log("info", f"重复链接，跳过: {(vd.description or '')[:30]}")
+                return
+            rid = time.strftime("%m%d_%H%M%S") + "_%03d" % (
+                (hash(vd.url) % 900) + 100)
+            rec = Record(
+                id=rid, title=(vd.description or "")[:60], url=vd.url,
+                decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
+                source=source, created=time.strftime("%m-%d %H:%M:%S"),
+                status="waiting", is_image=vd.is_image, video_id=vd.video_id)
+            self.store.add(rec)
+            self._add_row(rec)
+            self._dirty = True
+            self.push_log("ok", f"已捕获，加入待下载列表: {rec.title[:30]}"
+                              f"（选中后点『下载选中』开始下载）")
+        elif kind in ("start", "progress", "decrypting", "done", "failed", "cancelled"):
+            vd = item[1]
+            rid = self._url_to_rid.get(vd.url)
+            if not rid:
+                return
+            if kind == "start":
+                self.store.update(rid, status="downloading", progress=0, error="")
+            elif kind == "progress":
+                done, total = item[2], item[3]
+                if total and total > 0:
+                    pct = min(99, done * 100 // total)
+                    if pct >= (self.store.items[rid].progress or 0):
+                        self.store.update(rid, progress=pct)
+            elif kind == "decrypting":
+                self.store.update(rid, status="decrypting")
+            elif kind == "done":
+                self.store.update(rid, status="done", progress=100,
+                                  file=item[2], error="")
+            elif kind == "failed":
+                self.store.update(rid, status="failed", error=item[2])
+            elif kind == "cancelled":
+                # 用户停止（管线确认）：以 stopped 收尾
+                self.store.update(rid, status="stopped",
+                                  error=item[2] if len(item) > 2 else "用户停止")
+            self._update_row(rid)
+            self._dirty = True
+            self._update_status_bar()
+
+    def _update_status_bar(self):
+        engine_txt = (f"嗅探: 运行中 127.0.0.1:{self.engine.port}"
+                      if self.engine.running else "嗅探: 已停止")
+        proxy_txt = "系统代理: 已接管" if self.engine.running and self.engine.pm \
+            else "系统代理: 未接管"
+        ca_txt = {"installed": "CA: ✓", "missing": "CA: ⚠ 未安装",
+                  "unknown": "CA: ?", "checking": "CA: …"}[self.ca_state]
+        done = len(self.store.by_status("done"))
+        failed = len(self.store.by_status("failed"))
+        waiting = len(self.store.by_status("waiting"))
+        total = len(self.store.order)
+        self.status_bar.config(
+            text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
+                 f"列表: 共 {total} 条 · 待下载 {waiting} · 完成 {done} · 失败 {failed}")
+
+    def _poll(self):
+        try:
+            while True:
+                lvl, msg = self.log_q.get_nowait()
+                self._append_log(lvl, msg)
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                self._handle_event(self.ui_q.get_nowait())
+        except queue.Empty:
+            pass
+        if self._dirty:
+            self.store.save()
+            self._dirty = False
+        self._update_status_bar()
+        self.root.after(self.POLL_MS, self._poll)
+
+    # ---------------- 退出 ----------------
+    def _on_close(self):
+        if self.engine.running:
+            if not messagebox.askyesno("退出确认",
+                                       "嗅探引擎正在运行。\n停止嗅探（并恢复系统代理）并退出？"):
+                return
+            self.btn_engine.config(state="disabled", text="退出中…")
+            self.engine.stop()
+        self.cfg.save()
+        self.store.save()
+        self.root.destroy()
+
+    def run(self):
+        self.push_log("info", "欢迎使用 sphdl 视频号下载器")
+        self.push_log("info", "① 点『启动嗅探』→ 打开微信视频号播放视频")
+        self.push_log("info", "② 视频被捕获后进入列表（状态=待下载，不会自动下载）")
+        self.push_log("info", "③ 选中要下载的视频（可多选）→ 点『⬇ 下载选中』或双击该行")
+        self.root.mainloop()
+
+
+def main():
+    # Windows 单实例：命名互斥量。防止重复启动多个 GUI
+    # 抢同一个 8899 端口 / 反复改写系统代理。
+    if platform.system().lower() == "windows":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        mutex = kernel32.CreateMutexW(None, False, "Local\\sphdl_single_instance")
+        if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(mutex)
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning(
+                "已在运行",
+                "sphdl 已经在运行中。\n请找到已有窗口继续使用，不要重复启动多个实例。")
+            root.destroy()
+            return
+        # 句柄须存活至进程结束（GC 回收会提前释放互斥量）
+        globals()["_SINGLE_INSTANCE_MUTEX"] = mutex
+    App().run()
+
+
+if __name__ == "__main__":
+    main()
