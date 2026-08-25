@@ -590,12 +590,16 @@ class App:
         self._launch_cert_wizard()
 
     def _launch_cert_wizard(self):
+        # PyInstaller 6 的 onedir 会把 --add-data 放进 _internal/，
+        # 开发模式则在 exe/main.py 同级目录 → 两处都找
         bat = BASE_DIR / "install-cert.bat"
+        if not bat.exists():
+            bat = BASE_DIR / "_internal" / "install-cert.bat"
         if not bat.exists():
             self.push_log("error", "找不到 install-cert.bat（证书安装脚本）")
             return
         try:
-            subprocess.Popen(f'"{bat}"', shell=True, cwd=str(BASE_DIR))
+            subprocess.Popen(f'"{bat}"', shell=True, cwd=str(bat.parent))
         except Exception as e:
             self.push_log("error", f"无法启动证书安装向导: {e}")
             return
