@@ -36,7 +36,7 @@ else:
     BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from sphdl import config                      # noqa: E402
+from sphdl import config, __version__   # noqa: E402
 from sphdl.entities import VideoData           # noqa: E402
 from sphdl.logger import logger                # noqa: E402
 from sphdl.pipeline import Pipeline            # noqa: E402
@@ -382,7 +382,7 @@ class App:
     # ---------------- 窗口与控件 ----------------
     def _build_root(self):
         self.root = tk.Tk()
-        self.root.title("微信视频号下载器  sphdl")
+        self.root.title(f"微信视频号下载器  sphdl v{__version__}")
         self.root.geometry("1060x700")
         self.root.minsize(900, 560)
         try:

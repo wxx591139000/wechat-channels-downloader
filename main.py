@@ -43,7 +43,7 @@ if getattr(sys, "frozen", False):
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
-from sphdl import config
+from sphdl import __version__, config
 from sphdl.logger import logger
 from sphdl.parser import load_and_extract
 from sphdl.pipeline import Pipeline
@@ -51,7 +51,7 @@ from sphdl.pipeline import Pipeline
 
 def banner():
     print("=" * 62)
-    print("  🎬 微信视频号下载器  sphdl v1.0")
+    print(f"  🎬 微信视频号下载器  sphdl v{__version__}")
     print("  嗅探 → 下载 → Isaac64 解密 → 保存")
     print("=" * 62)
 
