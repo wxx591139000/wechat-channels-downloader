@@ -14,7 +14,9 @@ mitmproxy 嗅探插件。四种嗅探策略（并行生效，哪个先抓到用�
      经原生 bridge IPC 返回（②看不见），必须靠 JS 钩子在页面内截获。
 """
 import json
+import queue as _queue
 import re
+import threading as _threading
 import time
 
 from mitmproxy import http
@@ -116,6 +118,14 @@ class SphAddon:
         self.bridge_count = 0      # 非心跳 bridge 数据条数
         self.hb_count = 0          # 心跳条数
         self.capture_count = 0     # 累计捕获数（含去重跳过前的命中）
+        # ---- 解析卸载（v1.2.2）：request() 在事件循环上只做 O(1) 的事，
+        #      json.loads + 递归扫描搬进独立线程 —— 无论 payload 多大、
+        #      循环多忙，捕获链路都不可能被本工具的代码堵死（24h 连续播放）
+        self.loop_delay_ms = 0     # 事件循环延迟（引擎每 5s 自测，供状态栏/心跳）
+        self._parse_q = _queue.Queue()
+        self._parse_worker = _threading.Thread(target=self._parse_worker_loop,
+                                               name="sphdl-parse", daemon=True)
+        self._parse_worker.start()
         self.media_regex = re.compile(r"get\s+media\(\)\{", re.MULTILINE)
         self.comment_regex = re.compile(
             r"async\s+finderGetCommentDetail\((\w+)\)\s*\{return(.*?)\s*\}\s*async",
@@ -126,6 +136,10 @@ class SphAddon:
 
     # ---------- ① JS 回调通道 + ④ bridge 钩子回传 ----------
     def request(self, flow: http.HTTPFlow):
+        """运行在 asyncio 事件循环上 —— 只做 O(1) 的事，绝不阻塞！
+        重解析（json.loads + 递归扫描 + 二次解码）卸载到独立工作线程，
+        保证无论 payload 多大、循环多忙，捕获链路不会被本工具自己的
+        代码堵死（24h 连续播放需求，v1.2.2）。"""
         req = flow.request
         # 顺带捕获微信 webview 的 UA：CDN 对含 MicroMessenger 的 UA 限速更宽，
         # 下载器复用（shared 同进程共享，无需回调）。
@@ -150,33 +164,37 @@ class SphAddon:
                 return
             self._touch_bridge(hb=False)
             # 字节预检（C 级快扫）：body 里根本没有 objectDesc 字样时，
-            # 跳过 json.loads + 递归扫描。视频号页面每秒会 POST 多条
-            # 无 objectDesc 的 bridge 调用（log/心跳/finderH5ExtTransfer 等），
-            # 逐条解析是事件循环的主要 CPU 开销——持续播放大视频时
-            # 循环拥塞 → 钩子回传变慢 → 页面 JS 队列堵死 → 捕获静默停摆
-            # （2026-08-25 朋友机 16:52-17:10 事故的主因之一）。
+            # 跳过 json.loads + 递归扫描（v1.2.1）。
             if b"object_desc" not in body and b"objectDesc" not in body:
                 flow.response = http.Response.make(
                     200, b"OK", {"Content-Type": "text/plain"})
                 return
-        try:
-            obj = json.loads(body)
-            od = find_object_desc_in_json(obj)
-            if od is None:
-                od = obj  # 可能直接就是 object_desc 本体
-            vd = extract_from_object_desc(od)
-            if vd:
-                self._handle(vd, source=source)
-            else:
-                cmd = obj.get("cmdName") if isinstance(obj, dict) else None
-                if cmd:
-                    logger.info(f"🌉 bridge捕获: cmdName={cmd} | object_desc=✗ 未含")
-                else:
-                    logger.debug(f"{source}：未识别到 media 信息")
-        except Exception as e:
-            logger.error(f"{source} 解析失败: {e}")
-        # 无论成功与否都回 OK，避免影响微信自身
+        # 先回 OK（微信侧不受任何延迟影响），再把 body 交给工作线程解析
         flow.response = http.Response.make(200, b"OK", {"Content-Type": "text/plain"})
+        self._parse_q.put((body, source))
+
+    def _parse_worker_loop(self):
+        """独立解析线程：json.loads + 递归扫描 + 字符串二次解码都在这里跑，
+        事件循环保持零解析开销。_handle 内的 on_capture（GUI 队列）与
+        pipeline.submit（队列）均线程安全；seen 去重集合仅本线程访问。"""
+        while True:
+            body, source = self._parse_q.get()
+            try:
+                obj = json.loads(body)
+                od = find_object_desc_in_json(obj)
+                if od is None:
+                    od = obj  # 可能直接就是 object_desc 本体
+                vd = extract_from_object_desc(od)
+                if vd:
+                    self._handle(vd, source=source)
+                else:
+                    cmd = obj.get("cmdName") if isinstance(obj, dict) else None
+                    if cmd:
+                        logger.info(f"🌉 bridge捕获: cmdName={cmd} | object_desc=✗ 未含")
+                    else:
+                        logger.debug(f"{source}：未识别到 media 信息")
+            except Exception as e:
+                logger.error(f"{source} 解析失败: {e}")
 
     def _touch_bridge(self, hb: bool):
         self.last_bridge_ts = time.time()

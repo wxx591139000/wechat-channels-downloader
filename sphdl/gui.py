@@ -70,6 +70,7 @@ class AppConfig:
         self.port = config.PROXY_PORT
         self.download_dir = str(config.DOWNLOAD_DIR)
         self.auto_proxy = True
+        self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载
         self._load()
 
     def _load(self):
@@ -78,6 +79,7 @@ class AppConfig:
             self.port = int(d.get("port", self.port))
             self.download_dir = d.get("download_dir", self.download_dir)
             self.auto_proxy = bool(d.get("auto_proxy", True))
+            self.auto_download = bool(d.get("auto_download", False))
         except Exception:
             pass
 
@@ -85,7 +87,8 @@ class AppConfig:
         try:
             CONFIG_FILE.write_text(json.dumps(
                 {"port": self.port, "download_dir": self.download_dir,
-                 "auto_proxy": self.auto_proxy},
+                 "auto_proxy": self.auto_proxy,
+                 "auto_download": self.auto_download},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -246,7 +249,40 @@ class SniffEngine:
             master.addons.add(*addons.default_addons())
             master.addons.add(self.app.addon)
             self.master = master
-            await master.run()
+            # 事件循环延迟自测（v1.2.2）：循环被同步操作阻塞时本任务
+            # 会被延迟唤醒——延迟即拥塞证据，超标打警告（兜底侦测）
+            wd = asyncio.ensure_future(self._loop_watchdog())
+            try:
+                await master.run()
+            finally:
+                wd.cancel()
+
+    async def _loop_watchdog(self):
+        """每 5s 自测一次事件循环延迟（asyncio.sleep 的唤醒延迟）。
+        正常情况下解析已在独立线程、循环应保持亚毫秒延迟；
+        延迟 >1s 说明有同步操作卡循环（第三方/意外路径），打警告。"""
+        import asyncio
+        interval = 5.0
+        warned = False
+        next_wake = time.time() + interval
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                now = time.time()
+                delay = now - next_wake
+                next_wake = now + interval
+                self.app.addon.loop_delay_ms = max(0, int(delay * 1000))
+                if delay > 1.0 and not warned:
+                    warned = True
+                    self.app.push_log(
+                        "warn",
+                        f"⚠️ 代理事件循环延迟 {delay:.1f}s（超过 1 秒）：循环拥塞，"
+                        "捕获回调可能被延迟。v1.2.2+ 重解析已在独立线程，"
+                        "正常不应出现——请保留日志反馈")
+                elif delay < 0.5:
+                    warned = False
+        except asyncio.CancelledError:
+            pass
 
         try:
             loop.run_until_complete(_amain())
@@ -340,10 +376,11 @@ class App:
         self._build_ui()
 
         # 下载管线 + 嗅探插件（管线独立于代理，停止嗅探后仍可下载/重试）
-        # GUI 模式：捕获只进列表，不自动下载（auto_download=False）
+        # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
+        # 捕获即自动入队（v1.2.2）
         self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
-                              auto_download=False)
+                              auto_download=self.cfg.auto_download)
 
         threading.Thread(target=self._check_ca, daemon=True).start()
 
@@ -419,6 +456,13 @@ class App:
         ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
                         ).pack(side="left", padx=14)
 
+        # 自动下载开关（v1.2.2）：开 = 捕获即自动入队下载；关（默认）= 手动点选
+        self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
+        ttk.Checkbutton(eng, text="⚙ 自动下载（捕获即入队）",
+                        variable=self.auto_dl_var,
+                        command=self._on_auto_dl_toggle
+                        ).pack(side="left", padx=14)
+
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
         # proxy_backup.json；无快照时兜底关闭代理）。引擎运行中点它会先确认。
         self.btn_restore_proxy = ttk.Button(eng, text="↩  恢复网络代理", width=13,
@@ -446,9 +490,14 @@ class App:
                    command=self._open_download_dir).pack(side="left", padx=4)
 
         # ===== ③ 下载列表 =====
-        listf = ttk.LabelFrame(main, text=" 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ",
-                               padding=4)
-        listf.pack(fill="both", expand=True, pady=8)
+        self.list_frame = ttk.LabelFrame(
+            main,
+            text=" 视频列表（捕获不会自动下载：选中后点『下载』或双击行） "
+            if not self.cfg.auto_download
+            else " 视频列表（自动下载已开启：捕获即入队下载） ",
+            padding=4)
+        self.list_frame.pack(fill="both", expand=True, pady=8)
+        listf = self.list_frame
 
         # 按钮行先 pack 到底部（若后 pack 默认落到顶部，会挤占表格空间）
         btns = ttk.Frame(listf)
@@ -555,6 +604,20 @@ class App:
                 self._update_status_bar()
 
         threading.Thread(target=_job, daemon=True).start()
+
+    def _on_auto_dl_toggle(self):
+        """自动下载开关（v1.2.2）：开 = 新捕获自动入队下载；
+        关（默认）= 捕获只进列表，用户选中后手动下载。"""
+        on = bool(self.auto_dl_var.get())
+        self.addon.auto_download = on
+        self.cfg.auto_download = on
+        self.cfg.save()
+        self.list_frame.config(
+            text=" 视频列表（自动下载已开启：捕获即入队下载） " if on
+            else " 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ")
+        self.push_log("info",
+            "自动下载：开 —— 新捕获的视频将立即自动加入下载队列" if on
+            else "自动下载：关 —— 请在列表选中视频后点「⬇ 下载选中」")
 
     def _toggle_engine(self):
         if self.engine.running:
@@ -1105,6 +1168,7 @@ class App:
                 f"💓 嗅探运行中 | 钩子数据 {_age(a.last_bridge_ts)} "
                 f"(心跳×{a.hb_count} / 数据×{a.bridge_count}) | "
                 f"流活动 {_age(a.last_stream_ts)} | "
+                f"循环延迟 {a.loop_delay_ms}ms | "
                 f"页面注入 {a.bridge_hooked_pages} 次 | 捕获 {a.capture_count} 个")
 
     def _poll(self):
