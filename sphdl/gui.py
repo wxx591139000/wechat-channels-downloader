@@ -70,7 +70,7 @@ class AppConfig:
         self.port = config.PROXY_PORT
         self.download_dir = str(config.DOWNLOAD_DIR)
         self.auto_proxy = True
-        self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载
+        self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载（v1.2.5 开关可开）
         self._load()
 
     def _load(self):
@@ -207,15 +207,33 @@ class SniffEngine:
         self.thread = threading.Thread(target=self._run, args=(opts,), daemon=True)
         self.thread.start()
 
-        # 等待端口真正监听（最多 5 秒）
-        for _ in range(50):
-            if not self._running:
-                break
+        # 等待端口真正监听（v1.2.5：5s 次数循环 → 30s 墙钟窗口）。
+        # 本机特性：loopback 无监听端口的 SYN 不回 RST 而是挂起，
+        # 每次探测占满 0.3s 超时——按次数循环会把窗口拉长到 ~20s
+        # 且无进度提示，故改为按墙钟计时（≤30s），每 10s 提示一次。
+        deadline = time.time() + 30
+        last_note = 0.0
+        while self._running and time.time() < deadline:
             if self._port_open(port):
                 self.app.push_log("ok", f"代理已监听 127.0.0.1:{port}，开始嗅探。请打开微信视频号播放视频")
                 return True
+            now = time.time()
+            if now - last_note >= 10:
+                self.app.push_log("info",
+                                   "等待代理就绪…（首次启动可能因杀毒扫描稍慢；"
+                                   "若持续等待请重启本工具后重试）")
+                last_note = now
             time.sleep(0.1)
-        self.app.push_log("error", f"代理启动失败（端口 {port} 可能被占用）")
+        # 失败诊断：区分「引擎线程已退出（查异常日志）」与「仍在启动」
+        # （替代误导性的「端口被占用」——2026-08-26 启动嗅探失败事故）
+        if self.thread and not self.thread.is_alive():
+            self.app.push_log("error",
+                               f"代理启动失败：引擎线程已退出——请查看上方"
+                               "「代理引擎异常退出 / 未捕获异常」日志行")
+        else:
+            self.app.push_log("error",
+                               f"代理启动失败：引擎仍在启动但 30 秒内端口 {port} 未就绪"
+                               "（若为首次解压启动，杀毒扫描可能拖慢首次加载，请再点一次『启动嗅探』）")
         self.stop()
         return False
 
@@ -233,12 +251,17 @@ class SniffEngine:
 
     def _run(self, opts):
         import asyncio
+        # 分阶段日志（v1.2.5）：引擎卡在哪一步/死在哪一步一眼可见
+        # （2026-08-26 启动嗅探失败事故——引擎线程静默死亡，无异常无 finally）
+        self.app.push_log("debug", "[引擎] 线程已启动，开始导入 mitmproxy")
         from mitmproxy import addons
         from mitmproxy.master import Master
+        self.app.push_log("debug", "[引擎] mitmproxy 导入完成")
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         self.loop = loop
+        self.app.push_log("debug", "[引擎] 事件循环已创建，进入 run_until_complete")
 
         # mitmproxy 11 的 Master.__init__ 及 addons 配置阶段都要求
         # 事件循环“正在运行”（内部调 asyncio.get_running_loop()）。
@@ -246,11 +269,12 @@ class SniffEngine:
         # 在 run_until_complete 内部执行（与 CLI 模式一致）。
         async def _amain():
             master = Master(opts)
+            self.app.push_log("debug", "[引擎] Master 已构造，开始监听")
             master.addons.add(*addons.default_addons())
             master.addons.add(self.app.addon)
             self.master = master
-            # 事件循环延迟自测（v1.2.2）：循环被同步操作阻塞时本任务
-            # 会被延迟唤醒——延迟即拥塞证据，超标打警告（兜底侦测）
+            # 事件循环延迟自测（v1.2.5，兜底侦测）：循环被同步操作阻塞时
+            # 本任务会被延迟唤醒——延迟即拥塞证据，>1s 打警告
             wd = asyncio.ensure_future(self._loop_watchdog())
             try:
                 await master.run()
@@ -259,8 +283,9 @@ class SniffEngine:
 
     async def _loop_watchdog(self):
         """每 5s 自测一次事件循环延迟（asyncio.sleep 的唤醒延迟）。
-        正常情况下解析已在独立线程、循环应保持亚毫秒延迟；
-        延迟 >1s 说明有同步操作卡循环（第三方/意外路径），打警告。"""
+        v1.2.5 起重解析已在独立线程（sphdl-parse），循环应保持亚毫秒
+        延迟；>1s 说明有同步操作卡循环（第三方/意外路径），打警告。
+        延迟值写入 addon.loop_delay_ms，供 60s 心跳日志展示。"""
         import asyncio
         interval = 5.0
         warned = False
@@ -277,7 +302,7 @@ class SniffEngine:
                     self.app.push_log(
                         "warn",
                         f"⚠️ 代理事件循环延迟 {delay:.1f}s（超过 1 秒）：循环拥塞，"
-                        "捕获回调可能被延迟。v1.2.2+ 重解析已在独立线程，"
+                        "捕获回调可能被延迟。v1.2.5 重解析已在独立线程，"
                         "正常不应出现——请保留日志反馈")
                 elif delay < 0.5:
                     warned = False
@@ -377,7 +402,7 @@ class App:
 
         # 下载管线 + 嗅探插件（管线独立于代理，停止嗅探后仍可下载/重试）
         # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
-        # 捕获即自动入队（v1.2.2）
+        # 捕获即自动入队（v1.2.5，状态持久化 config.json）
         self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download)
@@ -456,7 +481,8 @@ class App:
         ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
                         ).pack(side="left", padx=14)
 
-        # 自动下载开关（v1.2.2）：开 = 捕获即自动入队下载；关（默认）= 手动点选
+        # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
+        # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
         self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
         ttk.Checkbutton(eng, text="⚙ 自动下载（捕获即入队）",
                         variable=self.auto_dl_var,
@@ -490,11 +516,12 @@ class App:
                    command=self._open_download_dir).pack(side="left", padx=4)
 
         # ===== ③ 下载列表 =====
+        # 标题随「⚙ 自动下载」开关联动（v1.2.5）
         self.list_frame = ttk.LabelFrame(
             main,
-            text=" 视频列表（捕获不会自动下载：选中后点『下载』或双击行） "
-            if not self.cfg.auto_download
-            else " 视频列表（自动下载已开启：捕获即入队下载） ",
+            text=" 视频列表（自动下载已开启：捕获即入队下载） "
+            if self.cfg.auto_download
+            else " 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ",
             padding=4)
         self.list_frame.pack(fill="both", expand=True, pady=8)
         listf = self.list_frame
@@ -606,8 +633,11 @@ class App:
         threading.Thread(target=_job, daemon=True).start()
 
     def _on_auto_dl_toggle(self):
-        """自动下载开关（v1.2.2）：开 = 新捕获自动入队下载；
-        关（默认）= 捕获只进列表，用户选中后手动下载。"""
+        """「⚙ 自动下载」开关（v1.2.5）：开 = 新捕获立即自动入队下载；
+        关（默认）= 捕获只进列表，用户选中后手动下载。
+        状态持久化到 config.json；列表框标题随开关联动。
+        注意：只对开关打开后新捕获的视频生效，已在列表的
+        「待下载」条目不会自动补下（手动点选即可）。"""
         on = bool(self.auto_dl_var.get())
         self.addon.auto_download = on
         self.cfg.auto_download = on

@@ -116,6 +116,95 @@ def run_selftest(args):
         sys.exit(1)
 
 
+def run_selftest_threaded(args):
+    """线程自检：完全复刻 GUI 的引擎启动路径（后台线程 + 独立事件循环），
+    验证冻结环境下后台线程启动引擎不死亡（2026-08-26「启动嗅探失败」
+    事故的回归测试入口）。
+
+    ⚠️ 正确模式（v1.2.0/v1.2.1 行为，已反复验证）：mitmproxy 的首次
+    导入（含 mitmproxy_rs 原生库加载）必须发生在【引擎线程】内。
+    主线程预导入在冻结环境下会让引擎线程进事件循环时 C 级死亡
+    （无异常、无 finally、端口永不监听）——2026-08-26 对照实验坐实。
+    故本自检刻意【不在主线程导入任何 mitmproxy 模块】。
+    """
+    import socket
+    import threading
+    import time as _time
+
+    port = 18899  # 固定测试端口，避开正式 8899
+
+    state = {}
+
+    def _eng():
+        import asyncio
+        # mitmproxy 在引擎线程内首次导入（关键：原生库在引擎线程上
+        # 首次加载是安全路径；主线程不碰）
+        from mitmproxy import addons, options
+        from mitmproxy.master import Master
+        from sphdl.addon import SphAddon
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        state["loop"] = loop
+
+        async def _amain():
+            opts = options.Options(listen_host=config.PROXY_HOST,
+                                   listen_port=port, ssl_insecure=True)
+            master = Master(opts)
+            master.addons.add(*addons.default_addons())
+            master.addons.add(SphAddon(Pipeline(args.dir)))
+            state["master"] = master
+            await master.run()
+
+        try:
+            loop.run_until_complete(_amain())
+        except Exception as e:
+            state["error"] = e
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+            state["done"] = True
+
+    th = threading.Thread(target=_eng, daemon=True)
+    t0 = _time.time()
+    th.start()
+
+    ok = False
+    while _time.time() - t0 < 30:
+        try:
+            with socket.create_connection((config.PROXY_HOST, port),
+                                          timeout=0.5):
+                ok = True
+                break
+        except OSError:
+            _time.sleep(0.3)
+    if ok:
+        logger.ok(f"线程自检通过：引擎在后台线程 {_time.time() - t0:.1f}s 内"
+                  f"于 127.0.0.1:{port} 正常监听（冻结环境无死亡）")
+    else:
+        err = state.get("error")
+        logger.error("线程自检失败：30s 内端口未监听"
+                     + (f" | 引擎异常: {err}" if err
+                        else " | 引擎线程无异常（静默挂起/死亡——C 级死锁特征，"
+                             "请核对 mitmproxy 导入路径是否保持在引擎线程内）"))
+        sys.exit(1)
+    # 收尾：从主线程请求引擎退出
+    loop, master = state.get("loop"), state.get("master")
+    if loop and master:
+        try:
+            loop.call_soon_threadsafe(master.should_exit.set)
+        except Exception:
+            pass
+    for _ in range(50):
+        if state.get("done"):
+            break
+        _time.sleep(0.1)
+    if not state.get("done"):
+        logger.warn("引擎线程收尾超时（不影响自检结论）")
+
+
 def run_sniff(args):
     """嗅探模式：mitmproxy 代理 + 系统代理 + 微信流量捕获"""
     import asyncio
@@ -196,6 +285,10 @@ def main():
                     help="图形界面模式（推荐，双击 run.bat 即进入此模式）")
     ap.add_argument("--selftest", action="store_true",
                     help="自检：启动嗅探引擎数秒验证依赖/证书后退出")
+    ap.add_argument("--selftest-threaded", action="store_true",
+                    help="线程自检：引擎跑在后台线程（完全复刻 GUI 启动路径，"
+                         "含引擎线程内首次导入 mitmproxy），验证冻结环境不"
+                         "死亡后退出（2026-08-26 启动嗅探失败事故的回归测试）")
     ap.add_argument("-v", "--verbose", action="store_true", help="调试输出")
     args = ap.parse_args()
 
@@ -239,6 +332,8 @@ def main():
     banner()
     if args.selftest:
         run_selftest(args)
+    elif args.selftest_threaded:
+        run_selftest_threaded(args)
     elif args.paste or args.paste_text:
         run_paste(args)
     else:

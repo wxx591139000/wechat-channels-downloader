@@ -3,6 +3,9 @@
   1. JS 注入：对模拟的 web-finder JS 响应执行 _inject_js，验证钩子被正确替换
   2. 嗅探路由：模拟 API 响应 / JS 回调请求，验证能捕获 (url, decode_key)
   3. mitmproxy 进程内启动 + 代理可用性（asyncio）
+注意（v1.2.5）：request() 的重解析已卸载到独立工作线程 sphdl-parse，
+钩子只做 O(1) 的预检+回包+入队——断言前需等 worker 消费完队列
+（drain_addon()），API 直嗅路径（response()）仍是同步的。
 运行: python tests/test_sniff_smoke.py
 """
 import asyncio
@@ -58,6 +61,19 @@ class FakePipeline:
         self.items.append(vd)
 
 
+def drain_addon(addon, timeout=10.0):
+    """v1.2.5：request() 已把解析卸载到 sphdl-parse 工作线程，
+    入队是同步的（request 返回时 item 必已在队列或已被消费），
+    故轮询队列清空即代表 worker 已处理完；再留 50ms 收尾 _handle。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if addon._parse_q.qsize() == 0:
+            time.sleep(0.05)
+            return True
+        time.sleep(0.01)
+    return False
+
+
 pipe = FakePipeline()
 addon = SphAddon(pipe)
 
@@ -103,11 +119,13 @@ cb_body = (
 f3 = mk_flow("https://wxapp.tc.qq.com/res-downloader/wechat?type=1",
              method="POST", body=cb_body.encode("utf-8"))
 addon.request(f3)
+drain_addon(addon)
 check("JS 回调捕获", len(pipe.items) == 2 and pipe.items[1].decode_key == "777",
       f"items={len(pipe.items)}")
 
 # 2c. 去重
 addon.request(f3)
+drain_addon(addon)
 check("重复视频被去重", len(pipe.items) == 2)
 
 # 2d. 无关流量不受影响
@@ -145,6 +163,7 @@ bridge_payload = _json.dumps({
 f6 = mk_flow("http://127.0.0.1:8899/__sphdl/bridge", method="POST",
              body=bridge_payload.encode("utf-8"))
 addon.request(f6)
+drain_addon(addon)
 check("bridge 钩子捕获（嵌套 JSON 字符串解码）",
       len(pipe.items) == 3 and pipe.items[2].decode_key == "2136343393"
       and pipe.items[2].url.endswith("&token=xyz"),
@@ -155,6 +174,7 @@ f7 = mk_flow("http://127.0.0.1:8899/__sphdl/bridge", method="POST",
              body=_json.dumps({"url": "https://x", "cmdName": "getNetworkType",
                                "arguments": "{}", "result": "{}"}).encode("utf-8"))
 addon.request(f7)
+drain_addon(addon)
 check("无关 bridge 调用被忽略", len(pipe.items) == 3 and f7.response is not None)
 
 # ---------- 3. 代理启动 ----------

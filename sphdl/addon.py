@@ -118,14 +118,18 @@ class SphAddon:
         self.bridge_count = 0      # 非心跳 bridge 数据条数
         self.hb_count = 0          # 心跳条数
         self.capture_count = 0     # 累计捕获数（含去重跳过前的命中）
-        # ---- 解析卸载（v1.2.2）：request() 在事件循环上只做 O(1) 的事，
-        #      json.loads + 递归扫描搬进独立线程 —— 无论 payload 多大、
-        #      循环多忙，捕获链路都不可能被本工具的代码堵死（24h 连续播放）
-        self.loop_delay_ms = 0     # 事件循环延迟（引擎每 5s 自测，供状态栏/心跳）
+        # ---- 解析卸载（v1.2.5）：request() 在事件循环上只做 O(1) 的事，
+        #      json.loads + 递归扫描 + 字符串二次解码搬进独立工作线程
+        #      （sphdl-parse）——无论 payload 多大、循环多忙，捕获链路
+        #      都不可能再被本工具自己的代码堵死（24h+ 连续播放结构保证）
+        self.loop_delay_ms = 0     # 事件循环延迟（引擎每 5s 自测，供心跳日志）
         self._parse_q = _queue.Queue()
         self._parse_worker = _threading.Thread(target=self._parse_worker_loop,
                                                name="sphdl-parse", daemon=True)
         self._parse_worker.start()
+        self._seen_lock = _threading.Lock()  # seen 去重集：request 解析（worker 线程）
+        #                                    与 response API 直嗅（事件循环线程）
+        #                                    都会调 _handle，加锁防并发竞态
         self.media_regex = re.compile(r"get\s+media\(\)\{", re.MULTILINE)
         self.comment_regex = re.compile(
             r"async\s+finderGetCommentDetail\((\w+)\)\s*\{return(.*?)\s*\}\s*async",
@@ -136,10 +140,11 @@ class SphAddon:
 
     # ---------- ① JS 回调通道 + ④ bridge 钩子回传 ----------
     def request(self, flow: http.HTTPFlow):
-        """运行在 asyncio 事件循环上 —— 只做 O(1) 的事，绝不阻塞！
-        重解析（json.loads + 递归扫描 + 二次解码）卸载到独立工作线程，
-        保证无论 payload 多大、循环多忙，捕获链路不会被本工具自己的
-        代码堵死（24h 连续播放需求，v1.2.2）。"""
+        """运行在 mitmproxy asyncio 事件循环上 —— 只做 O(1) 的事，绝不阻塞！
+        重解析（json.loads + 递归扫描 + 字符串二次解码）卸载到独立工作线程
+        sphdl-parse（v1.2.5）：钩子 = 字节预检 + 回 OK + 入队，实测 5MB
+        payload 钩子耗时 ~4ms。无论 payload 多大、循环多忙，捕获链路
+        都不可能再被本工具自己的代码堵死（24h 连续播放需求）。"""
         req = flow.request
         # 顺带捕获微信 webview 的 UA：CDN 对含 MicroMessenger 的 UA 限速更宽，
         # 下载器复用（shared 同进程共享，无需回调）。
@@ -163,20 +168,25 @@ class SphAddon:
                     200, b"OK", {"Content-Type": "text/plain"})
                 return
             self._touch_bridge(hb=False)
-            # 字节预检（C 级快扫）：body 里根本没有 objectDesc 字样时，
-            # 跳过 json.loads + 递归扫描（v1.2.1）。
+            # 字节预检（C 级快扫，v1.2.1）：body 里根本没有 objectDesc 字样时
+            # 跳过解析入队。视频号页面每秒会 POST 多条无 objectDesc 的
+            # bridge 调用（log/心跳/finderH5ExtTransfer 等），零漏报
+            # （解析器只按这两个字面键搜索，凡能捕获的 body 必含字面键）。
             if b"object_desc" not in body and b"objectDesc" not in body:
                 flow.response = http.Response.make(
                     200, b"OK", {"Content-Type": "text/plain"})
                 return
-        # 先回 OK（微信侧不受任何延迟影响），再把 body 交给工作线程解析
+        # 先回 OK（微信侧不受任何延迟影响），再把 body 交给工作线程解析。
+        # 钩子全程 O(1)：预检 + 回包 + 入队，无 json.loads、无递归扫描。
         flow.response = http.Response.make(200, b"OK", {"Content-Type": "text/plain"})
         self._parse_q.put((body, source))
 
     def _parse_worker_loop(self):
-        """独立解析线程：json.loads + 递归扫描 + 字符串二次解码都在这里跑，
-        事件循环保持零解析开销。_handle 内的 on_capture（GUI 队列）与
-        pipeline.submit（队列）均线程安全；seen 去重集合仅本线程访问。"""
+        """独立解析线程（sphdl-parse）：json.loads + 递归扫描 + 字符串
+        二次解码都在这里跑，事件循环保持零解析开销。
+        _handle 内的 on_capture（GUI 队列）与 pipeline.submit（队列）
+        均线程安全；seen 去重集由 _seen_lock 保护（API 直嗅路径在
+        事件循环线程也会调 _handle）。"""
         while True:
             body, source = self._parse_q.get()
             try:
@@ -254,10 +264,11 @@ class SphAddon:
         # 去重优先用稳定视频 ID（md5sum/encfilekey）：同一视频反复播放
         # 会带新 token 产生新 URL，按 URL 去重会把同一视频重复下载多份
         key = vd.video_id or (vd.url, vd.decode_key)
-        if key in self.seen:
-            logger.debug("重复视频，跳过")
-            return
-        self.seen.add(key)
+        with self._seen_lock:
+            if key in self.seen:
+                logger.debug("重复视频，跳过")
+                return
+            self.seen.add(key)
         self.capture_count += 1
         self.last_capture_ts = time.time()
         logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")

@@ -1,6 +1,7 @@
 """Screenshot the sphdl GUI window via PrintWindow (works even if not foreground)."""
 import sys, time, ctypes
-import win32gui, win32ui, win32con, win32file
+import win32gui, win32ui, win32con
+from PIL import Image  # noqa: E402
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else r"E:\myHermesWorkSpace\wechat-channels-downloader\docs\screenshots\main.png"
 
@@ -29,10 +30,10 @@ def shoot(hwnd, path):
     bmp.CreateCompatibleBitmap(mfc_dc, w, h)
     save_dc.SelectObject(bmp)
     ok = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)  # PW_RENDERFULLCONTENT
-    hFile = win32file.CreateFile(path, win32con.GENERIC_WRITE, 0, None,
-                                 win32con.CREATE_ALWAYS, 0, None)
-    bmp.SaveBitmapFile(hFile)
-    win32file.CloseHandle(hFile)
+    # 读 DIB 位（32bpp BGRA，DIB section 自上而下）→ Pillow 存 PNG
+    bits = save_dc.GetBitmapBits(w * h * 4)
+    img = Image.frombuffer("RGB", (w, h), bits, "raw", "BGRX", 0, 1)
+    img.save(path)
     save_dc.Detach()
     mfc_dc.DeleteDC()
     win32gui.DeleteObject(bmp.GetHandle())
