@@ -7,6 +7,7 @@
 运行: python tests/test_offline.py
 """
 import shutil
+import socket
 import sys
 import tempfile
 import urllib.request
@@ -39,6 +40,26 @@ vd = load_and_extract(sample.read_text(encoding="utf-8"))
 check("wx_response.json 解析",
       vd is not None and vd.decode_key == "2136343393" and vd.url.startswith("https://finder.video.qq.com/"),
       f"key={vd.decode_key if vd else None}")
+check("wx_response.json 清晰度列表解析",
+      vd is not None and len(vd.renditions) >= 1
+      and vd.renditions[0]["url"] == vd.url,
+      f"renditions={len(vd.renditions) if vd else 0}")
+
+# 多清晰度：标准 url + 原始 full_url（含各自尺寸/码率/大小）
+multi = ('{"media":[{"url":"https://x/480.mp4","urlToken":"&t=1",'
+         '"file_size":1000000,"width":"480","height":"854","bitrate":"500000",'
+         '"full_url":"https://x/origin.mp4","full_file_size":10000000,'
+         '"full_width":"1080","full_height":"1920","full_bitrate":"5000000",'
+         '"decodeKey":"123"}]}')
+vdm = load_and_extract(multi)
+check("多清晰度解析（标准+原始）",
+      vdm is not None and len(vdm.renditions) == 2
+      and vdm.renditions[0]["url"].endswith("&t=1")
+      and vdm.renditions[0]["size"] == 1000000
+      and vdm.renditions[1]["url"] == "https://x/origin.mp4"
+      and vdm.renditions[1]["size"] == 10000000
+      and "1080x1920" in vdm.renditions[1]["label"],
+      f"renditions={[(r['url'][:28], r['size']) for r in (vdm.renditions if vdm else [])]}")
 
 camel = (
     '{"description":"测试视频","media":[{"url":"https://finder.video.qq.com/x?e=1",'
@@ -81,7 +102,10 @@ url = "https://raw.githubusercontent.com/Evil0ctal/WeChat-Channels-Video-File-De
 key = "2136343393"
 tmp = Path(tempfile.gettempdir()) / "wx_encrypted_sample.mp4"
 try:
-    print(f"  下载样例 {url}")
+    # urlretrieve 不带超时参数：网络异常时可能无限挂起（2026-08-26 实测），
+    # 这里给 socket 级超时兜底，超时按「网络不可用」跳过并清理半截文件
+    socket.setdefaulttimeout(15)
+    print(f"  下载样例 {url}", flush=True)
     urllib.request.urlretrieve(url, tmp)
     print(f"  样例大小: {tmp.stat().st_size / 1024 / 1024:.2f} MB")
     out = tmp.parent / "wx_decrypted_sample.mp4"
@@ -94,6 +118,7 @@ try:
         print(f"  解密产物: {out}")
 except Exception as e:
     print(f"  ⚠️ 跳过真实样例验证（网络不可用或样例缺失）: {e}")
+    tmp.unlink(missing_ok=True)
 
 print()
 print(f"结果: {PASS} 通过, {FAIL} 失败")

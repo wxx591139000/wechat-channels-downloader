@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -71,6 +71,7 @@ class AppConfig:
         self.download_dir = str(config.DOWNLOAD_DIR)
         self.auto_proxy = True
         self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载（v1.2.5 开关可开）
+        self.prefer_highest_quality = False  # 默认下载最高清晰度（原始画质优先）
         self._load()
 
     def _load(self):
@@ -80,6 +81,7 @@ class AppConfig:
             self.download_dir = d.get("download_dir", self.download_dir)
             self.auto_proxy = bool(d.get("auto_proxy", True))
             self.auto_download = bool(d.get("auto_download", False))
+            self.prefer_highest_quality = bool(d.get("prefer_highest_quality", False))
         except Exception:
             pass
 
@@ -88,7 +90,8 @@ class AppConfig:
             CONFIG_FILE.write_text(json.dumps(
                 {"port": self.port, "download_dir": self.download_dir,
                  "auto_proxy": self.auto_proxy,
-                 "auto_download": self.auto_download},
+                 "auto_download": self.auto_download,
+                 "prefer_highest_quality": self.prefer_highest_quality},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -110,6 +113,7 @@ class Record:
     progress: int = 0
     is_image: bool = False
     video_id: str = ""   # 稳定视频标识（md5sum），用于跨会话去重
+    renditions: list = field(default_factory=list)  # [{url,size,width,height,bitrate,label}]
 
 
 class RecordStore:
@@ -123,10 +127,12 @@ class RecordStore:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             for d in raw[:MAX_RECORDS]:
-                r = Record(**{k: d.get(k, "") for k in
-                              ("id", "title", "url", "decode_key", "size",
-                               "source", "created", "status", "file", "error",
-                               "progress", "is_image", "video_id")})
+                kw = {k: d.get(k, "") for k in
+                      ("id", "title", "url", "decode_key", "size",
+                       "source", "created", "status", "file", "error",
+                       "progress", "is_image", "video_id")}
+                kw["renditions"] = d.get("renditions") or []
+                r = Record(**kw)
                 # 上次退出时正在处理中的，标记为失败；
                 # "waiting"（还没开始下载）保持不变，重启后仍可点选下载
                 if r.status in ("pending", "downloading", "decrypting"):
@@ -204,6 +210,13 @@ class SniffEngine:
 
         self.port = port
         self._running = True
+        # 注入 JS 的 bridge 回传端口必须与本次启动端口一致，否则改端口后
+        # 钩子仍回传 8899，bridge 捕获静默失效（2026-08-26 审查发现）
+        if self.app.addon is not None:
+            try:
+                self.app.addon.set_bridge_port(port)
+            except Exception:
+                pass
         self.thread = threading.Thread(target=self._run, args=(opts,), daemon=True)
         self.thread.start()
 
@@ -396,6 +409,7 @@ class App:
         self._dirty = False
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
+        self._rid_seq = 0              # 捕获记录 id 递增序号（防同秒碰撞）
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
         self._last_hb_log = 0.0
@@ -570,6 +584,11 @@ class App:
                    command=lambda: self._retry()).pack(side="left", padx=4)
         ttk.Button(btns, text="↻ 重新下载", width=10,
                    command=lambda: self._redownload_selected()).pack(side="left", padx=4)
+        ttk.Button(btns, text="清晰度", width=8,
+                   command=lambda: self._pick_quality()).pack(side="left", padx=4)
+        self.prefer_hq_var = tk.BooleanVar(value=self.cfg.prefer_highest_quality)
+        ttk.Checkbutton(btns, text="首选原始画质", variable=self.prefer_hq_var,
+                        command=self._on_prefer_hq_toggle).pack(side="left", padx=8)
         ttk.Button(btns, text="打开文件", width=9,
                    command=lambda: self._open_file()).pack(side="left", padx=4)
         ttk.Button(btns, text="打开文件夹", width=9,
@@ -798,13 +817,84 @@ class App:
     def _submit_record(self, rid):
         """把一条记录提交到下载管线（waiting/failed → pending）。"""
         rec = self.store.items[rid]
-        vd = VideoData(url=rec.url, decode_key=rec.decode_key, size=rec.size,
+        url, size = rec.url, rec.size
+        # 「首选原始画质」开启时，自动选用可用版本中最大的（原始/全尺寸优先）
+        if self.cfg.prefer_highest_quality:
+            rds = rec.renditions or []
+            if rds:
+                best = max(rds, key=lambda r: int(r.get("size") or 0))
+                if int(best.get("size") or 0) > size:
+                    url, size = best["url"], int(best.get("size") or 0)
+                    rec.url, rec.size = url, size
+                    # 新 url 也要映射到本记录（下载事件按 vd.url 回写状态行）
+                    self._url_to_rid[rec.url] = rid
+                    self._dirty = True
+                    self.push_log("info", f"首选原始画质: {best.get('label')}")
+        vd = VideoData(url=url, decode_key=rec.decode_key, size=size,
                        description=rec.title, is_image=rec.is_image)
         self.store.update(rid, status="pending", progress=0, error="")
         self._dirty = True
         self.pipeline.submit(vd)
         self._update_row(rid)
         return True
+
+    def _on_prefer_hq_toggle(self):
+        """「首选原始画质」开关：开 = 下载时自动选最大清晰度版本。"""
+        self.cfg.prefer_highest_quality = bool(self.prefer_hq_var.get())
+        self.cfg.save()
+        self.push_log("info", "首选原始画质：开 —— 下载将自动选用最大清晰度版本"
+                      if self.cfg.prefer_highest_quality
+                      else "首选原始画质：关 —— 使用捕获到的默认版本（可点『清晰度』手动切换）")
+
+    def _pick_quality(self):
+        """为选中记录选择清晰度（标准/原始等），选后立即加入下载队列。"""
+        rid = self._selected_rid()
+        if not rid:
+            messagebox.showinfo("提示", "请先选中一条视频记录")
+            return
+        rec = self.store.items[rid]
+        renditions = rec.renditions or []
+        if len(renditions) <= 1:
+            messagebox.showinfo(
+                "提示", "该记录只有 1 个清晰度版本（微信只返回了默认版，"
+                "或这是旧版本捕获的记录）。\n直接点『下载选中』即可。")
+            return
+        # 预选当前记录正在使用的 url
+        preselect = 0
+        for i, rd in enumerate(renditions):
+            if rd.get("url") == rec.url:
+                preselect = i
+                break
+        top = tk.Toplevel(self.root)
+        top.title("选择清晰度")
+        top.transient(self.root)
+        top.grab_set()
+        ttk.Label(top, text=(rec.title or "")[:40], wraplength=320,
+                  foreground="#6b7280").pack(anchor="w", padx=12, pady=(10, 4))
+        var = tk.IntVar(value=preselect)
+        for i, rd in enumerate(renditions):
+            ttk.Radiobutton(top, text=rd.get("label") or "版本", variable=var,
+                            value=i).pack(anchor="w", padx=16, pady=2)
+
+        def _apply_and_download():
+            i = var.get()
+            rd = renditions[i]
+            if rd.get("url") != rec.url:
+                # 更新记录的下载来源；旧/新 url 都映射到本记录（去重 + 事件回写）
+                self._url_to_rid[rec.url] = rid
+                rec.url = rd["url"]
+                rec.size = int(rd.get("size") or 0)
+                self._url_to_rid[rec.url] = rid
+                self._dirty = True
+                self.push_log("ok", f"已切换清晰度: {rd.get('label')}，开始下载")
+            top.destroy()
+            self._submit_record(rid)
+
+        btns2 = ttk.Frame(top)
+        btns2.pack(pady=(8, 10))
+        ttk.Button(btns2, text="下载该清晰度", command=_apply_and_download
+                   ).pack(side="left", padx=6)
+        ttk.Button(btns2, text="取消", command=top.destroy).pack(side="left", padx=6)
 
     def _download_selected(self):
         rids = self._selected_rids()
@@ -1066,6 +1156,10 @@ class App:
                            tags=(STATUS_TAG.get(r.status, "tag_pending"),))
 
     def _remove_row(self, rid):
+        # 同步清理 url 映射（可能有多条：切换清晰度后旧/新 url 都映射本记录）。
+        # 否则删除记录后同 URL 再捕获会被误判「重复链接」而无法重新入列表。
+        for k in [k for k, v in self._url_to_rid.items() if v == rid]:
+            self._url_to_rid.pop(k, None)
         self.store.remove(rid)
         iid = self._row_of.pop(rid, None)
         if iid and self.tree.exists(iid):
@@ -1103,13 +1197,14 @@ class App:
             if vd.url in self._url_to_rid:
                 self.push_log("info", f"重复链接，跳过: {(vd.description or '')[:30]}")
                 return
-            rid = time.strftime("%m%d_%H%M%S") + "_%03d" % (
-                (hash(vd.url) % 900) + 100)
+            rid = time.strftime("%m%d_%H%M%S") + "_" + str(self._rid_seq).zfill(4)
+            self._rid_seq += 1
             rec = Record(
                 id=rid, title=(vd.description or "")[:60], url=vd.url,
                 decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
-                status="waiting", is_image=vd.is_image, video_id=vd.video_id)
+                status="waiting", is_image=vd.is_image, video_id=vd.video_id,
+                renditions=vd.renditions or [])
             self.store.add(rec)
             self._add_row(rec)
             self._dirty = True
@@ -1131,8 +1226,15 @@ class App:
             elif kind == "decrypting":
                 self.store.update(rid, status="decrypting")
             elif kind == "done":
+                actual = 0
+                try:
+                    if item[2] and os.path.exists(item[2]):
+                        actual = os.path.getsize(item[2])
+                except Exception:
+                    pass
                 self.store.update(rid, status="done", progress=100,
-                                  file=item[2], error="")
+                                  file=item[2], error="",
+                                  size=actual or self.store.items[rid].size)
             elif kind == "failed":
                 self.store.update(rid, status="failed", error=item[2])
             elif kind == "cancelled":

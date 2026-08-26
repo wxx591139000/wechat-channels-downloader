@@ -217,6 +217,8 @@ def run_sniff(args):
 
     pipe = Pipeline(args.dir)
     addon = SphAddon(pipe)
+    # 注入 JS 的 bridge 回传端口跟随 CLI 端口（-p），否则改端口后钩子失效
+    addon.set_bridge_port(args.port)
 
     opts = options.Options(
         listen_host=config.PROXY_HOST,

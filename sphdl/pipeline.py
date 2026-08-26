@@ -2,6 +2,7 @@
 视频处理管线：嗅探到视频 → 后台线程下载 → 解密 → 保存到下载目录
 """
 import queue
+import hashlib
 import re
 import threading
 import time
@@ -12,6 +13,7 @@ from .decryptor import decrypt_file, is_encrypted
 from .downloader import MpdDownloader, DownloadCancelled, download_m3u8
 from .entities import VideoData
 from .logger import logger
+from .util import mask_url
 
 
 def sanitize_name(name: str) -> str:
@@ -98,17 +100,20 @@ class Pipeline:
         try:
             self._emit("start", vd)
             ts = time.strftime("%m%d_%H%M%S")
+            # 文件名唯一化：同一秒内捕获的多个视频/同一描述不再互相覆盖
+            # （2026-08-26 审查发现：原文件名只有 描述+秒级时间戳）
+            uid = hashlib.md5((vd.video_id or vd.url or "").encode("utf-8")).hexdigest()[:8]
             base = sanitize_name(vd.description) if vd.description else "wechat_video"
             ext = ".png" if vd.is_image else ".mp4"
 
             # 1) 下载
             if vd.url.endswith(".m3u8") or "format=hls" in vd.url:
                 logger.info("检测到 M3U8 流媒体，开始下载分片...")
-                raw = self.download_dir / f"{base}_{ts}.mp4.part"
+                raw = self.download_dir / f"{base}_{ts}_{uid}.mp4.part"
                 ok = download_m3u8(vd.url, str(raw), stop_event=self._stop_event)
             else:
-                raw = self.download_dir / f"{base}_{ts}.enc"
-                logger.info(f"开始下载 ({vd.size / 1024 / 1024:.1f} MB): {vd.description or vd.url[:70]}")
+                raw = self.download_dir / f"{base}_{ts}_{uid}.enc"
+                logger.info(f"开始下载 ({vd.size / 1024 / 1024:.1f} MB): {vd.description or mask_url(vd.url)}")
                 def _progress(done, total):
                     self._emit("progress", vd, done, total)
                 dl = MpdDownloader(vd.url, str(raw), expected_size=vd.size,
@@ -117,7 +122,7 @@ class Pipeline:
                 self._current_dl = dl
                 ok = dl.start()
             if not ok:
-                logger.error(f"下载失败: {vd.url[:80]}")
+                logger.error(f"下载失败: {mask_url(vd.url)}")
                 self._emit("failed", vd, "下载失败（链接可能已过期）")
                 return
 
@@ -125,7 +130,7 @@ class Pipeline:
             head = raw.read_bytes()[:64]
             if vd.decode_key and is_encrypted(head):
                 self._emit("decrypting", vd)
-                final = self.download_dir / f"{base}_{ts}{ext}"
+                final = self.download_dir / f"{base}_{ts}_{uid}{ext}"
                 out = decrypt_file(str(raw), vd.decode_key, str(final))
                 if out is None:
                     logger.error("解密失败：文件头未变成 ftyp。请确认 decode_key 与 url 来自同一次 API 响应")
@@ -136,7 +141,7 @@ class Pipeline:
                 logger.ok(f"下载并解密完成: {final}  ({final.stat().st_size / 1024 / 1024:.1f} MB)")
                 self._emit("done", vd, str(final))
             else:
-                final = self.download_dir / f"{base}_{ts}{ext}"
+                final = self.download_dir / f"{base}_{ts}_{uid}{ext}"
                 raw.replace(final)
                 logger.ok(f"下载完成（无需解密）: {final}  ({final.stat().st_size / 1024 / 1024:.1f} MB)")
                 self._emit("done", vd, str(final))

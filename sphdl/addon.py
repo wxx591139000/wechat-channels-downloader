@@ -25,6 +25,7 @@ from . import config
 from . import shared
 from .logger import logger
 from .parser import extract_from_object_desc, find_object_desc_in_json
+from .util import mask_url
 
 # ④ 注入到 HTML 的 JS：包装 WeixinJSBridge.invoke，
 #    每次调用的参数与回调结果 POST 到本机代理（addon request() 截获）。
@@ -136,7 +137,20 @@ class SphAddon:
             re.MULTILINE | re.DOTALL,
         )
         self.bridge_js = _BRIDGE_JS_TEMPLATE.replace("__PORT__", str(config.PROXY_PORT))
+        self._bridge_port = config.PROXY_PORT  # 注入 JS 实际使用的端口（可被 set_bridge_port 覆盖）
         logger.ok("嗅探插件已就绪")
+
+    def set_bridge_port(self, port: int):
+        """引擎以非默认端口启动时重建注入 JS（否则钩子仍回传 8899，
+        bridge 捕获会静默失效——2026-08-26 审查发现）。"""
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            return
+        if port != self._bridge_port:
+            self.bridge_js = _BRIDGE_JS_TEMPLATE.replace("__PORT__", str(port))
+            self._bridge_port = port
+            logger.debug(f"bridge 钩子端口已更新为 {port}")
 
     # ---------- ① JS 回调通道 + ④ bridge 钩子回传 ----------
     def request(self, flow: http.HTTPFlow):
@@ -152,7 +166,7 @@ class SphAddon:
             ua = (req.headers.get("User-Agent") or "").strip()
             if "micromessenger" in ua.lower():
                 shared.set_wechat_ua(ua)
-        logger.debug(f"📡 → {req.method} {req.host}{req.path[:100]}")
+        logger.debug(f"📡 → {req.method} {req.host}{mask_url(req.path)}")
         is_js_callback = req.host.endswith(config.CALLBACK_HOST) and config.CALLBACK_PATH in req.path
         is_bridge = config.BRIDGE_CALLBACK_PATH in req.path
         if not (is_js_callback or is_bridge):
@@ -219,7 +233,7 @@ class SphAddon:
         if resp is None:
             return
         logger.debug(
-            f"📡 ← {resp.status_code} {flow.request.host}{flow.request.path[:80]} | "
+            f"📡 ← {resp.status_code} {flow.request.host}{mask_url(flow.request.path)} | "
             f"{len(resp.content or b'')}B | {(resp.headers.get('content-type') or '')[:40]}"
         )
         if resp.status_code not in (200, 206):

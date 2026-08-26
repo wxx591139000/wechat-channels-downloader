@@ -13,6 +13,50 @@ from typing import Any, Optional
 from .entities import VideoData
 
 
+def _mb(size):
+    try:
+        return f"{int(size) / 1048576:.1f}MB"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _dims(w, h):
+    try:
+        if float(w) > 0 and float(h) > 0:
+            return f"{int(float(w))}x{int(float(h))}"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def _kbps(bitrate):
+    try:
+        if int(bitrate) > 0:
+            return f"{int(bitrate) // 1000}kbps"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
+def _make_rendition(m: dict, *, url_key, size_key, w_key, h_key, bit_key, label,
+                    token=None):
+    """从 media 条目的 标准(url) 或 原始(full_url) 字段构造清晰度候选。
+    token 只应拼到同一条 media 自己的标准 url（url 以 ? 结尾、token 以 & 开头）；
+    原始 full_url 自带完整鉴权参数，不拼。"""
+    url = str(_pick(m, url_key) or "").strip()
+    if not url:
+        return None
+    if token and "token=" not in url and not url.endswith(str(token)):
+        url = url + str(token)
+    size = int(_pick(m, size_key) or 0)
+    detail = " / ".join(x for x in
+                        (_dims(_pick(m, w_key), _pick(m, h_key)),
+                         _kbps(_pick(m, bit_key)), _mb(size)) if x)
+    return {"url": url, "size": size, "label": label + (f"（{detail}）" if detail else ""),
+            "width": _pick(m, w_key) or 0, "height": _pick(m, h_key) or 0,
+            "bitrate": _pick(m, bit_key) or 0}
+
+
 def _pick(mapping: dict, *names):
     """按多个候选键取值（第一个非空生效）"""
     for name in names:
@@ -45,9 +89,27 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
         if first is None:
             return None
 
+        # 收集全部清晰度：每条 media 的标准 url + 原始 full_url
+        renditions = []
+        for m in media_list:
+            if not isinstance(m, dict):
+                continue
+            r = _make_rendition(m, url_key="url", size_key="file_size",
+                                w_key="width", h_key="height", bit_key="bitrate",
+                                label="标准", token=_pick(m, "urlToken", "url_token"))
+            if r:
+                renditions.append(r)
+            r_full = _make_rendition(m, url_key="full_url", size_key="full_file_size",
+                                     w_key="full_width", h_key="full_height",
+                                     bit_key="full_bitrate", label="原始")
+            if r_full:
+                renditions.append(r_full)
+
         url = str(_pick(first, "url") or "")
         token = _pick(first, "urlToken", "url_token") or ""
-        if token:
+        # url 可能已自带完整 token（微信签名的完整 URL）——此时不能再拼
+        # url_token，否则参数重复（历史 bug：样例 url 754 字符、拼接后 1271）。
+        if token and "token=" not in url and not url.endswith(str(token)):
             url = url + str(token)  # token 需要拼到 url 末尾
 
         decode_key = _pick(first, "decode_key", "decodeKey") or ""
@@ -79,6 +141,7 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
             is_image=is_image,
             cover_url=str(_pick(first, "coverUrl", "cover_url") or ""),
             video_id=video_id,
+            renditions=renditions,
             raw=obj,
         )
     except Exception:

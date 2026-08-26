@@ -15,6 +15,7 @@ import urllib3
 from .config import USER_AGENT
 from . import shared
 from .logger import logger
+from .util import mask_url
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -271,7 +272,7 @@ def download_m3u8(m3u8_url: str, save_path: str, stop_event=None) -> bool:
                         raise
                     except Exception:
                         if attempt == 2:
-                            logger.error(f"分片 {i} 下载失败: {u}")
+                            logger.error(f"分片 {i} 下载失败: {mask_url(u)}")
                             return False
                         time.sleep(1)
                 if (i + 1) % 10 == 0 or i + 1 == len(ts_urls):
