@@ -620,6 +620,9 @@ class App:
         self.auto_scroll_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(logf, text="自动滚动", variable=self.auto_scroll_var
                         ).pack(anchor="e", pady=(4, 0))
+        ttk.Button(logf, text="📋 复制日志", width=10,
+                   command=self._copy_log).pack(side="right", anchor="e",
+                                                pady=(4, 0), padx=(0, 4))
         ttk.Button(logf, text="清空", width=6,
                    command=self._clear_log).pack(side="right", anchor="e", pady=(4, 0))
 
@@ -1142,6 +1145,24 @@ class App:
         self.log_text.delete("1.0", "end")
         self.log_text.config(state="disabled")
 
+    def _copy_log(self):
+        """把日志区内容（含版本/时间头）复制到剪贴板，便于发给开发者排查。"""
+        try:
+            body = self.log_text.get("1.0", "end-1c")
+            header = (f"sphdl v{__version__}  |  {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                      f"  |  {platform.system()} {platform.release()}\n"
+                      f"引擎: {'运行中' if self.engine.running else '已停止'}"
+                      f" | 捕获 {self.addon.capture_count} | "
+                      f"循环延迟 {self.addon.loop_delay_ms}ms\n"
+                      + "-" * 56 + "\n")
+            text = header + body
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            n = len(body.splitlines())
+            self.push_log("ok", f"已复制 {n} 行日志到剪贴板（可直接粘贴发给开发者）")
+        except Exception as e:
+            self.push_log("error", f"复制日志失败: {e}")
+
     # ---------------- 树刷新 ----------------
     def _row_values(self, r: Record):
         st = STATUS_TEXT.get(r.status, r.status)
@@ -1236,15 +1257,30 @@ class App:
             elif kind == "decrypting":
                 self.store.update(rid, status="decrypting")
             elif kind == "done":
+                rec = self.store.items[rid]
                 actual = 0
                 try:
                     if item[2] and os.path.exists(item[2]):
                         actual = os.path.getsize(item[2])
                 except Exception:
                     pass
+                # 元数据大小（最高档）仍保存在 renditions 里，用于对比提示
+                meta = 0
+                if rec.renditions:
+                    meta = int(rec.renditions[0].get("size") or 0)
+                if meta and actual and actual < meta * 0.5:
+                    self.push_log(
+                        "warn",
+                        f"实际大小 {format_size(actual)} 仅为微信元数据"
+                        f"（{format_size(meta)}，对应最高画质）的"
+                        f"{actual * 100 // meta}%。\n"
+                        "下载地址是微信客户端当时播放的档位，文件完整可播。"
+                        "若想下载更高画质：在微信视频号播放器里把画质调到"
+                        "最高（或保证网络良好）后重新播放，再重新捕获；"
+                        "若抓包含『原始画质』选项，可用『清晰度』切换。")
                 self.store.update(rid, status="done", progress=100,
                                   file=item[2], error="",
-                                  size=actual or self.store.items[rid].size)
+                                  size=actual or rec.size)
             elif kind == "failed":
                 self.store.update(rid, status="failed", error=item[2])
             elif kind == "cancelled":
