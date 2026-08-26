@@ -281,34 +281,12 @@ class SniffEngine:
             finally:
                 wd.cancel()
 
-    async def _loop_watchdog(self):
-        """每 5s 自测一次事件循环延迟（asyncio.sleep 的唤醒延迟）。
-        v1.2.5 起重解析已在独立线程（sphdl-parse），循环应保持亚毫秒
-        延迟；>1s 说明有同步操作卡循环（第三方/意外路径），打警告。
-        延迟值写入 addon.loop_delay_ms，供 60s 心跳日志展示。"""
-        import asyncio
-        interval = 5.0
-        warned = False
-        next_wake = time.time() + interval
-        try:
-            while True:
-                await asyncio.sleep(interval)
-                now = time.time()
-                delay = now - next_wake
-                next_wake = now + interval
-                self.app.addon.loop_delay_ms = max(0, int(delay * 1000))
-                if delay > 1.0 and not warned:
-                    warned = True
-                    self.app.push_log(
-                        "warn",
-                        f"⚠️ 代理事件循环延迟 {delay:.1f}s（超过 1 秒）：循环拥塞，"
-                        "捕获回调可能被延迟。v1.2.5 重解析已在独立线程，"
-                        "正常不应出现——请保留日志反馈")
-                elif delay < 0.5:
-                    warned = False
-        except asyncio.CancelledError:
-            pass
-
+        # 真正运行事件循环：Master 构造 / 监听 / run 全部在
+        # run_until_complete 内执行（v1.2.1 结构）。
+        # ⚠️ v1.2.2 事故根因：本 try/except/finally 曾随 _loop_watchdog
+        # 的插入被误并入该协程（缩进不变、位置后移），导致 _run 定义完
+        # 协程后直接返回——引擎线程无异常、无 finally 静默退出，
+        # 「启动嗅探」30s 后必报「引擎线程已退出」。
         try:
             loop.run_until_complete(_amain())
         except Exception as e:
@@ -349,6 +327,34 @@ class SniffEngine:
                                        "⚠️ 恢复系统代理失败，请到 设置→网络和 Internet→代理 手动关闭")
                 self.pm = None
             self.app.push_event(("engine_state", False))
+
+    async def _loop_watchdog(self):
+        """每 5s 自测一次事件循环延迟（asyncio.sleep 的唤醒延迟）。
+        v1.2.5 起重解析已在独立线程（sphdl-parse），循环应保持亚毫秒
+        延迟；>1s 说明有同步操作卡循环（第三方/意外路径），打警告。
+        延迟值写入 addon.loop_delay_ms，供 60s 心跳日志展示。"""
+        import asyncio
+        interval = 5.0
+        warned = False
+        next_wake = time.time() + interval
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                now = time.time()
+                delay = now - next_wake
+                next_wake = now + interval
+                self.app.addon.loop_delay_ms = max(0, int(delay * 1000))
+                if delay > 1.0 and not warned:
+                    warned = True
+                    self.app.push_log(
+                        "warn",
+                        f"⚠️ 代理事件循环延迟 {delay:.1f}s（超过 1 秒）：循环拥塞，"
+                        "捕获回调可能被延迟。v1.2.5 重解析已在独立线程，"
+                        "正常不应出现——请保留日志反馈")
+                elif delay < 0.5:
+                    warned = False
+        except asyncio.CancelledError:
+            pass
 
     def stop(self):
         if not self._running:
