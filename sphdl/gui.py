@@ -114,6 +114,7 @@ class Record:
     is_image: bool = False
     video_id: str = ""   # 稳定视频标识（md5sum），用于跨会话去重
     renditions: list = field(default_factory=list)  # [{url,size,width,height,bitrate,label}]
+    quality_note: str = ""  # 清晰度说明（spec 档位阶梯，仅展示用）
 
 
 class RecordStore:
@@ -130,7 +131,7 @@ class RecordStore:
                 kw = {k: d.get(k, "") for k in
                       ("id", "title", "url", "decode_key", "size",
                        "source", "created", "status", "file", "error",
-                       "progress", "is_image", "video_id")}
+                       "progress", "is_image", "video_id", "quality_note")}
                 kw["renditions"] = d.get("renditions") or []
                 r = Record(**kw)
                 # 上次退出时正在处理中的，标记为失败；
@@ -822,8 +823,11 @@ class App:
         if self.cfg.prefer_highest_quality:
             rds = rec.renditions or []
             if rds:
-                best = max(rds, key=lambda r: int(r.get("size") or 0))
-                if int(best.get("size") or 0) > size:
+                best = max(rds, key=lambda r: (int(r.get("size") or 0),
+                                               1 if "原始" in r.get("label", "") else 0))
+                best_size = int(best.get("size") or 0)
+                is_orig = "原始" in best.get("label", "")
+                if best["url"] != url and (best_size > size or (best_size == 0 and is_orig)):
                     url, size = best["url"], int(best.get("size") or 0)
                     rec.url, rec.size = url, size
                     # 新 url 也要映射到本记录（下载事件按 vd.url 回写状态行）
@@ -855,9 +859,15 @@ class App:
         rec = self.store.items[rid]
         renditions = rec.renditions or []
         if len(renditions) <= 1:
-            messagebox.showinfo(
-                "提示", "该记录只有 1 个清晰度版本（微信只返回了默认版，"
-                "或这是旧版本捕获的记录）。\n直接点『下载选中』即可。")
+            note = rec.quality_note or ""
+            msg = "该记录只有 1 个可下载地址。"
+            if note:
+                msg += f"\n{note}，但微信未下发其他清晰度的下载链接" \
+                       "（原始画质 fullUrl 为空）。"
+            else:
+                msg += "\n微信未提供其他清晰度版本（或这是旧版本捕获的记录）。"
+            msg += "\n下载后列表会显示实际文件大小，以实际为准。"
+            messagebox.showinfo("提示", msg)
             return
         # 预选当前记录正在使用的 url
         preselect = 0
@@ -1204,7 +1214,7 @@ class App:
                 decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
-                renditions=vd.renditions or [])
+                renditions=vd.renditions or [], quality_note=vd.quality_note or "")
             self.store.add(rec)
             self._add_row(rec)
             self._dirty = True

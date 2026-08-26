@@ -71,6 +71,30 @@ check("camelCase objectDesc 解析",
       and vd2.size == 999 and vd2.cover_url.endswith(".png"),
       f"url_tail={vd2.url[-8:] if vd2 else None}")
 
+# camelCase + fullUrl（JS 回调/bridge objectDesc 的常见形态）：
+# 标准 fileSize + 原始 fullUrl/fullFileSize 都要解析出来
+camel_full = ('{"description":"测试","media":[{"url":"https://x/480.mp4",'
+              '"urlToken":"&t=2","fileSize":1000000,"width":"480","height":"854",'
+              '"bitrate":"500000","fullUrl":"https://x/origin.mp4",'
+              '"fullFileSize":8000000,"fullWidth":"1080","fullHeight":"1920",'
+              '"fullBitrate":"4000000","decodeKey":"123",'
+              '"spec":[{"file_format":"a","level_order":100,"width":1080,'
+              '"height":1920,"video_bitrate":4000},'
+              '{"file_format":"b","level_order":200,"width":576,"height":1024}]}]}')
+vdf = load_and_extract(camel_full)
+check("camelCase fullUrl 解析（标准+原始）",
+      vdf is not None and len(vdf.renditions) == 2
+      and vdf.renditions[0]["size"] == 1000000
+      and vdf.renditions[0]["url"].endswith("&t=2")
+      and vdf.renditions[1]["url"] == "https://x/origin.mp4"
+      and vdf.renditions[1]["size"] == 8000000
+      and "1080x1920" in vdf.renditions[1]["label"],
+      f"renditions={[(r['url'][:26], r['size']) for r in (vdf.renditions if vdf else [])]}")
+check("quality_note 从 spec 生成",
+      vdf is not None and "2 档" in (vdf.quality_note or "")
+      and "1080x1920" in (vdf.quality_note or ""),
+      vdf.quality_note if vdf else "")
+
 img = '{"media":[{"url":"https://x/i.jpg","decode_key":"7","media_type":9}]}'
 vd3 = load_and_extract(img)
 check("图片类型识别 (mediaType=9)", vd3 is not None and vd3.is_image is True)

@@ -25,7 +25,7 @@ from . import config
 from . import shared
 from .logger import logger
 from .parser import extract_from_object_desc, find_object_desc_in_json
-from .util import mask_url
+from .util import mask_url, describe_capture
 
 # ④ 注入到 HTML 的 JS：包装 WeixinJSBridge.invoke，
 #    每次调用的参数与回调结果 POST 到本机代理（addon request() 截获）。
@@ -286,6 +286,7 @@ class SphAddon:
         self.capture_count += 1
         self.last_capture_ts = time.time()
         logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")
+        logger.debug(f"🧬 捕获结构: {describe_capture(vd)}")
         if self.on_capture:
             try:
                 self.on_capture(vd, source)

@@ -213,8 +213,12 @@ class MpdDownloader:
     def _finalize(self, tmp: str, pos: int) -> bool:
         """下载完成：校验大小（若已知）→ 原子改名。"""
         if self.total_size > 0 and pos < self.total_size:
-            logger.warn(f"实际 {format_size(pos)} < 预期 {format_size(self.total_size)}，文件可能不完整")
-            # 仍交付（CDN 的“真实大小”以 Content-Range 为准时不会走到这里）
+            logger.warn(
+                f"实际 {format_size(pos)} < 元数据 {format_size(self.total_size)}"
+                "——微信元数据 file_size 常对应更高清晰度，实际地址服务较低版本；"
+                "文件本身完整可播。若想下更高清晰度，请用『清晰度』切换版本"
+                "（有原始画质时）")
+            # 仍交付（服务端实际就这么多；HEAD/Range 拿不到真实大小时才会走到这里）
         try:
             os.replace(tmp, self.save_path)
             return True
