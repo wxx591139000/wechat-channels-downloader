@@ -143,6 +143,20 @@ CDN 对单连接限速（约 400KB 一掐 + 微信 UA 50-85KB/s），这是上�
 :: 产物: dist\微信视频号下载器\  （exe + _internal + install-cert.bat）
 ```
 
+## 发布（自动升版本 + 分享版）
+
+```bat
+.venv\Scripts\python release.py [--major|--minor|--patch] [--note "说明"]
+```
+
+- 版本号恒为三位 X.Y.Z；自上个 git tag 有提交或工作区改动时自动升补丁版
+- 保留旧版本：`dist/vX.Y.Z/` 构建目录与 `dist/*-win64-portable.zip`
+  分享包一律不删（目标版本已存在会拒绝，确认覆盖加 `--force`）
+- 分享版 zip 默认放 `dist/`，白名单打包（exe + _internal + install-cert.bat
+  + 使用说明.txt），不含 config/records/logs/downloads 等本机数据
+- 构建后自动跑冻结自检 + PII 扫描（本机路径/用户名命中即中止）；
+  全部通过后自动 git 提交并打 tag `vX.Y.Z`（`--no-commit` 可跳过）
+
 ## 版本
 
 当前版本：**v2.0.0**

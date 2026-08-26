@@ -16,6 +16,7 @@ __pycache__/
 
 # PyInstaller：中间产物不入库，便携版以 zip 提供
 build/
+build_tmp_release/
 build_v11/
 build_v111/
 build_v12/
@@ -25,6 +26,7 @@ dist_v12/
 dist/v11-stage/
 dist/v12-stage/
 dist/*
+!dist/*-win64-portable.zip
 !dist/微信视频号下载器-v1.2-win64-portable.zip
 
 # 测试临时文件
