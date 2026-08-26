@@ -27,6 +27,9 @@ dist/v11-stage/
 dist/v12-stage/
 dist/*
 !dist/*-win64-portable.zip
+dist/微信视频号下载器-v1.1-win64-portable.zip
+dist/微信视频号下载器-v1.2.1-win64-portable.zip
+dist/微信视频号下载器-v1.2.2-win64-portable.zip
 !dist/微信视频号下载器-v1.2-win64-portable.zip
 
 # 测试临时文件
