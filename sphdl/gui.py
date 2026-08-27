@@ -504,8 +504,8 @@ class App:
     def _build_root(self):
         self.root = tk.Tk()
         self.root.title(f"微信视频号下载器  sphdl v{__version__}")
-        self.root.geometry("1180x700")
-        self.root.minsize(1000, 560)
+        self.root.geometry("1240x780")
+        self.root.minsize(1080, 660)
         try:
             from tkinter import font as tkfont
             f = tkfont.nametofont("TkDefaultFont")
@@ -537,37 +537,6 @@ class App:
         ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
                         ).pack(side="left", padx=14)
 
-        # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
-        # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
-        self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
-        ttk.Checkbutton(eng, text="⚙ 自动下载（捕获即入队）",
-                        variable=self.auto_dl_var,
-                        command=self._on_auto_dl_toggle
-                        ).pack(side="left", padx=14)
-
-        # 「🖼 下载图片」开关（v2.0.4）：勾选（默认）= 图片显示在列表并可下载；
-        # 取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
-        # 状态持久化到 config.json（开启后需重新捕获已跳过的图片）
-        self.images_var = tk.BooleanVar(value=self.cfg.download_images)
-        ttk.Checkbutton(eng, text="🖼 下载图片",
-                        variable=self.images_var,
-                        command=self._on_images_toggle
-                        ).pack(side="left", padx=14)
-
-        # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 列表数据只缓存为候选，
-        # 播放到哪条才捕获哪条（+随后几条缓存）；关 = 整页列表捕获（v2.0.6 行为）
-        self.natural_var = tk.BooleanVar(value=self.cfg.natural_capture)
-        ttk.Checkbutton(eng, text="🎯 自然捕获",
-                        variable=self.natural_var,
-                        command=self._on_natural_toggle
-                        ).pack(side="left", padx=14)
-
-        # 「⚡ 批量拉取」按钮（v2.0.8）：开启后整页列表入库 + 页面自动滚动，
-        # 尽量拉取整个视频号的所有视频（受微信分页限制，拉到底自动停止）
-        self.btn_batch = ttk.Button(eng, text="⚡ 批量拉取", width=10,
-                                    command=self._on_batch_toggle)
-        self.btn_batch.pack(side="left", padx=14)
-
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
         # proxy_backup.json；无快照时兜底关闭代理）。引擎运行中点它会先确认。
         self.btn_restore_proxy = ttk.Button(eng, text="↩  恢复网络代理", width=13,
@@ -583,7 +552,44 @@ class App:
         self.eng_label = ttk.Label(eng, text="状态: 已停止", foreground="#6b7280")
         self.eng_label.pack(side="right")
 
-        # ===== ② 下载目录区 =====
+        # ===== ② 捕获设置（捕获后的行为） =====
+        capf = ttk.LabelFrame(main, text=" 捕获设置 ", padding=6)
+        capf.pack(fill="x", pady=(8, 0))
+
+        # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
+        # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
+        self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
+        ttk.Checkbutton(capf, text="⚙ 自动下载（捕获即入队）",
+                        variable=self.auto_dl_var,
+                        command=self._on_auto_dl_toggle
+                        ).pack(side="left", padx=(2, 16))
+
+        # 「🖼 下载图片」开关（v2.0.4）：勾选（默认）= 图片显示在列表并可下载；
+        # 取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
+        self.images_var = tk.BooleanVar(value=self.cfg.download_images)
+        ttk.Checkbutton(capf, text="🖼 下载图片",
+                        variable=self.images_var,
+                        command=self._on_images_toggle
+                        ).pack(side="left", padx=16)
+
+        # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 播放到哪条才捕获哪条；
+        # 关 = 整页列表捕获（v2.0.6 行为）
+        self.natural_var = tk.BooleanVar(value=self.cfg.natural_capture)
+        ttk.Checkbutton(capf, text="🎯 自然捕获",
+                        variable=self.natural_var,
+                        command=self._on_natural_toggle
+                        ).pack(side="left", padx=16)
+
+        # 「⚡ 批量拉取」按钮（v2.0.8）：整页入库 + 页面自动滚动拉取整个视频号
+        self.btn_batch = ttk.Button(capf, text="⚡ 批量拉取", width=10,
+                                    command=self._on_batch_toggle)
+        self.btn_batch.pack(side="left", padx=(16, 2))
+
+        # 当前模式提示（随开关实时变化）
+        self.mode_label = ttk.Label(capf, foreground="#6b7280")
+        self.mode_label.pack(side="right", padx=4)
+
+        # ===== ③ 下载目录 =====
         dirf = ttk.Frame(main)
         dirf.pack(fill="x", pady=(8, 0))
         ttk.Label(dirf, text="下载目录:").pack(side="left")
@@ -605,9 +611,11 @@ class App:
         self.list_frame.pack(fill="both", expand=True, pady=8)
         listf = self.list_frame
 
-        # 按钮行先 pack 到底部（若后 pack 默认落到顶部，会挤占表格空间）
-        btns = ttk.Frame(listf)
-        btns.pack(side="bottom", fill="x", pady=(6, 0))
+        # 工具栏分两行：先 pack 管理行（最底），再 pack 下载行（其上）
+        btns2 = ttk.Frame(listf)   # 文件与记录管理
+        btns2.pack(side="bottom", fill="x", pady=(0, 0))
+        btns1 = ttk.Frame(listf)   # 下载与清晰度
+        btns1.pack(side="bottom", fill="x", pady=(6, 2))
 
         cols = ("status", "title", "size", "source", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
@@ -632,34 +640,40 @@ class App:
         self.tree.bind("<Double-1>", self._on_tree_dclick)
         self.tree.bind("<Control-a>", lambda e: self._select_all())
 
-        self.btn_download = ttk.Button(btns, text="⬇ 下载选中", width=10,
+        # ---- 工具栏 A：下载操作 ----
+        self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=10,
                                        command=lambda: self._download_selected())
         self.btn_download.pack(side="left")
-        ttk.Button(btns, text="停止下载", width=9,
+        ttk.Button(btns1, text="停止下载", width=9,
                    command=lambda: self._stop_selected()).pack(side="left", padx=4)
-        ttk.Button(btns, text="下载全部待下载", width=12,
+        ttk.Button(btns1, text="下载全部待下载", width=12,
                    command=lambda: self._download_all_waiting()).pack(side="left", padx=4)
-        ttk.Button(btns, text="重试失败", width=9,
+        ttk.Button(btns1, text="重试失败", width=9,
                    command=lambda: self._retry()).pack(side="left", padx=4)
-        ttk.Button(btns, text="↻ 重新下载", width=10,
+        ttk.Button(btns1, text="↻ 重新下载", width=10,
                    command=lambda: self._redownload_selected()).pack(side="left", padx=4)
-        ttk.Button(btns, text="清晰度", width=8,
+        ttk.Separator(btns1, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(btns1, text="清晰度", width=8,
                    command=lambda: self._pick_quality()).pack(side="left", padx=4)
         self.prefer_hq_var = tk.BooleanVar(value=self.cfg.prefer_highest_quality)
-        ttk.Checkbutton(btns, text="首选原始画质", variable=self.prefer_hq_var,
+        ttk.Checkbutton(btns1, text="首选原始画质", variable=self.prefer_hq_var,
                         command=self._on_prefer_hq_toggle).pack(side="left", padx=8)
-        ttk.Button(btns, text="打开文件", width=9,
+
+        # ---- 工具栏 B：文件与记录管理 ----
+        ttk.Button(btns2, text="打开文件", width=9,
                    command=lambda: self._open_file()).pack(side="left", padx=4)
-        ttk.Button(btns, text="打开文件夹", width=9,
+        ttk.Button(btns2, text="打开文件夹", width=9,
                    command=lambda: self._open_folder()).pack(side="left")
-        ttk.Button(btns, text="删除记录", width=9,
+        ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(btns2, text="删除记录", width=9,
                    command=lambda: self._del_record()).pack(side="left", padx=4)
-        ttk.Button(btns, text="删除文件+记录", width=11,
+        ttk.Button(btns2, text="删除文件+记录", width=11,
                    command=lambda: self._del_file()).pack(side="left")
-        ttk.Button(btns, text="清空已完成", width=10,
-                   command=lambda: self._clear_done()).pack(side="right", padx=(4, 0))
-        ttk.Button(btns, text="清空失败", width=9,
-                   command=lambda: self._clear_failed()).pack(side="right")
+        ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(btns2, text="清空已完成", width=10,
+                   command=lambda: self._clear_done()).pack(side="left", padx=4)
+        ttk.Button(btns2, text="清空失败", width=9,
+                   command=lambda: self._clear_failed()).pack(side="left")
 
         # ===== ④ 日志区 =====
         logf = ttk.LabelFrame(main, text=" 日志 ", padding=4)
@@ -684,12 +698,13 @@ class App:
         ttk.Button(logf, text="清空", width=6,
                    command=self._clear_log).pack(side="right", anchor="e", pady=(4, 0))
 
-        # ===== ⑤ 状态栏 =====
+        # ===== ⑥ 状态栏 =====
         self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
                                     padding=(8, 2))
         self.status_bar.pack(fill="x", side="bottom")
 
         self._refresh_tree_all()
+        self._update_capture_hint()
 
     # ---------------- 引擎控制 ----------------
     def _on_restore_proxy(self):
@@ -735,6 +750,7 @@ class App:
         self.push_log("info",
             "自动下载：开 —— 新捕获的视频将立即自动加入下载队列" if on
             else "自动下载：关 —— 请在列表选中视频后点「⬇ 下载选中」")
+        self._update_capture_hint()
 
     def _on_images_toggle(self):
         """「🖼 下载图片」开关（v2.0.4）：
@@ -758,6 +774,7 @@ class App:
                 "🖼 下载图片：关 —— 之后的图片捕获将被跳过，不再显示/下载")
         self._dirty = True
         self._update_status_bar()
+        self._update_capture_hint()
 
     def _on_natural_toggle(self):
         """「🎯 自然捕获」开关（v2.0.7）：
@@ -772,6 +789,7 @@ class App:
             "🎯 自然捕获：开 —— 只捕获当前播放的视频 + 随后几条缓存，"
             "不会整页入库" if on else
             "🎯 自然捕获：关 —— 列表数据将整页捕获（v2.0.6 行为）")
+        self._update_capture_hint()
 
     def _on_batch_toggle(self):
         """「⚡ 批量拉取」按钮（v2.0.8）：
@@ -785,19 +803,35 @@ class App:
             # 批量模式：列表数据全部入列（与「🎯 自然捕获」互斥）
             self.addon.natural_capture = False
             self.natural_var.set(False)
+            self.addon._batch_active = True
             self.btn_batch.config(text="■ 停止批量")
             self.push_log("ok",
                 "⚡ 批量拉取已开启：列表数据将整页入库。\n"
-                "请重新进入目标视频号页面，工具会自动向下滚动加载全部视频，"
-                "拉到底后自动停止；再点一次按钮可提前停止。")
+                "页面驱动会在数秒内自动向下滚动加载全部视频，拉到底自动停止；"
+                "再点一次按钮可提前停止。\n"
+                "（若页面是旧版本注入的未带驱动，请重新打开一次视频号页面）")
         else:
             self.addon.natural_capture = self.cfg.natural_capture
             self.natural_var.set(self.cfg.natural_capture)
+            self.addon._batch_active = False
             self.btn_batch.config(text="⚡ 批量拉取")
             self.push_log("info",
                 f"⚡ 批量拉取已停止（本次新增 {self.addon.batch_count} 条，"
                 "已恢复自然捕获）")
         self._update_status_bar()
+        self._update_capture_hint()
+
+    def _update_capture_hint(self):
+        """捕获设置区的实时模式提示（v2.0.9 UI 布局）。"""
+        if not hasattr(self, "mode_label"):
+            return
+        parts = ["自动下载: 开" if self.cfg.auto_download else "自动下载: 关",
+                 "图片: 开" if self.cfg.download_images else "图片: 关"]
+        if getattr(getattr(self, "addon", None), "batch_mode", False):
+            parts.append("⚡ 批量拉取中")
+        else:
+            parts.append("🎯 自然捕获" if self.cfg.natural_capture else "整页捕获")
+        self.mode_label.config(text=" | ".join(parts))
 
     def _toggle_engine(self):
         if self.engine.running:

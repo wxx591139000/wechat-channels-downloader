@@ -97,19 +97,20 @@ _BRIDGE_JS_TEMPLATE = """
     }, 100);
   }
 })();
-</script>
-"""
 
-# ⚡ 批量拉取自动滚动驱动（v2.0.8）：开启批量模式后注入视频号页面。
-# 每 3s 滚动到列表底部触发页面"加载更多"，直到：
-#  - 滚动高度连续 10 轮（~30s）不再增长且已在底部 → 完成
-#  - 或超过 200 轮（~10 分钟）兜底停止
-# 心跳/完成都 POST 回代理 /__sphdl/batch。
-_BATCH_JS_TEMPLATE = """
-<script>
+// ⚡ 批量拉取驱动（v2.0.9）：常驻页面，轮询代理批量状态。
+// 状态开启时每 2.5s 滚动一次触发"加载更多"；关闭或拉到底自动停。
 (function () {
   if (window.__sphdl_batch_driver) { return; }
   window.__sphdl_batch_driver = true;
+  var rounds = 0, stable = 0, maxH = 0, done = false;
+  function post(o) {
+    try {
+      fetch("http://127.0.0.1:__PORT__/__sphdl/batch", {
+        method: "POST", mode: "no-cors", body: JSON.stringify(o)
+      });
+    } catch (e) {}
+  }
   function scrollable() {
     var d = document.scrollingElement || document.documentElement;
     if (d && d.scrollHeight - d.scrollTop - d.clientHeight > 80) { return d; }
@@ -126,36 +127,38 @@ _BATCH_JS_TEMPLATE = """
   function doScroll() {
     var el = scrollable();
     if (!el) { return {h:0,t:0,c:0}; }
-    if (el === document.scrollingElement || el === document.documentElement) {
-      window.scrollTo(0, el.scrollHeight);
-    } else {
-      el.scrollTop = el.scrollHeight;
-    }
+    var isDoc = (el === document.scrollingElement || el === document.documentElement);
+    if (isDoc) { window.scrollTo(0, el.scrollHeight); }
+    else { el.scrollTop = el.scrollHeight; }
+    try {
+      if (el.dispatchEvent) {
+        el.dispatchEvent(new WheelEvent("wheel", {deltaY: 800, bubbles: true, cancelable: true}));
+      }
+    } catch (e) {}
     return {h: el.scrollHeight || 0, t: el.scrollTop || 0, c: el.clientHeight || 0};
   }
-  function post(o) {
+  setInterval(function () {
     try {
-      fetch("http://127.0.0.1:__PORT__/__sphdl/batch", {
-        method: "POST", mode: "no-cors", body: JSON.stringify(o)
-      });
+      fetch("http://127.0.0.1:__PORT__/__sphdl/batch?status=1", {
+        method: "GET", mode: "cors", cache: "no-store"
+      }).then(function (r) { return r.text(); }).then(function (t) {
+        var on = !!(t && t.charAt(0) === "1");
+        if (!on) { rounds = 0; stable = 0; maxH = 0; done = false; return; }
+        if (done) { return; }
+        rounds++;
+        var r = doScroll();
+        if (r.h > maxH + 10) { maxH = r.h; stable = 0; }
+        else if (r.h > 0 && r.t >= r.h - r.c - 60) { stable++; }
+        else { stable = 0; }
+        if (rounds > 240 || stable >= 12) {
+          done = true;
+          post({batch_done: 1, rounds: rounds, maxHeight: maxH});
+        } else {
+          post({batch: 1, rounds: rounds});
+        }
+      }).catch(function () {});
     } catch (e) {}
-  }
-  var maxH = 0, stable = 0, rounds = 0;
-  var timer = setInterval(function () {
-    try {
-      rounds++;
-      var r = doScroll();
-      if (r.h > maxH + 10) { maxH = r.h; stable = 0; }
-      else if (r.h > 0 && r.t >= r.h - r.c - 60) { stable++; }
-      else { stable = 0; }
-      if (rounds > 200 || stable >= 10) {
-        clearInterval(timer);
-        post({batch_done: 1, rounds: rounds, maxHeight: maxH});
-        return;
-      }
-      post({batch: 1, rounds: rounds});
-    } catch (e) {}
-  }, 3000);
+  }, 2500);
 })();
 </script>
 """
@@ -204,7 +207,6 @@ class SphAddon:
         self.batch_count = 0          # 批量期间新增捕获数
         self._batch_active = False    # 页面滚动驱动是否在跑
         self.last_batch_ts = 0.0      # 最近一次批量心跳
-        self._batch_js = _BATCH_JS_TEMPLATE.replace("__PORT__", str(config.PROXY_PORT))
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
         # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
@@ -245,7 +247,6 @@ class SphAddon:
             return
         if port != self._bridge_port:
             self.bridge_js = _BRIDGE_JS_TEMPLATE.replace("__PORT__", str(port))
-            self._batch_js = _BATCH_JS_TEMPLATE.replace("__PORT__", str(port))
             self._bridge_port = port
             logger.debug(f"bridge 钩子端口已更新为 {port}")
 
@@ -271,12 +272,29 @@ class SphAddon:
             return
         # ⚡ 批量拉取心跳/完成回传（页面自动滚动驱动）
         if is_batch:
+            if req.method == "OPTIONS":
+                flow.response = http.Response.make(
+                    204, b"", {
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                        "Access-Control-Allow-Headers": "*",
+                    })
+                return
+            if req.method == "GET":
+                # 状态轮询：页面驱动每 2.5s 请求一次，返回批量开关状态
+                flow.response = http.Response.make(
+                    200, b"1" if self.batch_mode else b"0",
+                    {"Content-Type": "text/plain",
+                     "Access-Control-Allow-Origin": "*",
+                     "Cache-Control": "no-store"})
+                return
             body = req.content or b""
             self.last_batch_ts = time.time()
             if b"batch_done" in body:
-                self._batch_active = False
-                logger.ok(f"⚡ 批量拉取完成：已滚动到列表末尾"
-                          f"（本次新增 {self.batch_count} 条）")
+                if self._batch_active:
+                    self._batch_active = False
+                    logger.ok(f"⚡ 批量拉取完成：已滚动到列表末尾"
+                              f"（本次新增 {self.batch_count} 条）")
             flow.response = http.Response.make(
                 200, b"OK", {"Content-Type": "text/plain"})
             return
@@ -386,8 +404,6 @@ class SphAddon:
         ctype = (resp.headers.get("content-type") or "").lower()
         if any(host.endswith(h) for h in config.BRIDGE_HOOK_HOSTS) and "text/html" in ctype:
             self._inject_bridge_hook(flow)
-            if self.batch_mode:
-                self._inject_batch_driver(flow)
             return
 
         # ② 只嗅探 qq.com 域名的 JSON 响应
@@ -599,23 +615,3 @@ class SphAddon:
                 )
         except Exception as e:
             logger.error(f"bridge 钩子注入失败: {e}")
-
-    def _inject_batch_driver(self, flow: http.HTTPFlow):
-        """⚡ 批量拉取：往视频号页面注入自动滚动驱动（仅 batch_mode 时调用）。"""
-        try:
-            content = flow.response.content.decode("utf-8", errors="ignore")
-            if "__sphdl_batch_driver" in content:
-                return
-            if "</head>" in content:
-                new_content = content.replace("</head>",
-                                              self._batch_js + "\n</head>", 1)
-            else:
-                new_content = content + self._batch_js
-            if new_content != content:
-                flow.response.content = new_content.encode("utf-8")
-                flow.response.headers["Content-Length"] = str(len(flow.response.content))
-                self._batch_active = True
-                logger.ok(f"⚡ 批量拉取驱动已注入: "
-                          f"{flow.request.host}{flow.request.path[:60]}")
-        except Exception as e:
-            logger.error(f"批量拉取驱动注入失败: {e}")
