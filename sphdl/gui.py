@@ -815,12 +815,14 @@ class App:
         self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=9,
                                       command=lambda: self._del_record())
         self.btn_del_rec.pack(side="left", padx=4)
-        self._tt(self.btn_del_rec, "删除选中记录（视频文件保留）。")
+        self._tt(self.btn_del_rec,
+                 "删除选中的 N 条记录（视频文件保留）。\n"
+                 "支持 Ctrl/Shift 多选。")
         self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=11,
                                        command=lambda: self._del_file())
         self.btn_del_file.pack(side="left")
         self._tt(self.btn_del_file,
-                 "删除选中记录及其已下载文件。\n"
+                 "删除选中的 N 条记录及其已下载文件。\n"
                  "注意：文件删除后不可恢复，谨慎操作。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
         self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=10,
@@ -831,6 +833,12 @@ class App:
                                        command=lambda: self._clear_failed())
         self.btn_clr_fail.pack(side="left")
         self._tt(self.btn_clr_fail, "删除所有「失败」记录（文件保留）。")
+        self.btn_del_all = ttk.Button(btns2, text="删除全部记录", width=11,
+                                      command=self._del_all_records)
+        self.btn_del_all.pack(side="left", padx=(8, 0))
+        self._tt(self.btn_del_all,
+                 "清空整个视频清单（所有状态）。\n"
+                 "只删记录，已下载的文件保留在磁盘。")
 
         # ===== ④ 日志区 =====
         logf = ttk.LabelFrame(main, text=" 日志 ", padding=4)
@@ -1372,37 +1380,80 @@ class App:
             messagebox.showerror("打开失败", str(e))
 
     def _del_record(self):
-        rid = self._selected_rid()
-        if not rid:
+        """删除选中的 N 条记录（视频文件保留）。"""
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo("提示",
+                                "请先在列表里选中要删除的记录"
+                                "（可 Ctrl/Shift 多选）")
             return
-        rec = self.store.items[rid]
+        n = len(rids)
+        preview = "、".join(self.store.items[r].title[:16] for r in rids[:3])
+        if n > 3:
+            preview += "…"
         if not messagebox.askyesno("删除记录",
-                                   f"删除这条记录？（视频文件会保留）\n\n{rec.title[:40]}"):
+                                   f"删除选中的 {n} 条记录？"
+                                   "（视频文件会保留）\n\n" + preview):
             return
-        self._remove_row(rid)
+        for rid in rids:
+            self._remove_row(rid)
         self._dirty = True
-        self.push_log("info", f"已删除记录: {rec.title[:30]}")
+        self.push_log("info", f"已删除 {n} 条记录（文件保留）")
+        self._update_status_bar()
 
     def _del_file(self):
-        rid = self._selected_rid()
-        if not rid:
+        """删除选中的 N 条记录及其已下载文件。"""
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo("提示",
+                                "请先在列表里选中要删除的记录"
+                                "（可 Ctrl/Shift 多选）")
             return
-        rec = self.store.items[rid]
-        if not rec.file:
-            messagebox.showinfo("提示", "该记录没有文件")
+        n = len(rids)
+        preview = "、".join(self.store.items[r].title[:16] for r in rids[:3])
+        if n > 3:
+            preview += "…"
+        if not messagebox.askyesno("删除文件+记录",
+                                   f"将删除选中的 {n} 条记录及其视频文件？\n"
+                                   "注意：文件删除后不可恢复！\n\n" + preview):
             return
-        if not messagebox.askyesno("删除文件",
-                                   f"删除视频文件和记录？\n\n{rec.file}"):
-            return
-        try:
-            if os.path.exists(rec.file):
-                os.remove(rec.file)
-        except Exception as e:
-            messagebox.showerror("删除失败", str(e))
-            return
-        self._remove_row(rid)
+        removed, failed = 0, []
+        for rid in rids:
+            rec = self.store.items[rid]
+            try:
+                if rec.file and os.path.exists(rec.file):
+                    os.remove(rec.file)
+            except Exception as e:
+                failed.append(f"{rec.title[:16]}：{e}")
+                continue  # 文件删不掉则保留记录，便于重试
+            self._remove_row(rid)
+            removed += 1
         self._dirty = True
-        self.push_log("info", f"已删除文件+记录: {rec.title[:30]}")
+        if failed:
+            self.push_log("error",
+                          f"删除文件失败 {len(failed)} 条（记录已保留）: "
+                          + "；".join(failed[:5]))
+        self.push_log("ok" if not failed else "warn",
+                      f"已删除文件+记录 {removed} 条"
+                      + (f"，失败 {len(failed)} 条" if failed else ""))
+        self._update_status_bar()
+
+    def _del_all_records(self):
+        """「删除全部记录」：清空整个视频清单（已下载的文件保留）。"""
+        if not self.store.order:
+            messagebox.showinfo("提示", "列表已经是空的")
+            return
+        n = len(self.store.order)
+        if not messagebox.askyesno(
+                "删除全部记录",
+                f"将清空整个视频清单（共 {n} 条记录）？\n"
+                "注意：只删记录，已下载的文件保留在磁盘。"):
+            return
+        for rid in list(self.store.order):
+            self._remove_row(rid)
+        self._dirty = True
+        self.push_log("ok", f"已清空视频清单：删除全部 {n} 条记录（文件保留）")
+        self._update_status_bar()
 
     def _clear_done(self):
         done = self.store.by_status("done")
