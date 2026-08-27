@@ -64,6 +64,70 @@ STATUS_TAG = {
 }
 
 
+# ============================== 悬停提示（v2.0.11） ==============================
+class ToolTip:
+    """控件悬停提示：鼠标停留 delay_ms 毫秒后弹出说明，移开/点击即消失。"""
+
+    def __init__(self, widget, text, delay_ms=2000):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._tip = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _e=None):
+        self._cancel_timer()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel_timer(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        self._after_id = None
+        if self._tip is not None:
+            return
+        try:
+            if not self.widget.winfo_exists():
+                return
+            x = self.widget.winfo_rootx() + 14
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            top = tk.Toplevel(self.widget)
+            top.wm_overrideredirect(True)
+            top.wm_geometry(f"+{x}+{y}")
+            tk.Label(top, text=self.text, justify="left",
+                     bg="#fffbe6", fg="#1f2937", relief="solid", bd=1,
+                     padx=10, pady=8, font=("Microsoft YaHei UI", 9),
+                     wraplength=430).pack()
+            top.update_idletasks()
+            # 底部放不下时改到控件上方
+            sh = self.widget.winfo_screenheight()
+            if y + top.winfo_height() > sh:
+                y = self.widget.winfo_rooty() - top.winfo_height() - 8
+                top.wm_geometry(f"+{x}+{y}")
+            self._tip = top
+            top.bind("<Leave>", self._hide)
+            top.bind("<ButtonPress>", self._hide)
+        except Exception:
+            self._tip = None
+
+    def _hide(self, _e=None):
+        self._cancel_timer()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
 # ============================== 配置持久化 ==============================
 class AppConfig:
     def __init__(self):
@@ -515,6 +579,10 @@ class App:
         except Exception:
             pass
 
+    def _tt(self, widget, text):
+        """给控件挂悬停提示：鼠标停留 2 秒显示用法与注意点（v2.0.11）。"""
+        ToolTip(widget, text, delay_ms=2000)
+
     def _build_ui(self):
         root = self.root
         main = ttk.Frame(root, padding=8)
@@ -527,27 +595,45 @@ class App:
         self.btn_engine = ttk.Button(eng, text="▶  启动嗅探", width=14,
                                      command=self._toggle_engine)
         self.btn_engine.pack(side="left")
+        self._tt(self.btn_engine,
+                 "启动/停止嗅探引擎（本地代理）。\n"
+                 "启动后打开微信视频号播放视频即可捕获。\n"
+                 "注意：首次使用请先装好 CA 证书；停止时自动恢复系统代理。")
 
         ttk.Label(eng, text="代理端口").pack(side="left", padx=(16, 2))
         self.port_var = tk.StringVar(value=str(self.cfg.port))
         self.ent_port = ttk.Entry(eng, textvariable=self.port_var, width=7)
         self.ent_port.pack(side="left")
+        self._tt(self.ent_port,
+                 "本地代理端口，默认 8899。\n"
+                 "一般无需修改；若被占用，改端口后重启嗅探。")
 
         self.auto_var = tk.BooleanVar(value=self.cfg.auto_proxy)
-        ttk.Checkbutton(eng, text="自动设置系统代理", variable=self.auto_var
-                        ).pack(side="left", padx=14)
+        self.auto_proxy_chk = ttk.Checkbutton(eng, text="自动设置系统代理",
+                                              variable=self.auto_var)
+        self.auto_proxy_chk.pack(side="left", padx=14)
+        self._tt(self.auto_proxy_chk,
+                 "勾选：启动嗅探时自动接管系统代理，停止时自动还原。\n"
+                 "不勾选：需手动把系统代理设为 127.0.0.1:端口。")
 
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
         # proxy_backup.json；无快照时兜底关闭代理）。引擎运行中点它会先确认。
         self.btn_restore_proxy = ttk.Button(eng, text="↩  恢复网络代理", width=13,
                                             command=self._on_restore_proxy)
         self.btn_restore_proxy.pack(side="left", padx=14)
+        self._tt(self.btn_restore_proxy,
+                 "应急：把系统代理恢复到本工具接管前的状态（会同时停止嗅探）。\n"
+                 "网络突然打不开时优先点它。")
 
         ttk.Label(eng, text="CA证书:").pack(side="left", padx=(18, 2))
         self.ca_label = ttk.Label(eng, text="检测中…", foreground="#d97706")
         self.ca_label.pack(side="left")
-        ttk.Button(eng, text="安装/检测", width=10,
-                   command=self._on_cert_btn).pack(side="left", padx=8)
+        self.btn_cert = ttk.Button(eng, text="安装/检测", width=10,
+                                   command=self._on_cert_btn)
+        self.btn_cert.pack(side="left", padx=8)
+        self._tt(self.btn_cert,
+                 "检测并安装 mitmproxy CA 证书。\n"
+                 "首次使用必须安装，否则 HTTPS 解密失败、无法捕获。")
 
         self.eng_label = ttk.Label(eng, text="状态: 已停止", foreground="#6b7280")
         self.eng_label.pack(side="right")
@@ -559,31 +645,47 @@ class App:
         # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
         # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
         self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
-        ttk.Checkbutton(capf, text="⚙ 自动下载（捕获即入队）",
-                        variable=self.auto_dl_var,
-                        command=self._on_auto_dl_toggle
-                        ).pack(side="left", padx=(2, 16))
+        self.auto_dl_chk = ttk.Checkbutton(capf, text="⚙ 自动下载（捕获即入队）",
+                                           variable=self.auto_dl_var,
+                                           command=self._on_auto_dl_toggle)
+        self.auto_dl_chk.pack(side="left", padx=(2, 16))
+        self._tt(self.auto_dl_chk,
+                 "勾选：新捕获的视频立即自动加入下载队列。\n"
+                 "不勾（默认）：只进列表，选中后手动下载。\n"
+                 "注意：只对勾选之后新捕获的视频生效。")
 
         # 「🖼 下载图片」开关（v2.0.4）：勾选（默认）= 图片显示在列表并可下载；
         # 取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
         self.images_var = tk.BooleanVar(value=self.cfg.download_images)
-        ttk.Checkbutton(capf, text="🖼 下载图片",
-                        variable=self.images_var,
-                        command=self._on_images_toggle
-                        ).pack(side="left", padx=16)
+        self.images_chk = ttk.Checkbutton(capf, text="🖼 下载图片",
+                                          variable=self.images_var,
+                                          command=self._on_images_toggle)
+        self.images_chk.pack(side="left", padx=16)
+        self._tt(self.images_chk,
+                 "勾选：图片显示在列表并可下载。\n"
+                 "不勾：图片不显示、不下载（已下载的图片文件保留）。")
 
         # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 播放到哪条才捕获哪条；
         # 关 = 整页列表捕获（v2.0.6 行为）
         self.natural_var = tk.BooleanVar(value=self.cfg.natural_capture)
-        ttk.Checkbutton(capf, text="🎯 自然捕获",
-                        variable=self.natural_var,
-                        command=self._on_natural_toggle
-                        ).pack(side="left", padx=16)
+        self.natural_chk = ttk.Checkbutton(capf, text="🎯 自然捕获",
+                                           variable=self.natural_var,
+                                           command=self._on_natural_toggle)
+        self.natural_chk.pack(side="left", padx=16)
+        self._tt(self.natural_chk,
+                 "勾选（默认）：只捕获当前播放的视频 + 随后几条缓存，不整页入库。\n"
+                 "不勾：整页列表捕获（v2.0.6 行为）。")
 
         # 「⚡ 批量拉取」按钮（v2.0.8）：整页入库 + 页面自动滚动拉取整个视频号
         self.btn_batch = ttk.Button(capf, text="⚡ 批量拉取", width=10,
                                     command=self._on_batch_toggle)
         self.btn_batch.pack(side="left", padx=(16, 2))
+        self._tt(self.btn_batch,
+                 "批量拉取整个视频号：整页入库，并让当前选中的视频号窗口"
+                 "自动滚动加载全部视频。\n"
+                 "拉到底自动停止；再点一次提前停止。\n"
+                 "注意：被其他窗口遮挡时仍持续滚动；切换拉取对象需"
+                 "点击目标视频号窗口。")
 
         # 当前模式提示（随开关实时变化）
         self.mode_label = ttk.Label(capf, foreground="#6b7280")
@@ -594,11 +696,18 @@ class App:
         dirf.pack(fill="x", pady=(8, 0))
         ttk.Label(dirf, text="下载目录:").pack(side="left")
         self.dir_var = tk.StringVar(value=self.cfg.download_dir)
-        ttk.Entry(dirf, textvariable=self.dir_var, width=52).pack(side="left", padx=6)
-        ttk.Button(dirf, text="更改…", width=8,
-                   command=self._choose_dir).pack(side="left")
-        ttk.Button(dirf, text="打开文件夹", width=10,
-                   command=self._open_download_dir).pack(side="left", padx=4)
+        self.dir_entry = ttk.Entry(dirf, textvariable=self.dir_var, width=52)
+        self.dir_entry.pack(side="left", padx=6)
+        self._tt(self.dir_entry,
+                 "视频保存目录。\n点『更改…』可修改，点『打开文件夹』直达。")
+        self.btn_choose_dir = ttk.Button(dirf, text="更改…", width=8,
+                                         command=self._choose_dir)
+        self.btn_choose_dir.pack(side="left")
+        self._tt(self.btn_choose_dir, "选择新的下载目录，修改后立即生效。")
+        self.btn_open_dir = ttk.Button(dirf, text="打开文件夹", width=10,
+                                       command=self._open_download_dir)
+        self.btn_open_dir.pack(side="left", padx=4)
+        self._tt(self.btn_open_dir, "打开当前下载目录。")
 
         # ===== ③ 下载列表 =====
         # 标题随「⚙ 自动下载」开关联动（v1.2.5）
@@ -644,36 +753,78 @@ class App:
         self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=10,
                                        command=lambda: self._download_selected())
         self.btn_download.pack(side="left")
-        ttk.Button(btns1, text="停止下载", width=9,
-                   command=lambda: self._stop_selected()).pack(side="left", padx=4)
-        ttk.Button(btns1, text="下载全部待下载", width=12,
-                   command=lambda: self._download_all_waiting()).pack(side="left", padx=4)
-        ttk.Button(btns1, text="重试失败", width=9,
-                   command=lambda: self._retry()).pack(side="left", padx=4)
-        ttk.Button(btns1, text="↻ 重新下载", width=10,
-                   command=lambda: self._redownload_selected()).pack(side="left", padx=4)
+        self._tt(self.btn_download,
+                 "把选中的「待下载/失败/已停止」记录加入下载队列。\n"
+                 "支持 Ctrl/Shift 多选；双击待下载行也可下载。")
+        self.btn_stop = ttk.Button(btns1, text="停止下载", width=9,
+                                   command=lambda: self._stop_selected())
+        self.btn_stop.pack(side="left", padx=4)
+        self._tt(self.btn_stop, "停止选中的「排队中/下载中/解密中」任务。")
+        self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=12,
+                                     command=lambda: self._download_all_waiting())
+        self.btn_dl_all.pack(side="left", padx=4)
+        self._tt(self.btn_dl_all,
+                 "把列表里所有「待下载」记录一次性入队。\n"
+                 "注意：数量多时按队列依次下载，速度受 CDN 限制。")
+        self.btn_retry = ttk.Button(btns1, text="重试失败", width=9,
+                                    command=lambda: self._retry())
+        self.btn_retry.pack(side="left", padx=4)
+        self._tt(self.btn_retry,
+                 "把选中的「失败/已停止」记录重新入队。\n"
+                 "注意：链接可能已过期，仍失败需重新嗅探。")
+        self.btn_redl = ttk.Button(btns1, text="↻ 重新下载", width=10,
+                                   command=lambda: self._redownload_selected())
+        self.btn_redl.pack(side="left", padx=4)
+        self._tt(self.btn_redl,
+                 "对「已完成/失败/已停止」记录重新下载，成功后覆盖旧文件。\n"
+                 "文件打不开/播放不了时用它。")
         ttk.Separator(btns1, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(btns1, text="清晰度", width=8,
-                   command=lambda: self._pick_quality()).pack(side="left", padx=4)
+        self.btn_quality = ttk.Button(btns1, text="清晰度", width=8,
+                                      command=lambda: self._pick_quality())
+        self.btn_quality.pack(side="left", padx=4)
+        self._tt(self.btn_quality,
+                 "为选中记录切换可用清晰度版本并立即下载。\n"
+                 "只有 1 个版本时，说明微信未下发其他档位"
+                 "（原始画质 fullUrl 为空）。")
         self.prefer_hq_var = tk.BooleanVar(value=self.cfg.prefer_highest_quality)
-        ttk.Checkbutton(btns1, text="首选原始画质", variable=self.prefer_hq_var,
-                        command=self._on_prefer_hq_toggle).pack(side="left", padx=8)
+        self.prefer_hq_chk = ttk.Checkbutton(btns1, text="首选原始画质",
+                                             variable=self.prefer_hq_var,
+                                             command=self._on_prefer_hq_toggle)
+        self.prefer_hq_chk.pack(side="left", padx=8)
+        self._tt(self.prefer_hq_chk,
+                 "勾选：下载时自动选用可用版本中最大的（原始/全尺寸优先）。")
 
         # ---- 工具栏 B：文件与记录管理 ----
-        ttk.Button(btns2, text="打开文件", width=9,
-                   command=lambda: self._open_file()).pack(side="left", padx=4)
-        ttk.Button(btns2, text="打开文件夹", width=9,
-                   command=lambda: self._open_folder()).pack(side="left")
+        self.btn_open_file = ttk.Button(btns2, text="打开文件", width=9,
+                                        command=lambda: self._open_file())
+        self.btn_open_file.pack(side="left", padx=4)
+        self._tt(self.btn_open_file,
+                 "用系统默认播放器打开选中记录的已下载文件。")
+        self.btn_open_folder = ttk.Button(btns2, text="打开文件夹", width=9,
+                                          command=lambda: self._open_folder())
+        self.btn_open_folder.pack(side="left")
+        self._tt(self.btn_open_folder,
+                 "打开选中记录所在文件夹；未选中时打开下载目录。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(btns2, text="删除记录", width=9,
-                   command=lambda: self._del_record()).pack(side="left", padx=4)
-        ttk.Button(btns2, text="删除文件+记录", width=11,
-                   command=lambda: self._del_file()).pack(side="left")
+        self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=9,
+                                      command=lambda: self._del_record())
+        self.btn_del_rec.pack(side="left", padx=4)
+        self._tt(self.btn_del_rec, "删除选中记录（视频文件保留）。")
+        self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=11,
+                                       command=lambda: self._del_file())
+        self.btn_del_file.pack(side="left")
+        self._tt(self.btn_del_file,
+                 "删除选中记录及其已下载文件。\n"
+                 "注意：文件删除后不可恢复，谨慎操作。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(btns2, text="清空已完成", width=10,
-                   command=lambda: self._clear_done()).pack(side="left", padx=4)
-        ttk.Button(btns2, text="清空失败", width=9,
-                   command=lambda: self._clear_failed()).pack(side="left")
+        self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=10,
+                                       command=lambda: self._clear_done())
+        self.btn_clr_done.pack(side="left", padx=4)
+        self._tt(self.btn_clr_done, "删除所有「已完成」记录（文件保留）。")
+        self.btn_clr_fail = ttk.Button(btns2, text="清空失败", width=9,
+                                       command=lambda: self._clear_failed())
+        self.btn_clr_fail.pack(side="left")
+        self._tt(self.btn_clr_fail, "删除所有「失败」记录（文件保留）。")
 
         # ===== ④ 日志区 =====
         logf = ttk.LabelFrame(main, text=" 日志 ", padding=4)
@@ -690,13 +841,23 @@ class App:
             self.log_text.tag_configure(tag, foreground=color)
 
         self.auto_scroll_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(logf, text="自动滚动", variable=self.auto_scroll_var
-                        ).pack(anchor="e", pady=(4, 0))
-        ttk.Button(logf, text="📋 复制日志", width=10,
-                   command=self._copy_log).pack(side="right", anchor="e",
-                                                pady=(4, 0), padx=(0, 4))
-        ttk.Button(logf, text="清空", width=6,
-                   command=self._clear_log).pack(side="right", anchor="e", pady=(4, 0))
+        self.auto_scroll_chk = ttk.Checkbutton(logf, text="自动滚动",
+                                               variable=self.auto_scroll_var)
+        self.auto_scroll_chk.pack(anchor="e", pady=(4, 0))
+        self._tt(self.auto_scroll_chk,
+                 "日志自动滚动到最新；取消勾选可回看历史日志。")
+        self.btn_copy_log = ttk.Button(logf, text="📋 复制日志", width=10,
+                                       command=self._copy_log)
+        self.btn_copy_log.pack(side="right", anchor="e",
+                               pady=(4, 0), padx=(0, 4))
+        self._tt(self.btn_copy_log,
+                 "把日志区内容（含版本/时间/引擎状态）复制到剪贴板，\n"
+                 "方便粘贴给开发者排查问题。")
+        self.btn_clear_log = ttk.Button(logf, text="清空", width=6,
+                                        command=self._clear_log)
+        self.btn_clear_log.pack(side="right", anchor="e", pady=(4, 0))
+        self._tt(self.btn_clear_log,
+                 "清空日志区显示（不影响落盘的完整日志）。")
 
         # ===== ⑥ 状态栏 =====
         self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
@@ -807,9 +968,10 @@ class App:
             self.btn_batch.config(text="■ 停止批量")
             self.push_log("ok",
                 "⚡ 批量拉取已开启：列表数据将整页入库。\n"
-                "只滚动**当前选中**的视频号窗口：驱动会在数秒内自动向下滚动"
-                "加载全部视频，拉到底自动停止；切到其他窗口/工具界面会暂停，"
-                "回到该窗口继续；再点一次按钮可提前停止。\n"
+                "只滚动**当前选中**的视频号窗口（最近点击/获得焦点者）；"
+                "即使被 Excel 等窗口遮挡也持续滚动，直到点『停止拉取』"
+                "或拉到底自动停止。\n"
+                "若要切换拉取对象，点击/选中目标视频号窗口即可。\n"
                 "（若页面是旧版本注入的未带驱动，请重新打开一次视频号页面）")
         else:
             self.addon.natural_capture = self.cfg.natural_capture

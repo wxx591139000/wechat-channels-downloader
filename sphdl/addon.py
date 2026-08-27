@@ -18,6 +18,7 @@ import queue as _queue
 import re
 import threading as _threading
 import time
+from urllib.parse import parse_qs, urlparse
 
 from mitmproxy import http
 
@@ -98,24 +99,20 @@ _BRIDGE_JS_TEMPLATE = """
   }
 })();
 
-// ⚡ 批量拉取驱动（v2.0.10）：常驻页面，轮询代理批量状态。
-// 状态开启时每 2.5s 滚动一次触发"加载更多"；关闭或拉到底自动停。
-// 只滚动"当前选中"的视频号窗口：focus/blur/visibility 事件跟踪页面焦点，
-// 非当前窗口自动暂停（避免旧页面一直抢滚、新页面无法播放）。
+// ⚡ 批量拉取驱动（v2.0.11）：常驻页面，轮询代理批量状态。
+// 只滚动"当前选中"的视频号窗口（代理按最近获得焦点的页面判定）；
+// 即使被 Excel 等窗口遮挡也持续滚动，直到点「停止拉取」或拉到底。
 (function () {
   if (window.__sphdl_batch_driver) { return; }
   window.__sphdl_batch_driver = true;
+  var pageId = (Math.random() * 1e9).toString(36);
   var rounds = 0, stable = 0, maxH = 0, done = false;
-  var pageActive = false;   // 仅当前选中的视频号窗口参与滚动
+  var pageActive = false;   // 本页最近是否获得过焦点（焦点事件跟踪）
   function resetState() { rounds = 0; stable = 0; maxH = 0; done = false; }
   try {
     window.addEventListener("focus", function () { pageActive = true; });
-    window.addEventListener("blur", function () { pageActive = false; resetState(); });
     window.addEventListener("pointerdown", function () { pageActive = true; });
-    document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "hidden") { pageActive = false; resetState(); }
-      else { pageActive = true; }
-    });
+    window.addEventListener("blur", function () { pageActive = false; });
   } catch (e) {}
   function post(o) {
     try {
@@ -152,8 +149,8 @@ _BRIDGE_JS_TEMPLATE = """
   }
   setInterval(function () {
     try {
-      if (!pageActive) { return; }   // 非当前窗口：不轮询、不滚动
-      fetch("http://127.0.0.1:__PORT__/__sphdl/batch?status=1", {
+      fetch("http://127.0.0.1:__PORT__/__sphdl/batch?status=1&id=" + pageId
+            + "&f=" + (pageActive ? "1" : "0"), {
         method: "GET", mode: "cors", cache: "no-store"
       }).then(function (r) { return r.text(); }).then(function (t) {
         var on = !!(t && t.charAt(0) === "1");
@@ -221,6 +218,7 @@ class SphAddon:
         self.batch_count = 0          # 批量期间新增捕获数
         self._batch_active = False    # 页面滚动驱动是否在跑
         self.last_batch_ts = 0.0      # 最近一次批量心跳
+        self._batch_page = None       # 当前选中的视频号页面 id（最近获得焦点者）
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
         # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
@@ -295,9 +293,20 @@ class SphAddon:
                     })
                 return
             if req.method == "GET":
-                # 状态轮询：页面驱动每 2.5s 请求一次，返回批量开关状态
+                # 状态轮询：页面驱动每 2.5s 请求一次，带 ?id=页ID&f=1|0
+                #  f=1（本页有焦点）→ 设为"当前选中页"；只有选中页返回 1
+                q = parse_qs(urlparse(req.path).query)
+                pid = (q.get("id") or [""])[0]
+                focused = (q.get("f") or [""])[0] == "1"
+                if self.batch_mode:
+                    if focused and pid:
+                        self._batch_page = pid
+                    chosen = bool(self._batch_page) and pid == self._batch_page
+                else:
+                    self._batch_page = None
+                    chosen = False
                 flow.response = http.Response.make(
-                    200, b"1" if self.batch_mode else b"0",
+                    200, b"1" if chosen else b"0",
                     {"Content-Type": "text/plain",
                      "Access-Control-Allow-Origin": "*",
                      "Cache-Control": "no-store"})
