@@ -57,6 +57,10 @@ STATUS_TEXT = {
     "failed": "失败 ✗",
     "stopped": "已停止",
 }
+
+# 表头排序（v2.0.12）：按「状态」排序时的优先级（升序=正在进行的在前）
+STATUS_SORT_ORDER = {"downloading": 0, "decrypting": 1, "pending": 2,
+                     "waiting": 3, "done": 4, "failed": 5, "stopped": 6}
 STATUS_TAG = {
     "done": "tag_done", "failed": "tag_failed", "downloading": "tag_downloading",
     "decrypting": "tag_decrypting", "pending": "tag_pending",
@@ -481,6 +485,8 @@ class App:
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
         self._known_logged: set = set()  # 已提示过"列表中已有"的 video_id/url（防刷屏）
+        self._sort_col = None          # 表头排序（v2.0.12）：None=默认最新在前
+        self._sort_desc = False
         self._rid_seq = 0              # 捕获记录 id 递增序号（防同秒碰撞）
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
@@ -723,7 +729,7 @@ class App:
         # 工具栏分两行：先 pack 管理行（最底），再 pack 下载行（其上）
         btns2 = ttk.Frame(listf)   # 文件与记录管理
         btns2.pack(side="bottom", fill="x", pady=(0, 0))
-        btns1 = ttk.Frame(listf)   # 下载与清晰度
+        btns1 = ttk.Frame(listf)   # 下载操作
         btns1.pack(side="bottom", fill="x", pady=(6, 2))
 
         cols = ("status", "title", "size", "source", "time", "file")
@@ -731,8 +737,10 @@ class App:
                                  selectmode="extended")
         heads = {"status": ("状态", 110), "title": ("标题", 250), "size": ("大小", 80),
                  "source": ("来源", 150), "time": ("时间", 90), "file": ("文件", 190)}
+        self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
-            self.tree.heading(c, text=heads[c][0])
+            self.tree.heading(c, text=heads[c][0],
+                              command=lambda col=c: self._on_tree_sort(col))
             self.tree.column(c, width=heads[c][1],
                              stretch=(c in ("title", "file")))
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
@@ -760,12 +768,25 @@ class App:
                                    command=lambda: self._stop_selected())
         self.btn_stop.pack(side="left", padx=4)
         self._tt(self.btn_stop, "停止选中的「排队中/下载中/解密中」任务。")
+        self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=12,
+                                       command=self._stop_all_downloads)
+        self.btn_stop_all.pack(side="left", padx=4)
+        self._tt(self.btn_stop_all,
+                 "一键停止所有「排队中/下载中/解密中」的任务。\n"
+                 "注意：已完成的保留；停止后可对选中项点『重试失败』重新下载。")
         self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=12,
                                      command=lambda: self._download_all_waiting())
         self.btn_dl_all.pack(side="left", padx=4)
         self._tt(self.btn_dl_all,
                  "把列表里所有「待下载」记录一次性入队。\n"
                  "注意：数量多时按队列依次下载，速度受 CDN 限制。")
+        self.btn_cancel_queued = ttk.Button(btns1, text="取消所有排队", width=11,
+                                            command=self._cancel_all_queued)
+        self.btn_cancel_queued.pack(side="left", padx=4)
+        self._tt(self.btn_cancel_queued,
+                 "把所有「排队中」的任务恢复成「待下载」状态。\n"
+                 "正在下载中的不会中断；之后可重新点『下载选中』或"
+                 "『下载全部待下载』。")
         self.btn_retry = ttk.Button(btns1, text="重试失败", width=9,
                                     command=lambda: self._retry())
         self.btn_retry.pack(side="left", padx=4)
@@ -778,22 +799,6 @@ class App:
         self._tt(self.btn_redl,
                  "对「已完成/失败/已停止」记录重新下载，成功后覆盖旧文件。\n"
                  "文件打不开/播放不了时用它。")
-        ttk.Separator(btns1, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.btn_quality = ttk.Button(btns1, text="清晰度", width=8,
-                                      command=lambda: self._pick_quality())
-        self.btn_quality.pack(side="left", padx=4)
-        self._tt(self.btn_quality,
-                 "为选中记录切换可用清晰度版本并立即下载。\n"
-                 "只有 1 个版本时，说明微信未下发其他档位"
-                 "（原始画质 fullUrl 为空）。")
-        self.prefer_hq_var = tk.BooleanVar(value=self.cfg.prefer_highest_quality)
-        self.prefer_hq_chk = ttk.Checkbutton(btns1, text="首选原始画质",
-                                             variable=self.prefer_hq_var,
-                                             command=self._on_prefer_hq_toggle)
-        self.prefer_hq_chk.pack(side="left", padx=8)
-        self._tt(self.prefer_hq_chk,
-                 "勾选：下载时自动选用可用版本中最大的（原始/全尺寸优先）。")
-
         # ---- 工具栏 B：文件与记录管理 ----
         self.btn_open_file = ttk.Button(btns2, text="打开文件", width=9,
                                         command=lambda: self._open_file())
@@ -1168,70 +1173,6 @@ class App:
         self._update_row(rid)
         return True
 
-    def _on_prefer_hq_toggle(self):
-        """「首选原始画质」开关：开 = 下载时自动选最大清晰度版本。"""
-        self.cfg.prefer_highest_quality = bool(self.prefer_hq_var.get())
-        self.cfg.save()
-        self.push_log("info", "首选原始画质：开 —— 下载将自动选用最大清晰度版本"
-                      if self.cfg.prefer_highest_quality
-                      else "首选原始画质：关 —— 使用捕获到的默认版本（可点『清晰度』手动切换）")
-
-    def _pick_quality(self):
-        """为选中记录选择清晰度（标准/原始等），选后立即加入下载队列。"""
-        rid = self._selected_rid()
-        if not rid:
-            messagebox.showinfo("提示", "请先选中一条视频记录")
-            return
-        rec = self.store.items[rid]
-        renditions = rec.renditions or []
-        if len(renditions) <= 1:
-            note = rec.quality_note or ""
-            msg = "该记录只有 1 个可下载地址。"
-            if note:
-                msg += f"\n{note}，但微信未下发其他清晰度的下载链接" \
-                       "（原始画质 fullUrl 为空）。"
-            else:
-                msg += "\n微信未提供其他清晰度版本（或这是旧版本捕获的记录）。"
-            msg += "\n下载后列表会显示实际文件大小，以实际为准。"
-            messagebox.showinfo("提示", msg)
-            return
-        # 预选当前记录正在使用的 url
-        preselect = 0
-        for i, rd in enumerate(renditions):
-            if rd.get("url") == rec.url:
-                preselect = i
-                break
-        top = tk.Toplevel(self.root)
-        top.title("选择清晰度")
-        top.transient(self.root)
-        top.grab_set()
-        ttk.Label(top, text=(rec.title or "")[:40], wraplength=320,
-                  foreground="#6b7280").pack(anchor="w", padx=12, pady=(10, 4))
-        var = tk.IntVar(value=preselect)
-        for i, rd in enumerate(renditions):
-            ttk.Radiobutton(top, text=rd.get("label") or "版本", variable=var,
-                            value=i).pack(anchor="w", padx=16, pady=2)
-
-        def _apply_and_download():
-            i = var.get()
-            rd = renditions[i]
-            if rd.get("url") != rec.url:
-                # 更新记录的下载来源；旧/新 url 都映射到本记录（去重 + 事件回写）
-                self._url_to_rid[rec.url] = rid
-                rec.url = rd["url"]
-                rec.size = int(rd.get("size") or 0)
-                self._url_to_rid[rec.url] = rid
-                self._dirty = True
-                self.push_log("ok", f"已切换清晰度: {rd.get('label')}，开始下载")
-            top.destroy()
-            self._submit_record(rid)
-
-        btns2 = ttk.Frame(top)
-        btns2.pack(pady=(8, 10))
-        ttk.Button(btns2, text="下载该清晰度", command=_apply_and_download
-                   ).pack(side="left", padx=6)
-        ttk.Button(btns2, text="取消", command=top.destroy).pack(side="left", padx=6)
-
     def _download_selected(self):
         rids = self._selected_rids()
         if not rids:
@@ -1299,6 +1240,53 @@ class App:
         for rid in rids:
             self._submit_record(rid)
         self.push_log("ok", f"已加入下载队列 {len(rids)} 个（全部待下载）")
+
+    def _stop_all_downloads(self):
+        """「停止所有下载」：一键停止所有 排队中/下载中/解密中 的任务。"""
+        targets = [r for r in self.store.items.values()
+                   if r.status in ("pending", "downloading", "decrypting")]
+        if not targets:
+            messagebox.showinfo("提示", "当前没有正在下载/排队中的任务")
+            return
+        if not messagebox.askyesno(
+                "停止所有下载",
+                f"将停止 {len(targets)} 个正在下载/排队的任务？\n"
+                "（已下载完成的文件保留，可稍后『重试失败』再下）"):
+            return
+        for r in targets:
+            try:
+                self.pipeline.cancel(r.url)
+            except Exception:
+                pass
+            self.store.update(r.id, status="stopped", error="用户停止")
+            self._update_row(r.id)
+        self._dirty = True
+        self.push_log("ok", f"已停止所有下载：{len(targets)} 个任务已停止")
+        self._update_status_bar()
+
+    def _cancel_all_queued(self):
+        """「取消所有排队」：把所有排队中的任务恢复为「待下载」状态。"""
+        targets = [r for r in self.store.items.values()
+                   if r.status == "pending"]
+        if not targets:
+            messagebox.showinfo("提示", "当前没有排队中的任务")
+            return
+        if not messagebox.askyesno(
+                "取消所有排队",
+                f"将 {len(targets)} 个排队中的任务恢复为『待下载』？\n"
+                "正在下载中的不会中断。"):
+            return
+        for r in targets:
+            try:
+                # 让管线在轮到这些任务时直接跳过（从队列摘除）
+                self.pipeline.cancel(r.url)
+            except Exception:
+                pass
+            self.store.update(r.id, status="waiting", progress=0, error="")
+            self._update_row(r.id)
+        self._dirty = True
+        self.push_log("ok", f"已取消所有排队：{len(targets)} 个任务恢复为待下载")
+        self._update_status_bar()
 
     def _retry(self):
         rids = [r for r in self._selected_rids()
@@ -1508,6 +1496,7 @@ class App:
         if iid and self.tree.exists(iid):
             self.tree.item(iid, values=self._row_values(r),
                            tags=(STATUS_TAG.get(r.status, "tag_pending"),))
+            self._apply_sort()
 
     def _remove_row(self, rid):
         # 同步清理 url 映射（可能有多条：切换清晰度后旧/新 url 都映射本记录）。
@@ -1524,6 +1513,7 @@ class App:
                                tags=(STATUS_TAG.get(r.status, "tag_pending"),))
         self._row_of[r.id] = iid
         self._url_to_rid[r.url] = r.id
+        self._apply_sort()
 
     def _refresh_tree_all(self):
         self.tree.delete(*self.tree.get_children())
@@ -1532,6 +1522,50 @@ class App:
             r = self.store.items.get(rid)
             if r:
                 self._add_row(r)
+        self._apply_sort()
+
+    # ---------------- 表头排序（v2.0.12） ----------------
+    def _on_tree_sort(self, col):
+        """点击表头：按该列升降序排列（再点一次切换方向）。"""
+        if self._sort_col == col:
+            self._sort_desc = not self._sort_desc
+        else:
+            self._sort_col = col
+            self._sort_desc = False
+        for c, base in self._head_text.items():
+            self.tree.heading(c, text=base)
+        self.tree.heading(col, text=self._head_text[col]
+                          + (" ▼" if self._sort_desc else " ▲"))
+        self._apply_sort()
+
+    def _sort_key(self, rid):
+        r = self.store.items.get(rid)
+        if r is None:
+            return (0, "", "")
+        col = self._sort_col or "time"
+        if col == "status":
+            return (STATUS_SORT_ORDER.get(r.status, 99), r.created, r.id)
+        if col == "size":
+            return (int(r.size or 0), r.created, r.id)
+        if col == "time":
+            return (r.created, r.id)
+        if col == "title":
+            return ((r.title or "").casefold(), r.created, r.id)
+        if col == "source":
+            return ((r.source or "").casefold(), r.created, r.id)
+        if col == "file":
+            return ((r.file or "").casefold(), r.created, r.id)
+        return (0, "", "")
+
+    def _apply_sort(self):
+        if not self._sort_col:
+            return
+        items = [(rid, iid) for rid, iid in self._row_of.items()
+                 if rid in self.store.items]
+        items.sort(key=lambda t: self._sort_key(t[0]), reverse=self._sort_desc)
+        for idx, (_rid, iid) in enumerate(items):
+            if self.tree.exists(iid):
+                self.tree.move(iid, "", idx)
 
     # ---------------- 事件处理（主线程） ----------------
     def _handle_event(self, item):
@@ -1603,17 +1637,19 @@ class App:
                         f"{actual * 100 // meta}%。\n"
                         "下载地址是微信客户端当时播放的档位，文件完整可播。"
                         "若想下载更高画质：在微信视频号播放器里把画质调到"
-                        "最高（或保证网络良好）后重新播放，再重新捕获；"
-                        "若抓包含『原始画质』选项，可用『清晰度』切换。")
+                        "最高（或保证网络良好）后重新播放，再重新捕获。")
                 self.store.update(rid, status="done", progress=100,
                                   file=item[2], error="",
                                   size=actual or rec.size)
             elif kind == "failed":
                 self.store.update(rid, status="failed", error=item[2])
             elif kind == "cancelled":
-                # 用户停止（管线确认）：以 stopped 收尾
-                self.store.update(rid, status="stopped",
-                                  error=item[2] if len(item) > 2 else "用户停止")
+                # 用户停止（管线确认）：以 stopped 收尾；
+                # 若已被「取消所有排队」重置为待下载，则保持待下载
+                cur = self.store.items[rid].status
+                if cur in ("pending", "downloading", "decrypting"):
+                    self.store.update(rid, status="stopped",
+                                      error=item[2] if len(item) > 2 else "用户停止")
             self._update_row(rid)
             self._dirty = True
             self._update_status_bar()
