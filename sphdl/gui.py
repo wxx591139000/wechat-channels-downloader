@@ -73,6 +73,7 @@ class AppConfig:
         self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载（v1.2.5 开关可开）
         self.prefer_highest_quality = False  # 默认下载最高清晰度（原始画质优先）
         self.download_images = True   # 默认下载图片：图片显示在列表并可下载（v2.0.4 开关）
+        self.natural_capture = True   # 默认自然捕获：当前播放+随后几条，不整页入库（v2.0.7）
         self._load()
 
     def _load(self):
@@ -84,6 +85,7 @@ class AppConfig:
             self.auto_download = bool(d.get("auto_download", False))
             self.prefer_highest_quality = bool(d.get("prefer_highest_quality", False))
             self.download_images = bool(d.get("download_images", True))
+            self.natural_capture = bool(d.get("natural_capture", True))
         except Exception:
             pass
 
@@ -94,7 +96,8 @@ class AppConfig:
                  "auto_proxy": self.auto_proxy,
                  "auto_download": self.auto_download,
                  "prefer_highest_quality": self.prefer_highest_quality,
-                 "download_images": self.download_images},
+                 "download_images": self.download_images,
+                 "natural_capture": self.natural_capture},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -448,6 +451,7 @@ class App:
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
+        self.addon.natural_capture = self.cfg.natural_capture
         # 自动下载提交前的跨会话去重（records.json 已有同视频/链接 → 不重复下载）
         self.addon.duplicate_check = self._is_known_video
 
@@ -548,6 +552,14 @@ class App:
         ttk.Checkbutton(eng, text="🖼 下载图片",
                         variable=self.images_var,
                         command=self._on_images_toggle
+                        ).pack(side="left", padx=14)
+
+        # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 列表数据只缓存为候选，
+        # 播放到哪条才捕获哪条（+随后几条缓存）；关 = 整页列表捕获（v2.0.6 行为）
+        self.natural_var = tk.BooleanVar(value=self.cfg.natural_capture)
+        ttk.Checkbutton(eng, text="🎯 自然捕获",
+                        variable=self.natural_var,
+                        command=self._on_natural_toggle
                         ).pack(side="left", padx=14)
 
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
@@ -740,6 +752,20 @@ class App:
                 "🖼 下载图片：关 —— 之后的图片捕获将被跳过，不再显示/下载")
         self._dirty = True
         self._update_status_bar()
+
+    def _on_natural_toggle(self):
+        """「🎯 自然捕获」开关（v2.0.7）：
+        开（默认）= 列表数据先缓存为候选，播放到哪条才捕获哪条
+        （加上紧随其后的几条缓存），不会整页一次性入库；
+        关 = 恢复整页列表捕获（v2.0.6 行为）。"""
+        on = bool(self.natural_var.get())
+        self.cfg.natural_capture = on
+        self.addon.natural_capture = on
+        self.cfg.save()
+        self.push_log("ok",
+            "🎯 自然捕获：开 —— 只捕获当前播放的视频 + 随后几条缓存，"
+            "不会整页入库" if on else
+            "🎯 自然捕获：关 —— 列表数据将整页捕获（v2.0.6 行为）")
 
     def _toggle_engine(self):
         if self.engine.running:

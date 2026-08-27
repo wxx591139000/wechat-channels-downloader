@@ -100,6 +100,18 @@ _BRIDGE_JS_TEMPLATE = """
 </script>
 """
 
+# 自然捕获（v2.0.7）：列表数据不再整页入库，播放到哪条才捕获哪条。
+#  - 列表 payload 的 objectDesc 全部缓存为"候选"（不显示、不下载）
+#  - 播放器请求某条视频的流/封面（stodownload URL 含同 encfilekey）→ 命中，
+#    捕获"当前播放 + 紧随其后的 LOOKAHEAD 条"
+#  - 新列表数据的前 ANCHOR 条作为"当前浏览锚点"先行入列（可见反馈）
+_EFK_RE = re.compile(r"encfilekey=([A-Za-z0-9_\-]+)")
+
+
+def _extract_encfilekey(url: str) -> str:
+    m = _EFK_RE.search(url or "")
+    return m.group(1) if m else ""
+
 
 class SphAddon:
     def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
@@ -119,6 +131,14 @@ class SphAddon:
         self.seen = set()          # 去重: (url, decode_key)
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
+        # ---- 自然捕获（v2.0.7）----
+        self.natural_capture = True   # GUI「🎯 自然捕获」开关：False = 整页列表捕获
+        self.ANCHOR = 2               # 新列表数据前几条先入列（当前浏览锚点）
+        self.LOOKAHEAD = 2            # 播放命中后，紧随其后的几条一起捕获
+        self.PENDING_CAP = 200        # 候选缓存上限
+        self.PENDING_EXPIRE = 1800    # 候选缓存过期（秒）
+        self._pending = []            # [{efk, key, vd, ts, source}] 按列表顺序
+        self._pending_lock = _threading.Lock()
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
         # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
@@ -218,23 +238,32 @@ class SphAddon:
                 odes = list(iter_object_descs(obj))
                 if not odes:
                     odes = [obj]  # 可能直接就是 object_desc 本体 / media 列表
-                elif len(odes) > 1 and not self._multi_payload_logged:
+                if len(odes) > 1 and not self._multi_payload_logged:
                     # 诊断（一次）：bridge 回传的列表数据含多个视频 objectDesc。
-                    # v2.0.6 起逐个处理；此前只取第一个导致其余视频漏捕获。
+                    # v2.0.6 逐个处理；v2.0.7 自然捕获模式下只缓存为候选。
                     self._multi_payload_logged = True
                     logger.info(f"📋 {source} payload 含 {len(odes)} 个 objectDesc"
-                                "（列表数据，逐个处理）")
-                handled = set()
-                for od in odes:
-                    vd = extract_from_object_desc(od)
-                    if not vd:
-                        continue
-                    key = vd.video_id or (vd.url, vd.decode_key)
-                    if key in handled:
-                        continue
-                    handled.add(key)
-                    self._handle(vd, source=source)
-                if not odes or not handled:
+                                "（列表数据）")
+                found_any = False
+                if len(odes) > 1 and self.natural_capture:
+                    # 自然捕获：整页只缓存为候选，置顶锚点先入列，
+                    # 其余等播放器请求到对应流/封面时再捕获
+                    self._capture_anchor(odes, source)
+                    self._buffer_pending(odes, source)
+                    found_any = True
+                else:
+                    handled = set()
+                    for od in odes:
+                        vd = extract_from_object_desc(od)
+                        if not vd:
+                            continue
+                        key = vd.video_id or (vd.url, vd.decode_key)
+                        if key in handled:
+                            continue
+                        handled.add(key)
+                        self._handle(vd, source=source)
+                    found_any = bool(handled)
+                if not found_any:
                     cmd = obj.get("cmdName") if isinstance(obj, dict) else None
                     if cmd:
                         logger.info(f"🌉 bridge捕获: cmdName={cmd} | object_desc=✗ 未含")
@@ -265,6 +294,9 @@ class SphAddon:
         # 206 = Range 分片流，视频号 CDN 拉流特征 → 用于看门狗判断"正在播放"
         if resp.status_code == 206:
             self.last_stream_ts = time.time()
+        # 自然捕获（v2.0.7）：播放器请求某条视频的流/封面 → 命中候选并捕获
+        if "stodownload" in flow.request.path:
+            self._maybe_capture_from_stream(flow.request.path)
 
         # ③ 注入点：web-finder 页面的 svg-icons-register JS
         if host.endswith("res.wx.qq.com") and config.INJECT_JS_MARKER in flow.request.path:
@@ -294,16 +326,92 @@ class SphAddon:
                     f" | object_desc={'✓ 命中×' + str(len(odes)) if odes else '✗ 未含'}")
         if not odes:
             return
-        handled = set()
+        source = f"API直嗅({host})"
+        if len(odes) > 1 and self.natural_capture:
+            self._capture_anchor(odes, source)
+            self._buffer_pending(odes, source)
+        else:
+            handled = set()
+            for od in odes:
+                vd = extract_from_object_desc(od)
+                if not vd:
+                    continue
+                key = vd.video_id or (vd.url, vd.decode_key)
+                if key in handled:
+                    continue
+                handled.add(key)
+                self._handle(vd, source=source)
+
+    # ---------- 自然捕获：候选缓存 / 置顶锚点 / 播放命中 ----------
+    def _buffer_pending(self, odes, source: str):
+        """列表数据缓存为候选（自然捕获）。不显示、不下载，
+        等播放器请求到对应流/封面时由 _maybe_capture_from_stream 捕获。"""
+        now = time.time()
+        added = 0
+        with self._pending_lock:
+            self._pending = [p for p in self._pending
+                             if now - p["ts"] < self.PENDING_EXPIRE]
+            seen = {p["key"] for p in self._pending}
+            for od in odes:
+                vd = extract_from_object_desc(od)
+                if not vd:
+                    continue
+                key = vd.video_id or (vd.url, vd.decode_key)
+                if key in seen or key in self.seen:
+                    continue
+                efk = _extract_encfilekey(vd.url)
+                if not efk:
+                    continue  # 无法用流/封面 URL 匹配 → 不缓存（详情/锚点路径仍可捕获）
+                seen.add(key)
+                self._pending.append({"efk": efk, "key": key,
+                                      "vd": vd, "ts": now, "source": source})
+                added += 1
+            if len(self._pending) > self.PENDING_CAP:
+                self._pending = self._pending[-self.PENDING_CAP:]
+        if added:
+            logger.info(f"🧲 自然捕获：已缓存 {added} 条候选"
+                        "（播放到哪条才捕获哪条）")
+
+    def _capture_anchor(self, odes, source: str):
+        """置顶锚点：新列表数据的前 ANCHOR 条先入列表
+        （对应「当前浏览 + 随后的几个缓存」，保证有可见反馈）。"""
+        grabbed = 0
         for od in odes:
+            if grabbed >= self.ANCHOR:
+                break
             vd = extract_from_object_desc(od)
             if not vd:
                 continue
             key = vd.video_id or (vd.url, vd.decode_key)
-            if key in handled:
+            if key in self.seen:
                 continue
-            handled.add(key)
-            self._handle(vd, source=f"API直嗅({host})")
+            grabbed += 1
+            self._handle(vd, source=source)
+        if grabbed:
+            logger.ok(f"🎯 自然捕获：新列表前 {grabbed} 条已入列表"
+                      "（当前浏览+随后的缓存）")
+
+    def _maybe_capture_from_stream(self, url: str):
+        """播放器请求某条视频的流/封面 → 捕获命中的候选 + 后续 LOOKAHEAD 条。"""
+        if not self.natural_capture:
+            return
+        efk = _extract_encfilekey(url)
+        if not efk:
+            return
+        with self._pending_lock:
+            if not self._pending:
+                return
+            idx = next((i for i, p in enumerate(self._pending)
+                        if p["efk"] == efk), -1)
+            if idx < 0:
+                return
+            end = min(len(self._pending), idx + 1 + self.LOOKAHEAD)
+            batch = self._pending[idx:end]
+            del self._pending[idx:end]
+        if batch:
+            logger.info(f"🎯 播放命中：捕获当前播放 + 后续 {len(batch) - 1} 条缓存")
+            for p in batch:
+                self._handle(p["vd"], source=p["source"])
 
     def _handle(self, vd, source: str):
         # v2.0.4「🖼 下载图片」关闭时：图片直接跳过（不显示、不下载）。
