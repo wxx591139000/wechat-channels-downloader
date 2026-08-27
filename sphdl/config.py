@@ -49,5 +49,8 @@ CALLBACK_PATH = "/res-downloader/wechat"
 BRIDGE_HOOK_HOSTS = ("channels.weixin.qq.com",)
 BRIDGE_CALLBACK_PATH = "/__sphdl/bridge"
 
+# ⚡ 批量拉取（v2.0.8）：页面自动滚动驱动的心跳/完成回传路径
+BATCH_CALLBACK_PATH = "/__sphdl/batch"
+
 # 嗅探范围：只关注这些域名的 JSON 响应
 SNIFF_HOST_SUFFIXES = ("qq.com",)

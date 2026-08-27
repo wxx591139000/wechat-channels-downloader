@@ -562,6 +562,12 @@ class App:
                         command=self._on_natural_toggle
                         ).pack(side="left", padx=14)
 
+        # 「⚡ 批量拉取」按钮（v2.0.8）：开启后整页列表入库 + 页面自动滚动，
+        # 尽量拉取整个视频号的所有视频（受微信分页限制，拉到底自动停止）
+        self.btn_batch = ttk.Button(eng, text="⚡ 批量拉取", width=10,
+                                    command=self._on_batch_toggle)
+        self.btn_batch.pack(side="left", padx=14)
+
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
         # proxy_backup.json；无快照时兜底关闭代理）。引擎运行中点它会先确认。
         self.btn_restore_proxy = ttk.Button(eng, text="↩  恢复网络代理", width=13,
@@ -766,6 +772,32 @@ class App:
             "🎯 自然捕获：开 —— 只捕获当前播放的视频 + 随后几条缓存，"
             "不会整页入库" if on else
             "🎯 自然捕获：关 —— 列表数据将整页捕获（v2.0.6 行为）")
+
+    def _on_batch_toggle(self):
+        """「⚡ 批量拉取」按钮（v2.0.8）：
+        开启 = 整页列表入库（临时关闭自然捕获）+ 往视频号页面注入
+        自动滚动驱动，尽量拉取整个视频号的所有视频，拉到底自动停止；
+        再点一次停止并恢复自然捕获。"""
+        on = not self.addon.batch_mode
+        self.addon.batch_mode = on
+        self.addon.batch_count = 0
+        if on:
+            # 批量模式：列表数据全部入列（与「🎯 自然捕获」互斥）
+            self.addon.natural_capture = False
+            self.natural_var.set(False)
+            self.btn_batch.config(text="■ 停止批量")
+            self.push_log("ok",
+                "⚡ 批量拉取已开启：列表数据将整页入库。\n"
+                "请重新进入目标视频号页面，工具会自动向下滚动加载全部视频，"
+                "拉到底后自动停止；再点一次按钮可提前停止。")
+        else:
+            self.addon.natural_capture = self.cfg.natural_capture
+            self.natural_var.set(self.cfg.natural_capture)
+            self.btn_batch.config(text="⚡ 批量拉取")
+            self.push_log("info",
+                f"⚡ 批量拉取已停止（本次新增 {self.addon.batch_count} 条，"
+                "已恢复自然捕获）")
+        self._update_status_bar()
 
     def _toggle_engine(self):
         if self.engine.running:
@@ -1410,9 +1442,15 @@ class App:
         failed = len(self.store.by_status("failed"))
         waiting = len(self.store.by_status("waiting"))
         total = len(self.store.order)
+        batch_txt = ""
+        if self.addon.batch_mode:
+            batch_txt = (f"   |   ⚡批量: "
+                         f"{'拉取中' if self.addon._batch_active else '待重进页面'}"
+                         f"(+{self.addon.batch_count})")
         self.status_bar.config(
             text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
-                 f"{hook_txt}   |   列表: 共 {total} 条 · 待下载 {waiting} · 完成 {done} · 失败 {failed}")
+                 f"{hook_txt}   |   列表: 共 {total} 条 · 待下载 {waiting}"
+                 f" · 完成 {done} · 失败 {failed}{batch_txt}")
 
     def _hook_watchdog(self):
         """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
@@ -1445,13 +1483,18 @@ class App:
             def _age(t):
                 return "无" if not t else f"{int(now - t)}s前"
 
+            batch_txt = ""
+            if a.batch_mode:
+                batch_txt = (f" | 批量 {_age(a.last_batch_ts)}"
+                             f"·新增{a.batch_count}条")
             self.push_log(
                 "info",
                 f"💓 嗅探运行中 | 钩子数据 {_age(a.last_bridge_ts)} "
                 f"(心跳×{a.hb_count} / 数据×{a.bridge_count}) | "
                 f"流活动 {_age(a.last_stream_ts)} | "
                 f"循环延迟 {a.loop_delay_ms}ms | "
-                f"页面注入 {a.bridge_hooked_pages} 次 | 捕获 {a.capture_count} 个")
+                f"页面注入 {a.bridge_hooked_pages} 次 | 捕获 {a.capture_count} 个"
+                f"{batch_txt}")
 
     def _poll(self):
         try:

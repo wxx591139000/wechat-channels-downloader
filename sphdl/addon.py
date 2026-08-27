@@ -100,6 +100,66 @@ _BRIDGE_JS_TEMPLATE = """
 </script>
 """
 
+# ⚡ 批量拉取自动滚动驱动（v2.0.8）：开启批量模式后注入视频号页面。
+# 每 3s 滚动到列表底部触发页面"加载更多"，直到：
+#  - 滚动高度连续 10 轮（~30s）不再增长且已在底部 → 完成
+#  - 或超过 200 轮（~10 分钟）兜底停止
+# 心跳/完成都 POST 回代理 /__sphdl/batch。
+_BATCH_JS_TEMPLATE = """
+<script>
+(function () {
+  if (window.__sphdl_batch_driver) { return; }
+  window.__sphdl_batch_driver = true;
+  function scrollable() {
+    var d = document.scrollingElement || document.documentElement;
+    if (d && d.scrollHeight - d.scrollTop - d.clientHeight > 80) { return d; }
+    var els = document.querySelectorAll('div,main,section,ul');
+    var best = null, bs = 0;
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.scrollHeight > el.clientHeight + 150 && el.scrollHeight > bs) {
+        bs = el.scrollHeight; best = el;
+      }
+    }
+    return best || d;
+  }
+  function doScroll() {
+    var el = scrollable();
+    if (!el) { return {h:0,t:0,c:0}; }
+    if (el === document.scrollingElement || el === document.documentElement) {
+      window.scrollTo(0, el.scrollHeight);
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+    return {h: el.scrollHeight || 0, t: el.scrollTop || 0, c: el.clientHeight || 0};
+  }
+  function post(o) {
+    try {
+      fetch("http://127.0.0.1:__PORT__/__sphdl/batch", {
+        method: "POST", mode: "no-cors", body: JSON.stringify(o)
+      });
+    } catch (e) {}
+  }
+  var maxH = 0, stable = 0, rounds = 0;
+  var timer = setInterval(function () {
+    try {
+      rounds++;
+      var r = doScroll();
+      if (r.h > maxH + 10) { maxH = r.h; stable = 0; }
+      else if (r.h > 0 && r.t >= r.h - r.c - 60) { stable++; }
+      else { stable = 0; }
+      if (rounds > 200 || stable >= 10) {
+        clearInterval(timer);
+        post({batch_done: 1, rounds: rounds, maxHeight: maxH});
+        return;
+      }
+      post({batch: 1, rounds: rounds});
+    } catch (e) {}
+  }, 3000);
+})();
+</script>
+"""
+
 # 自然捕获（v2.0.7）：列表数据不再整页入库，播放到哪条才捕获哪条。
 #  - 列表 payload 的 objectDesc 全部缓存为"候选"（不显示、不下载）
 #  - 播放器请求某条视频的流/封面（stodownload URL 含同 encfilekey）→ 命中，
@@ -139,6 +199,12 @@ class SphAddon:
         self.PENDING_EXPIRE = 1800    # 候选缓存过期（秒）
         self._pending = []            # [{efk, key, vd, ts, source}] 按列表顺序
         self._pending_lock = _threading.Lock()
+        # ---- ⚡ 批量拉取（v2.0.8）----
+        self.batch_mode = False       # GUI「⚡ 批量拉取」开关
+        self.batch_count = 0          # 批量期间新增捕获数
+        self._batch_active = False    # 页面滚动驱动是否在跑
+        self.last_batch_ts = 0.0      # 最近一次批量心跳
+        self._batch_js = _BATCH_JS_TEMPLATE.replace("__PORT__", str(config.PROXY_PORT))
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
         # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
@@ -179,6 +245,7 @@ class SphAddon:
             return
         if port != self._bridge_port:
             self.bridge_js = _BRIDGE_JS_TEMPLATE.replace("__PORT__", str(port))
+            self._batch_js = _BATCH_JS_TEMPLATE.replace("__PORT__", str(port))
             self._bridge_port = port
             logger.debug(f"bridge 钩子端口已更新为 {port}")
 
@@ -199,7 +266,19 @@ class SphAddon:
         logger.debug(f"📡 → {req.method} {req.host}{mask_url(req.path)}")
         is_js_callback = req.host.endswith(config.CALLBACK_HOST) and config.CALLBACK_PATH in req.path
         is_bridge = config.BRIDGE_CALLBACK_PATH in req.path
-        if not (is_js_callback or is_bridge):
+        is_batch = config.BATCH_CALLBACK_PATH in req.path
+        if not (is_js_callback or is_bridge or is_batch):
+            return
+        # ⚡ 批量拉取心跳/完成回传（页面自动滚动驱动）
+        if is_batch:
+            body = req.content or b""
+            self.last_batch_ts = time.time()
+            if b"batch_done" in body:
+                self._batch_active = False
+                logger.ok(f"⚡ 批量拉取完成：已滚动到列表末尾"
+                          f"（本次新增 {self.batch_count} 条）")
+            flow.response = http.Response.make(
+                200, b"OK", {"Content-Type": "text/plain"})
             return
         source = "bridge钩子" if is_bridge else "JS回调"
         body = req.content or b""
@@ -307,6 +386,8 @@ class SphAddon:
         ctype = (resp.headers.get("content-type") or "").lower()
         if any(host.endswith(h) for h in config.BRIDGE_HOOK_HOSTS) and "text/html" in ctype:
             self._inject_bridge_hook(flow)
+            if self.batch_mode:
+                self._inject_batch_driver(flow)
             return
 
         # ② 只嗅探 qq.com 域名的 JSON 响应
@@ -434,6 +515,8 @@ class SphAddon:
             self.seen.add(key)
         self.capture_count += 1
         self.last_capture_ts = time.time()
+        if self.batch_mode:
+            self.batch_count += 1
         logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")
         logger.debug(f"🧬 捕获结构: {describe_capture(vd)}")
         if self.on_capture:
@@ -516,3 +599,23 @@ class SphAddon:
                 )
         except Exception as e:
             logger.error(f"bridge 钩子注入失败: {e}")
+
+    def _inject_batch_driver(self, flow: http.HTTPFlow):
+        """⚡ 批量拉取：往视频号页面注入自动滚动驱动（仅 batch_mode 时调用）。"""
+        try:
+            content = flow.response.content.decode("utf-8", errors="ignore")
+            if "__sphdl_batch_driver" in content:
+                return
+            if "</head>" in content:
+                new_content = content.replace("</head>",
+                                              self._batch_js + "\n</head>", 1)
+            else:
+                new_content = content + self._batch_js
+            if new_content != content:
+                flow.response.content = new_content.encode("utf-8")
+                flow.response.headers["Content-Length"] = str(len(flow.response.content))
+                self._batch_active = True
+                logger.ok(f"⚡ 批量拉取驱动已注入: "
+                          f"{flow.request.host}{flow.request.path[:60]}")
+        except Exception as e:
+            logger.error(f"批量拉取驱动注入失败: {e}")
