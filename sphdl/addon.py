@@ -98,12 +98,25 @@ _BRIDGE_JS_TEMPLATE = """
   }
 })();
 
-// ⚡ 批量拉取驱动（v2.0.9）：常驻页面，轮询代理批量状态。
+// ⚡ 批量拉取驱动（v2.0.10）：常驻页面，轮询代理批量状态。
 // 状态开启时每 2.5s 滚动一次触发"加载更多"；关闭或拉到底自动停。
+// 只滚动"当前选中"的视频号窗口：focus/blur/visibility 事件跟踪页面焦点，
+// 非当前窗口自动暂停（避免旧页面一直抢滚、新页面无法播放）。
 (function () {
   if (window.__sphdl_batch_driver) { return; }
   window.__sphdl_batch_driver = true;
   var rounds = 0, stable = 0, maxH = 0, done = false;
+  var pageActive = false;   // 仅当前选中的视频号窗口参与滚动
+  function resetState() { rounds = 0; stable = 0; maxH = 0; done = false; }
+  try {
+    window.addEventListener("focus", function () { pageActive = true; });
+    window.addEventListener("blur", function () { pageActive = false; resetState(); });
+    window.addEventListener("pointerdown", function () { pageActive = true; });
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") { pageActive = false; resetState(); }
+      else { pageActive = true; }
+    });
+  } catch (e) {}
   function post(o) {
     try {
       fetch("http://127.0.0.1:__PORT__/__sphdl/batch", {
@@ -139,11 +152,12 @@ _BRIDGE_JS_TEMPLATE = """
   }
   setInterval(function () {
     try {
+      if (!pageActive) { return; }   // 非当前窗口：不轮询、不滚动
       fetch("http://127.0.0.1:__PORT__/__sphdl/batch?status=1", {
         method: "GET", mode: "cors", cache: "no-store"
       }).then(function (r) { return r.text(); }).then(function (t) {
         var on = !!(t && t.charAt(0) === "1");
-        if (!on) { rounds = 0; stable = 0; maxH = 0; done = false; return; }
+        if (!on) { resetState(); return; }
         if (done) { return; }
         rounds++;
         var r = doScroll();
