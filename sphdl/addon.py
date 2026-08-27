@@ -113,6 +113,9 @@ class SphAddon:
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
         self.auto_download = auto_download
         self.allow_images = allow_images
+        # 可选 fn(vd)->bool：GUI 跨会话去重（records.json 已有该视频/链接则 True）。
+        # 在自动下载提交前拦截，避免"列表去重跳过了、文件却重复下载"（v2.0.5 修复）
+        self.duplicate_check = None
         self.seen = set()          # 去重: (url, decode_key)
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
@@ -290,7 +293,7 @@ class SphAddon:
         key = vd.video_id or (vd.url, vd.decode_key)
         with self._seen_lock:
             if key in self.seen:
-                logger.debug("重复视频，跳过")
+                logger.info(f"⏭ 重复视频（已捕获过），跳过: {vd.description or '(无描述)'}")
                 return
             self.seen.add(key)
         self.capture_count += 1
@@ -303,7 +306,11 @@ class SphAddon:
             except Exception:
                 pass
         if self.auto_download:
-            self.pipeline.submit(vd)
+            if self.duplicate_check and self.duplicate_check(vd):
+                logger.info(f"⏭ 重复视频（列表中已有），跳过自动下载: "
+                            f"{vd.description or '(无描述)'}")
+            else:
+                self.pipeline.submit(vd)
         else:
             logger.info("已加入待下载列表（GUI 模式不自动下载，请在界面点选后下载）")
 

@@ -447,6 +447,8 @@ class App:
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
+        # 自动下载提交前的跨会话去重（records.json 已有同视频/链接 → 不重复下载）
+        self.addon.duplicate_check = self._is_known_video
 
         threading.Thread(target=self._check_ca, daemon=True).start()
 
@@ -481,6 +483,14 @@ class App:
 
     def _on_capture(self, vd, source):
         self.push_event(("capture", vd, source))
+
+    def _is_known_video(self, vd) -> bool:
+        """跨会话去重判断（供 addon 在自动下载提交前调用，v2.0.5）：
+        同一视频（video_id=内容哈希）或同一 URL 已在列表 → True。"""
+        if vd.video_id and any(r.video_id == vd.video_id
+                               for r in self.store.items.values()):
+            return True
+        return vd.url in self._url_to_rid
 
     def _on_pipeline_event(self, event, vd, *args):
         self.push_event((event, vd, *args))
@@ -1280,10 +1290,10 @@ class App:
             # （addon 的内存去重只在本次 GUI 运行内有效，重启后靠这里兜底）
             if vd.video_id and any(r.video_id == vd.video_id
                                    for r in self.store.items.values()):
-                self.push_log("info", f"重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
+                self.push_log("info", f"⏭ 重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
                 return
             if vd.url in self._url_to_rid:
-                self.push_log("info", f"重复链接，跳过: {(vd.description or '')[:30]}")
+                self.push_log("info", f"⏭ 重复链接（列表中已有），跳过: {(vd.description or '')[:30]}")
                 return
             rid = time.strftime("%m%d_%H%M%S") + "_" + str(self._rid_seq).zfill(4)
             self._rid_seq += 1
