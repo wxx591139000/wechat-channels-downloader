@@ -24,7 +24,7 @@ from mitmproxy import http
 from . import config
 from . import shared
 from .logger import logger
-from .parser import extract_from_object_desc, find_object_desc_in_json
+from .parser import extract_from_object_desc, iter_object_descs
 from .util import mask_url, describe_capture
 
 # ④ 注入到 HTML 的 JS：包装 WeixinJSBridge.invoke，
@@ -117,6 +117,8 @@ class SphAddon:
         # 在自动下载提交前拦截，避免"列表去重跳过了、文件却重复下载"（v2.0.5 修复）
         self.duplicate_check = None
         self.seen = set()          # 去重: (url, decode_key)
+        self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
+        self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
         # ---- 钩子存活跟踪（防"捕获静默停摆"：页面重载/回收后钩子丢失，
@@ -213,13 +215,26 @@ class SphAddon:
             body, source = self._parse_q.get()
             try:
                 obj = json.loads(body)
-                od = find_object_desc_in_json(obj)
-                if od is None:
-                    od = obj  # 可能直接就是 object_desc 本体
-                vd = extract_from_object_desc(od)
-                if vd:
+                odes = list(iter_object_descs(obj))
+                if not odes:
+                    odes = [obj]  # 可能直接就是 object_desc 本体 / media 列表
+                elif len(odes) > 1 and not self._multi_payload_logged:
+                    # 诊断（一次）：bridge 回传的列表数据含多个视频 objectDesc。
+                    # v2.0.6 起逐个处理；此前只取第一个导致其余视频漏捕获。
+                    self._multi_payload_logged = True
+                    logger.info(f"📋 {source} payload 含 {len(odes)} 个 objectDesc"
+                                "（列表数据，逐个处理）")
+                handled = set()
+                for od in odes:
+                    vd = extract_from_object_desc(od)
+                    if not vd:
+                        continue
+                    key = vd.video_id or (vd.url, vd.decode_key)
+                    if key in handled:
+                        continue
+                    handled.add(key)
                     self._handle(vd, source=source)
-                else:
+                if not odes or not handled:
                     cmd = obj.get("cmdName") if isinstance(obj, dict) else None
                     if cmd:
                         logger.info(f"🌉 bridge捕获: cmdName={cmd} | object_desc=✗ 未含")
@@ -274,12 +289,20 @@ class SphAddon:
             obj = json.loads(body)
         except Exception:
             return
-        od = find_object_desc_in_json(obj)
-        logger.info(f"🔍 API直嗅: {host} {flow.request.path[:60]} | {len(body)}B | object_desc={'✓ 命中' if od else '✗ 未含'}")
-        if od is None:
+        odes = list(iter_object_descs(obj))
+        logger.info(f"🔍 API直嗅: {host} {flow.request.path[:60]} | {len(body)}B"
+                    f" | object_desc={'✓ 命中×' + str(len(odes)) if odes else '✗ 未含'}")
+        if not odes:
             return
-        vd = extract_from_object_desc(od)
-        if vd:
+        handled = set()
+        for od in odes:
+            vd = extract_from_object_desc(od)
+            if not vd:
+                continue
+            key = vd.video_id or (vd.url, vd.decode_key)
+            if key in handled:
+                continue
+            handled.add(key)
             self._handle(vd, source=f"API直嗅({host})")
 
     def _handle(self, vd, source: str):
@@ -293,7 +316,12 @@ class SphAddon:
         key = vd.video_id or (vd.url, vd.decode_key)
         with self._seen_lock:
             if key in self.seen:
-                logger.info(f"⏭ 重复视频（已捕获过），跳过: {vd.description or '(无描述)'}")
+                if key not in self._dedup_logged:
+                    self._dedup_logged.add(key)
+                    logger.info(f"⏭ 重复视频（已捕获过），跳过: "
+                                f"{vd.description or '(无描述)'}")
+                else:
+                    logger.debug("重复视频，跳过")
                 return
             self.seen.add(key)
         self.capture_count += 1
@@ -307,8 +335,10 @@ class SphAddon:
                 pass
         if self.auto_download:
             if self.duplicate_check and self.duplicate_check(vd):
-                logger.info(f"⏭ 重复视频（列表中已有），跳过自动下载: "
-                            f"{vd.description or '(无描述)'}")
+                if key not in self._dedup_logged:
+                    self._dedup_logged.add(key)
+                    logger.info(f"⏭ 重复视频（列表中已有），跳过自动下载: "
+                                f"{vd.description or '(无描述)'}")
             else:
                 self.pipeline.submit(vd)
         else:

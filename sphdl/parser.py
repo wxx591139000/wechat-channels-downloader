@@ -102,7 +102,7 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
         if isinstance(obj, list):
             media_list = obj
         elif isinstance(obj, dict):
-            media_list = _pick(obj, "media", "media_list") or []
+            media_list = _pick(obj, "media", "media_list", "mediaList") or []
         else:
             return None
         if not isinstance(media_list, list) or not media_list:
@@ -218,6 +218,40 @@ def find_object_desc_in_json(obj: Any, depth: int = 0) -> Optional[Any]:
             if dv is not None:
                 return find_object_desc_in_json(dv, depth + 1)
     return None
+
+
+def iter_object_descs(obj: Any, depth: int = 0):
+    """
+    递归找出 JSON 中**所有** object_desc / objectDesc 节点（生成器）。
+    与 find_object_desc_in_json 的区别：返回全部而不是第一个——
+    视频号 feed/主页列表的 bridge 回传常含多个视频的 objectDesc，
+    只取第一个会把其余视频全部漏掉（2026-08-27 真机复现：
+    播放同一视频号的不同视频，列表数据第一个 objectDesc 是旧视频，
+    导致新视频全部被误判"重复"）。
+    同样兼容：值为 JSON 字符串时二次解码；字符串内嵌 object_desc 时递归。
+    """
+    if depth > 12 or obj is None:
+        return
+    if isinstance(obj, dict):
+        for key in ("object_desc", "objectDesc"):
+            v = obj.get(key)
+            if isinstance(v, (dict, list)) and v:
+                yield v
+            elif isinstance(v, str) and v.strip()[:1] in ("{", "["):
+                dv = _try_json(v)
+                if isinstance(dv, (dict, list)) and dv:
+                    yield dv
+        for v in obj.values():
+            yield from iter_object_descs(v, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from iter_object_descs(v, depth + 1)
+    elif isinstance(obj, str):
+        s = obj.strip()
+        if len(s) > 8 and s[0] in "{[" and ("object_desc" in s or "objectDesc" in s):
+            dv = _try_json(s)
+            if dv is not None:
+                yield from iter_object_descs(dv, depth + 1)
 
 
 def _try_json(s: str):

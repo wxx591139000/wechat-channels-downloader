@@ -413,6 +413,7 @@ class App:
         self._dirty = False
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
+        self._known_logged: set = set()  # 已提示过"列表中已有"的 video_id/url（防刷屏）
         self._rid_seq = 0              # 捕获记录 id 递增序号（防同秒碰撞）
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
@@ -1290,10 +1291,14 @@ class App:
             # （addon 的内存去重只在本次 GUI 运行内有效，重启后靠这里兜底）
             if vd.video_id and any(r.video_id == vd.video_id
                                    for r in self.store.items.values()):
-                self.push_log("info", f"⏭ 重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
+                if vd.video_id not in self._known_logged:
+                    self._known_logged.add(vd.video_id)
+                    self.push_log("info", f"⏭ 重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
                 return
             if vd.url in self._url_to_rid:
-                self.push_log("info", f"⏭ 重复链接（列表中已有），跳过: {(vd.description or '')[:30]}")
+                if vd.url not in self._known_logged:
+                    self._known_logged.add(vd.url)
+                    self.push_log("info", f"⏭ 重复链接（列表中已有），跳过: {(vd.description or '')[:30]}")
                 return
             rid = time.strftime("%m%d_%H%M%S") + "_" + str(self._rid_seq).zfill(4)
             self._rid_seq += 1
