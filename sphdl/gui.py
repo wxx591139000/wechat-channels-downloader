@@ -785,6 +785,7 @@ class App:
         self.btn_cancel_queued.pack(side="left", padx=4)
         self._tt(self.btn_cancel_queued,
                  "把所有「排队中」的任务恢复成「待下载」状态。\n"
+                 "「待下载」任务尚未入队，无需取消；\n"
                  "正在下载中的不会中断；之后可重新点『下载选中』或"
                  "『下载全部待下载』。")
         self.btn_retry = ttk.Button(btns1, text="重试失败", width=9,
@@ -1268,8 +1269,18 @@ class App:
         """「取消所有排队」：把所有排队中的任务恢复为「待下载」状态。"""
         targets = [r for r in self.store.items.values()
                    if r.status == "pending"]
+        waiting = [r for r in self.store.items.values()
+                   if r.status == "waiting"]
         if not targets:
-            messagebox.showinfo("提示", "当前没有排队中的任务")
+            if waiting:
+                messagebox.showinfo(
+                    "提示",
+                    f"当前没有排队中的任务。\n"
+                    f"列表里有 {len(waiting)} 个『待下载』任务尚未入队，"
+                    "无需取消；\n"
+                    "如需下载请点『下载全部待下载』或选中后点『下载选中』。")
+            else:
+                messagebox.showinfo("提示", "当前没有排队中的任务")
             return
         if not messagebox.askyesno(
                 "取消所有排队",
@@ -1285,7 +1296,9 @@ class App:
             self.store.update(r.id, status="waiting", progress=0, error="")
             self._update_row(r.id)
         self._dirty = True
-        self.push_log("ok", f"已取消所有排队：{len(targets)} 个任务恢复为待下载")
+        self.push_log("ok",
+            f"已取消所有排队：{len(targets)} 个『排队中』任务恢复为待下载"
+            f"（列表现有 {len(waiting) + len(targets)} 个待下载）")
         self._update_status_bar()
 
     def _retry(self):
