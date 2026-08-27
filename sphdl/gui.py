@@ -72,6 +72,7 @@ class AppConfig:
         self.auto_proxy = True
         self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载（v1.2.5 开关可开）
         self.prefer_highest_quality = False  # 默认下载最高清晰度（原始画质优先）
+        self.download_images = True   # 默认下载图片：图片显示在列表并可下载（v2.0.4 开关）
         self._load()
 
     def _load(self):
@@ -82,6 +83,7 @@ class AppConfig:
             self.auto_proxy = bool(d.get("auto_proxy", True))
             self.auto_download = bool(d.get("auto_download", False))
             self.prefer_highest_quality = bool(d.get("prefer_highest_quality", False))
+            self.download_images = bool(d.get("download_images", True))
         except Exception:
             pass
 
@@ -91,7 +93,8 @@ class AppConfig:
                 {"port": self.port, "download_dir": self.download_dir,
                  "auto_proxy": self.auto_proxy,
                  "auto_download": self.auto_download,
-                 "prefer_highest_quality": self.prefer_highest_quality},
+                 "prefer_highest_quality": self.prefer_highest_quality,
+                 "download_images": self.download_images},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -418,6 +421,22 @@ class App:
             r = self.store.items[rid]
             self._url_to_rid[r.url] = rid
 
+        # 「🖼 下载图片」关闭时（v2.0.4）：启动即移除历史图片记录，
+        # 列表不显示、不参与下载/去重；已下载的图片文件保留在磁盘，
+        # 重新开启开关后需重新捕获图片
+        if not self.cfg.download_images:
+            dropped = 0
+            for rid in [r.id for r in self.store.items.values() if r.is_image]:
+                self.store.remove(rid)
+                for k in [k for k, v in self._url_to_rid.items() if v == rid]:
+                    self._url_to_rid.pop(k, None)
+                dropped += 1
+            if dropped:
+                self._dirty = True
+                self.push_log("warn",
+                              f"🖼 下载图片：已关闭 —— 启动时移除 {dropped} 条历史图片记录"
+                              "（图片文件保留，重新开启后需重新捕获）")
+
         self._build_root()
         self._build_ui()
 
@@ -426,7 +445,8 @@ class App:
         # 捕获即自动入队（v1.2.5，状态持久化 config.json）
         self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
-                              auto_download=self.cfg.auto_download)
+                              auto_download=self.cfg.auto_download,
+                              allow_images=self.cfg.download_images)
 
         threading.Thread(target=self._check_ca, daemon=True).start()
 
@@ -469,8 +489,8 @@ class App:
     def _build_root(self):
         self.root = tk.Tk()
         self.root.title(f"微信视频号下载器  sphdl v{__version__}")
-        self.root.geometry("1060x700")
-        self.root.minsize(900, 560)
+        self.root.geometry("1180x700")
+        self.root.minsize(1000, 560)
         try:
             from tkinter import font as tkfont
             f = tkfont.nametofont("TkDefaultFont")
@@ -508,6 +528,15 @@ class App:
         ttk.Checkbutton(eng, text="⚙ 自动下载（捕获即入队）",
                         variable=self.auto_dl_var,
                         command=self._on_auto_dl_toggle
+                        ).pack(side="left", padx=14)
+
+        # 「🖼 下载图片」开关（v2.0.4）：勾选（默认）= 图片显示在列表并可下载；
+        # 取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
+        # 状态持久化到 config.json（开启后需重新捕获已跳过的图片）
+        self.images_var = tk.BooleanVar(value=self.cfg.download_images)
+        ttk.Checkbutton(eng, text="🖼 下载图片",
+                        variable=self.images_var,
+                        command=self._on_images_toggle
                         ).pack(side="left", padx=14)
 
         # 应急按钮：把系统代理恢复到本工具接管前的状态（快照在 config 目录的
@@ -678,6 +707,29 @@ class App:
             "自动下载：开 —— 新捕获的视频将立即自动加入下载队列" if on
             else "自动下载：关 —— 请在列表选中视频后点「⬇ 下载选中」")
 
+    def _on_images_toggle(self):
+        """「🖼 下载图片」开关（v2.0.4）：
+        勾选（默认）= 图片显示在列表并可下载；
+        取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。"""
+        on = bool(self.images_var.get())
+        self.cfg.download_images = on
+        self.addon.allow_images = on
+        self.cfg.save()
+        if on:
+            self.push_log("ok", "🖼 下载图片：开 —— 图片会显示在列表并可下载")
+        else:
+            dropped = 0
+            for rid in [r.id for r in self.store.items.values() if r.is_image]:
+                self._remove_row(rid)  # 同步清树行 / store / url 映射
+                dropped += 1
+            self.push_log("warn",
+                f"🖼 下载图片：关 —— 已从列表移除 {dropped} 条图片记录，"
+                "之后的图片捕获将直接跳过（已下载的图片文件保留在磁盘，"
+                "重新开启后需重新捕获）" if dropped else
+                "🖼 下载图片：关 —— 之后的图片捕获将被跳过，不再显示/下载")
+        self._dirty = True
+        self._update_status_bar()
+
     def _toggle_engine(self):
         if self.engine.running:
             self.btn_engine.config(state="disabled")
@@ -821,6 +873,11 @@ class App:
     def _submit_record(self, rid):
         """把一条记录提交到下载管线（waiting/failed → pending）。"""
         rec = self.store.items[rid]
+        # 「🖼 下载图片」关闭时的兜底拦截：图片不下载
+        # （正常情况下图片记录已被移出列表，这里防残留/历史状态）
+        if rec.is_image and not self.cfg.download_images:
+            self.push_log("info", f"已跳过图片下载（下载图片已关闭）: {rec.title[:30]}")
+            return False
         url, size = rec.url, rec.size
         # 「首选原始画质」开启时，自动选用可用版本中最大的（原始/全尺寸优先）
         if self.cfg.prefer_highest_quality:

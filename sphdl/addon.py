@@ -102,12 +102,17 @@ _BRIDGE_JS_TEMPLATE = """
 
 
 class SphAddon:
-    def __init__(self, pipeline, on_capture=None, auto_download: bool = True):
+    def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
+                 allow_images: bool = True):
         """auto_download=False 时（GUI 模式）：只捕获进列表，
-        不自动提交下载队列，由用户点选后再下载。"""
+        不自动提交下载队列，由用户点选后再下载。
+        allow_images=False 时（v2.0.4「🖼 下载图片」开关关闭）：
+        图片不捕获、不显示、不下载——直接跳过（不占去重名额，
+        重新开启后同一图片可再次被捕获）。"""
         self.pipeline = pipeline
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
         self.auto_download = auto_download
+        self.allow_images = allow_images
         self.seen = set()          # 去重: (url, decode_key)
         self.injected = False      # JS 是否已注入
         self.bridge_hooked_pages = 0  # ④ 已注入的 HTML 页面数
@@ -275,6 +280,11 @@ class SphAddon:
             self._handle(vd, source=f"API直嗅({host})")
 
     def _handle(self, vd, source: str):
+        # v2.0.4「🖼 下载图片」关闭时：图片直接跳过（不显示、不下载）。
+        # 放在去重之前：不占 seen 名额，重新开启开关后同一图片可再捕获。
+        if vd.is_image and not self.allow_images:
+            logger.info(f"🖼 跳过图片（下载图片已关闭）: {vd.description or '(无描述)'}")
+            return
         # 去重优先用稳定视频 ID（md5sum/encfilekey）：同一视频反复播放
         # 会带新 token 产生新 URL，按 URL 去重会把同一视频重复下载多份
         key = vd.video_id or (vd.url, vd.decode_key)
