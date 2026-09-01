@@ -61,6 +61,32 @@ STATUS_TEXT = {
 # 表头排序（v2.0.12）：按「状态」排序时的优先级（升序=正在进行的在前）
 STATUS_SORT_ORDER = {"downloading": 0, "decrypting": 1, "pending": 2,
                      "waiting": 3, "done": 4, "failed": 5, "stopped": 6}
+
+# 内置「使用说明」内容（v2.0.16）：首次启动自动弹出，也可点按钮随时查看
+GUIDE_TEXT = """\
+【快速上手 · 约 2 分钟】
+① 首次使用：点「安装/检测」按向导装好 CA 证书（只需一次）
+② 点「▶ 启动嗅探」——会自动接管系统代理
+③ 打开微信 → 视频号 → 播放/浏览视频
+   ⚠ 页面若是在启动嗅探之前打开的，请【完全关闭视频号页面再重新进入】，
+     让工具把捕获钩子注入页面；只刷新可能仍走缓存
+④ 视频进入列表后：
+   · 手动下载：选中行点「⬇ 下载选中」（可 Ctrl/Shift 多选）
+   · 自动下载：勾选「⚙ 自动下载」，新捕获的视频自动排队下载
+   · 整个视频号全下：点「⚡ 批量拉取」，页面自动滚动拉到底
+⑤ 完成后到下载目录查看 MP4；用完点「停止嗅探」自动恢复系统代理
+
+【小技巧】
+· 鼠标悬停任意按钮/开关 2 秒，会弹出该控件的用法与注意点说明
+· 「🎯 自然捕获」= 只捕获当前播放的视频+随后几条，不会整页入库
+· 列表点击表头可按 状态/大小/时间 升降序排列
+· 「📋 复制日志」= 出问题一键复制日志发给开发者
+· 「停止所有下载 / 取消所有排队 / 删除全部记录」= 批量任务管理
+
+【状态栏怎么看】
+· 钩子: Xs前 = 页面钩子正常；「钩子: 无 ⚠」= 请重新进入视频号页面
+· ⚡批量: 拉取中(+N) = 正在批量拉取，被其他窗口遮挡也会继续
+"""
 STATUS_TAG = {
     "done": "tag_done", "failed": "tag_failed", "downloading": "tag_downloading",
     "decrypting": "tag_decrypting", "pending": "tag_pending",
@@ -142,6 +168,7 @@ class AppConfig:
         self.prefer_highest_quality = False  # 默认下载最高清晰度（原始画质优先）
         self.download_images = True   # 默认下载图片：图片显示在列表并可下载（v2.0.4 开关）
         self.natural_capture = True   # 默认自然捕获：当前播放+随后几条，不整页入库（v2.0.7）
+        self.guide_auto_shown = False  # 内置使用说明是否已自动弹出过（v2.0.16）
         self._load()
 
     def _load(self):
@@ -154,6 +181,7 @@ class AppConfig:
             self.prefer_highest_quality = bool(d.get("prefer_highest_quality", False))
             self.download_images = bool(d.get("download_images", True))
             self.natural_capture = bool(d.get("natural_capture", True))
+            self.guide_auto_shown = bool(d.get("guide_auto_shown", False))
         except Exception:
             pass
 
@@ -165,7 +193,8 @@ class AppConfig:
                  "auto_download": self.auto_download,
                  "prefer_highest_quality": self.prefer_highest_quality,
                  "download_images": self.download_images,
-                 "natural_capture": self.natural_capture},
+                 "natural_capture": self.natural_capture,
+                 "guide_auto_shown": self.guide_auto_shown},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -589,6 +618,49 @@ class App:
         """给控件挂悬停提示：鼠标停留 2 秒显示用法与注意点（v2.0.11）。"""
         ToolTip(widget, text, delay_ms=2000)
 
+    def _open_guide(self):
+        """打开内置「使用说明」窗口（首次启动自动弹出，也可点按钮查看）。"""
+        if getattr(self, "_guide_win", None) is not None:
+            try:
+                if self._guide_win.winfo_exists():
+                    self._guide_win.lift()
+                    return
+            except Exception:
+                pass
+        win = tk.Toplevel(self.root)
+        win.title("使用说明")
+        win.geometry("620x540")
+        win.minsize(540, 440)
+        win.transient(self.root)
+        self._guide_win = win
+
+        frm = ttk.Frame(win, padding=10)
+        frm.pack(fill="both", expand=True)
+        txt = tk.Text(frm, wrap="word", font=("Microsoft YaHei UI", 10),
+                      bg="#f8fafc", fg="#111827", relief="flat",
+                      padx=12, pady=10, state="normal")
+        txt.insert("1.0", GUIDE_TEXT)
+        txt.config(state="disabled")
+        sb = ttk.Scrollbar(frm, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        self.guide_dont_var = tk.BooleanVar(value=True)
+
+        def _on_close():
+            self.cfg.guide_auto_shown = bool(self.guide_dont_var.get())
+            self.cfg.save()
+            win.destroy()
+
+        bar = ttk.Frame(win, padding=(10, 4, 10, 8))
+        bar.pack(fill="x")
+        ttk.Checkbutton(bar, text="下次启动不再自动显示",
+                        variable=self.guide_dont_var).pack(side="left")
+        ttk.Button(bar, text="知道了", width=10,
+                   command=_on_close).pack(side="right")
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
     def _build_ui(self):
         root = self.root
         main = ttk.Frame(root, padding=8)
@@ -643,6 +715,13 @@ class App:
 
         self.eng_label = ttk.Label(eng, text="状态: 已停止", foreground="#6b7280")
         self.eng_label.pack(side="right")
+        self.btn_guide = ttk.Button(eng, text="❓ 使用说明", width=10,
+                                    command=self._open_guide)
+        self.btn_guide.pack(side="right", padx=(0, 10))
+        self._tt(self.btn_guide,
+                 "打开内置「使用说明」：快速上手 + 小技巧。\n"
+                 "首次启动会自动弹出一次；鼠标悬停任意按钮 2 秒"
+                 "也有单按钮说明。")
 
         # ===== ② 捕获设置（捕获后的行为） =====
         capf = ttk.LabelFrame(main, text=" 捕获设置 ", padding=6)
@@ -880,6 +959,9 @@ class App:
 
         self._refresh_tree_all()
         self._update_capture_hint()
+        # 首次启动自动弹出「使用说明」（v2.0.16）
+        if not self.cfg.guide_auto_shown:
+            self.root.after(300, self._open_guide)
 
     # ---------------- 引擎控制 ----------------
     def _on_restore_proxy(self):
