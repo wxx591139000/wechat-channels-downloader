@@ -1516,6 +1516,7 @@ class App:
             return
         self.addon.batch_mode = on
         self.addon.batch_count = 0
+        self.addon._batch_seen_count = self.addon.capture_count  # 续跑信号基线（v2.0.18）
         if on:
             # 批量模式：列表数据全部入列（与「🎯 自然捕获」互斥）
             self.addon.natural_capture = False
@@ -1997,7 +1998,18 @@ class App:
         for rid in list(self.store.order):
             self._remove_row(rid)
         self._dirty = True
-        self.push_log("ok", f"已清空视频清单：删除全部 {n} 条记录（文件保留）")
+        # ★ 清空 addon.seen（v2.0.18）：删全部记录后重新打开视频号必须能重新捕获。
+        # 用 clear_seen 而非逐个 release —— seen 里可能残留列表已无的 key
+        # （如候选缓存过的、满档被拒后残留的），逐个释放清不掉，会导致
+        # 后续拉取被静默跳过、清单不动（2026-10-16 用户故障的第二个入口）。
+        try:
+            freed = self.addon.clear_seen()
+        except Exception as e:
+            freed = 0
+            self.push_log("error", f"清空捕获去重集合失败（不影响列表）：{e}")
+        self.push_log("ok", f"已清空视频清单：删除全部 {n} 条记录（文件保留）"
+                            + (f"；已释放 {freed} 个捕获去重名额"
+                               "（这些视频可重新捕获）" if freed else ""))
         self._update_status_bar()
 
     def _clear_done(self):
@@ -2113,6 +2125,15 @@ class App:
         rec = self.store.items.get(rid)
         if rec is not None and rec.video_id:
             self._vid_index.discard(rec.video_id)
+            # ★ 释放 addon.seen（v2.0.18）：这是**所有单条删除路径的统一出口**
+            # （删除记录 / 删除文件+记录 / 清空已完成 / 清空失败 / 删除全部记录）。
+            # 不释放的话，删完记录重新打开视频号时，同一批视频全部命中 seen
+            # 被判「重复视频」跳过、清单不动（2026-10-16 用户报告的真实故障）。
+            try:
+                if getattr(self, "addon", None) is not None:
+                    self.addon.release_seen([rec.video_id])
+            except Exception:
+                pass
         for k in [k for k, v in self._url_to_rid.items() if v == rid]:
             self._url_to_rid.pop(k, None)
         self.store.remove(rid)
@@ -2130,7 +2151,7 @@ class App:
         self._apply_sort()
 
     def _drop_records_ui(self, rec_list):
-        """把「已从 store 删除的记录」从界面与去重索引中清干净（v2.0.17）。
+        """把「已从 store 删除的记录」从界面与去重索引中清干净。
 
         注意：这些记录已不在 store.items 里，必须用传进来的 Record 数据清
         _vid_index —— 否则该视频被永久判「列表中已有」、再也回不到列表
@@ -2138,6 +2159,10 @@ class App:
 
         删记录后若列表不再满，**重置满档门闩并提示恢复加载**：这是"买小套餐
         的客户勤删记录就能一直拉新视频"的关键路径（v2.0.17 用户需求）。
+
+        v2.0.18：**同时释放 addon 侧的 seen 去重名额**。否则删完记录重新打开
+        视频号时，同一批视频会全部命中 seen 被判「重复视频」跳过、清单不动
+        （2026-10-16 用户报告的真实故障）。
         """
         for rec in rec_list:
             if rec.video_id:
@@ -2148,6 +2173,11 @@ class App:
             if iid and self.tree.exists(iid):
                 self.tree.delete(iid)
         if rec_list:
+            # ★ 释放 addon.seen：使这些视频可被重新捕获（v2.0.18）
+            try:
+                self.addon.release_seen(r.video_id for r in rec_list)
+            except Exception as e:
+                self.push_log("error", f"释放捕获去重名额失败（不影响列表）：{e}")
             self._after_records_removed()
 
     def _after_records_removed(self):
@@ -2421,6 +2451,18 @@ class App:
             if a.batch_mode:
                 batch_txt = (f" | 批量 {_age(a.last_batch_ts)}"
                              f"·新增{a.batch_count}条")
+            # ★ v2.0.18：批量「已停」且久无新捕获 → 明确提示可操作原因。
+            # 这是客户最常遇到的"清单不动"场景：视频号窗口失焦 → 页面拿不到
+            # 滚动授权 → 不再翻页。日志必须说清怎么办，不能让客户干等。
+            stall_txt = ""
+            if a.batch_mode and a.last_batch_ts and now - a.last_batch_ts > 60:
+                idle = now - (a.last_capture_ts or a.last_batch_ts)
+                if idle > 60:
+                    stall_txt = (
+                        f"\n⚠ 批量已停 {int(now - a.last_batch_ts)}s"
+                        f" 且 {int(idle)}s 无新捕获 —— 若视频号列表还在翻但清单不增，"
+                        "请【点一下视频号窗口】让它重新获得焦点（自动翻页需要焦点）；"
+                        "仍不行则点「停止批量」再「开始批量」。")
             self.push_log(
                 "info",
                 f"💓 嗅探运行中 | 钩子数据 {_age(a.last_bridge_ts)} "
@@ -2428,7 +2470,7 @@ class App:
                 f"流活动 {_age(a.last_stream_ts)} | "
                 f"循环延迟 {a.loop_delay_ms}ms | "
                 f"页面注入 {a.bridge_hooked_pages} 次 | 捕获 {a.capture_count} 个"
-                f"{batch_txt}")
+                f"{batch_txt}{stall_txt}")
 
     def _poll(self):
         try:

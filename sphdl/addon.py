@@ -106,9 +106,12 @@ _BRIDGE_JS_TEMPLATE = """
   if (window.__sphdl_batch_driver) { return; }
   window.__sphdl_batch_driver = true;
   var pageId = (Math.random() * 1e9).toString(36);
-  var rounds = 0, stable = 0, maxH = 0, done = false;
+  var rounds = 0, stable = 0, maxH = 0, done = false, doneAt = 0;
   var pageActive = false;   // 本页最近是否获得过焦点（焦点事件跟踪）
-  function resetState() { rounds = 0; stable = 0; maxH = 0; done = false; }
+  // 复位「滚动进度」但**不清 done**：用于"未授权滚动"时避免误判到底
+  // （v2.0.18 修复：原来 resetState 连 done 一起清，配合失焦会永久停摆）
+  function resetProgress() { rounds = 0; stable = 0; }
+  function resetState() { rounds = 0; stable = 0; maxH = 0; done = false; doneAt = 0; }
   try {
     window.addEventListener("focus", function () { pageActive = true; });
     window.addEventListener("pointerdown", function () { pageActive = true; });
@@ -150,19 +153,38 @@ _BRIDGE_JS_TEMPLATE = """
   setInterval(function () {
     try {
       fetch("http://127.0.0.1:__PORT__/__sphdl/batch?status=1&id=" + pageId
-            + "&f=" + (pageActive ? "1" : "0"), {
+            + "&f=" + (pageActive ? "1" : "0") + "&h=" + maxH, {
         method: "GET", mode: "cors", cache: "no-store"
       }).then(function (r) { return r.text(); }).then(function (t) {
+        // 响应格式：'1' = 授权滚动；'0' = 未授权。
+        // '1' 开头带 'r' 表示代理侧捕获数有增长（列表还有内容，要求续跑）。
         var on = !!(t && t.charAt(0) === "1");
-        if (!on) { resetState(); return; }
-        if (done) { return; }
+        var grew = !!(t && t.indexOf("r") > 0);
+        if (!on) {
+          // 未授权滚动（本页失焦 / 非被选中页）——v2.0.18 修复：
+          // ① 只复位滚动进度，**不清 done**（避免"到底了"被失焦抹掉）
+          // ② 绝不把它当成"已到底"的证据（原来会因此永久停摆）
+          resetProgress();
+          return;
+        }
+        if (done) {
+          // 已判定"到底"。若代理侧又有新捕获（grew），说明没到底 → 自动续跑；
+          // 否则等 done 宽限期过后也自动再试一轮，绝不永久停摆。
+          var waited = Date.now() - doneAt;
+          if (grew || waited > 20000) {
+            done = false; doneAt = 0; stable = 0; rounds = 0;
+          } else {
+            return;
+          }
+        }
         rounds++;
         var r = doScroll();
         if (r.h > maxH + 10) { maxH = r.h; stable = 0; }
         else if (r.h > 0 && r.t >= r.h - r.c - 60) { stable++; }
         else { stable = 0; }
-        if (rounds > 240 || stable >= 12) {
-          done = true;
+        // 到底判定放宽：50s 无新增内容（原 30s，虚拟列表懒加载易误判）
+        if (rounds > 240 || stable >= 20) {
+          done = true; doneAt = Date.now();
           post({batch_done: 1, rounds: rounds, maxHeight: maxH});
         } else {
           post({batch: 1, rounds: rounds});
@@ -218,6 +240,7 @@ class SphAddon:
         self.batch_count = 0          # 批量期间新增捕获数
         self.rejected_count = 0       # 列表满档被 GUI 拒收（未加载）的视频数（v2.0.17）
         self._batch_active = False    # 页面滚动驱动是否在跑
+        self._batch_seen_count = 0     # 上次下发续跑信号时的捕获计数（v2.0.18）
         self.last_batch_ts = 0.0      # 最近一次批量心跳
         self._batch_page = None       # 当前选中的视频号页面 id（最近获得焦点者）
         self.injected = False      # JS 是否已注入
@@ -306,8 +329,16 @@ class SphAddon:
                 else:
                     self._batch_page = None
                     chosen = False
+                # v2.0.18：把「上次查询之后是否有新捕获」作为续跑信号下发。
+                # 页面据此判断"列表还有内容"→ 即使已判到底也自动续跑；
+                # 同时把 scrollHeight 上报回来用于诊断（h 参数仅记录，不参与判定）。
+                grew = False
+                if chosen:
+                    grew = self.capture_count > self._batch_seen_count
+                    self._batch_seen_count = self.capture_count
+                payload = ("1" if chosen else "0") + ("r" if grew else "")
                 flow.response = http.Response.make(
-                    200, b"1" if chosen else b"0",
+                    200, payload.encode(),
                     {"Content-Type": "text/plain",
                      "Access-Control-Allow-Origin": "*",
                      "Cache-Control": "no-store"})
@@ -588,6 +619,42 @@ class SphAddon:
                 self.pipeline.submit(vd)
         else:
             logger.info("已加入待下载列表（GUI 模式不自动下载，请在界面点选后下载）")
+
+    def release_seen(self, video_ids):
+        """删记录后释放 seen 名额，使这些视频可被**重新捕获**（v2.0.18 修复）。
+
+        背景（2026-10-16 用户报告的真实故障）：
+          客户在旗舰版下抓到 3000 条 → 删掉所有记录 → 重新打开视频号
+          → 清单不动。根因是 `seen` 是内存集合、只增不减，而删记录只清了
+          GUI 侧索引，没通知 addon；于是同一批视频全部命中 seen 被跳过。
+
+        与既有的「满档拒收撤回已见标记」（见 _handle 里 accepted is False 分支）
+        是同一根因的另一个入口：**凡是把记录从列表移除，都要释放 seen**。
+        """
+        ids = [v for v in (video_ids or []) if v]
+        if not ids:
+            return 0
+        released = 0
+        with self._seen_lock:
+            for vid in ids:
+                if vid in self.seen:
+                    self.seen.discard(vid)
+                    released += 1
+                self._dedup_logged.discard(vid)
+        return released
+
+    def clear_seen(self):
+        """清空全部 seen（「删除全部记录」时调用）——返回清掉的条目数。
+
+        比逐个 release_seen 更彻底：`seen` 里可能残留**列表里已无**的 key
+        （例如满档被拒后又被其他路径留在 seen 的、或候选缓存过的），
+        只按记录逐个释放清不掉它们，会导致后续拉取被静默跳过。
+        """
+        with self._seen_lock:
+            n = len(self.seen)
+            self.seen.clear()
+            self._dedup_logged.clear()
+        return n
 
     # ---------- ③ JS 注入 ----------
     def _inject_js(self, flow: http.HTTPFlow):
