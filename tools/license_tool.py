@@ -12,6 +12,18 @@
     python tools/license_tool.py verify SPHDL-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
     python tools/license_tool.py selftest            # 往返/篡改/容错自检
 
+发码并登记台账（★推荐，作者侧追溯，见 tools/ledger.py 与本目录文档）
+    python tools/license_tool.py gen 20000 \
+        --customer "闲鱼昵称" --contact "闲鱼:xxx888" \
+        --channel "闲鱼" --price "199" --note "旗舰版永久"
+    # 台账文件：E:\myHermesWorkSpace\_archives\keys\licenses.jsonl（仓库外，不入库）
+
+查台账（追溯谁泄露了码）
+    python tools/license_tool.py ledger list      # 全部记录
+    python tools/license_tool.py ledger stats     # 统计（含重复设备码告警）
+    python tools/license_tool.py ledger find  SPHDL-XXXX-...   # ★按码反查是谁
+    python tools/license_tool.py ledger device  A3F8-...      # 按设备码查
+
 密钥与分发约定
   · 密钥 = 仓库根 `.license_secret`（32 字节 hex，**已 .gitignore，绝不入库**）
   · 构建时 release.py 把密钥混淆后注入 `sphdl/_lic_key.py`（同样不入库），
@@ -27,6 +39,7 @@
   20000  = 旗舰版（2 万条，经实测的容量上限）
 """
 import argparse
+import json
 import os
 import secrets
 import sys
@@ -36,6 +49,8 @@ ROOT = Path(__file__).resolve().parent.parent          # sphdl/
 sys.path.insert(0, str(ROOT))
 
 from sphdl import license as lic                        # noqa: E402
+sys.path.insert(0, str(ROOT / "tools"))
+import ledger as L                                      # noqa: E402
 
 SECRET_FILE = ROOT / ".license_secret"
 KEY_FILE = ROOT / "sphdl" / "_lic_key.py"
@@ -100,10 +115,83 @@ def cmd_gen(args):
         return 1
     if args.note:
         log(f"# 客户/备注: {args.note}")
+    label = lic.label_of_tier(tier)
+    codes = []
     for _ in range(max(1, args.count)):
-        log(lic.make_code(tier, days=args.days))
-    log(f"（档位: {lic.label_of_tier(tier)}｜有效期: "
+        code = lic.make_code(tier, days=args.days)
+        codes.append(code)
+        log(code)
+    # 台账登记（作者侧追溯，见 tools/ledger.py）
+    if args.no_ledger:
+        log("（--no-ledger：本次未登记台账）")
+    else:
+        for code in codes:
+            L.append(code, tier, label, days=args.days,
+                     customer=args.customer, contact=args.contact,
+                     device=args.device, price=args.price,
+                     note=args.note, channel=args.channel)
+        p = L.ledger_path()
+        log(f"📒 已登记台账 {len(codes)} 条 → {p}")
+        if not args.customer and not args.note:
+            log("   ⚠️ 未填 --customer/--note：建议补上，否则出事查不到是谁")
+    log(f"（档位: {label}｜有效期: "
         f"{'永久' if not args.days else str(args.days) + ' 天自首次激活'}）")
+    return 0
+
+
+def cmd_ledger(args):
+    """台账查询：list / find / device / stats。"""
+    if args.action == "stats":
+        st = L.stats()
+        log(f"📒 台账: {L.ledger_path()}")
+        log(f"总计 {st['total']} 条")
+        if st["by_tier"]:
+            log("  档位分布: " + "  ".join(
+                f"{k}×{v}" for k, v in sorted(st["by_tier"].items())))
+        if st["by_channel"]:
+            log("  渠道分布: " + "  ".join(
+                f"{k}×{v}" for k, v in sorted(st["by_channel"].items())))
+        if st["by_date"]:
+            log("  按日期: " + "  ".join(
+                f"{k}×{v}" for k, v in sorted(st["by_date"].items())))
+        dup = {d: n for d, n in st["devices"].items() if n > 1}
+        if dup:
+            log(f"  ⚠️ 重复设备码（同机多码，疑似转卖）：{dup}")
+        return 0
+
+    if args.action == "find":
+        recs = L.find_by_code(args.value)
+        if not recs:
+            log(f"❌ 台账中未找到该码: {args.value}")
+            log("   （可能是：① 不是本机发出的码 ② 台账被改过 ③ 码抄错了）")
+            return 1
+        for r in recs:
+            log(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.action == "device":
+        recs = L.find_by_device(args.value)
+        if not recs:
+            log(f"未找到该设备码的记录: {args.value}")
+            return 1
+        if len(recs) > 1:
+            log(f"⚠️ 该设备码有 {len(recs)} 条发码记录（同机多码，"
+                "疑似转卖或有人冒用）：")
+        for r in recs:
+            log(json.dumps(r, ensure_ascii=False, indent=2))
+        return 0
+
+    # list
+    recs = L.load()
+    if not recs:
+        log(f"📒 台账为空或不存在: {L.ledger_path()}")
+        return 0
+    log(f"📒 台账共 {len(recs)} 条（{L.ledger_path()}）")
+    for r in recs:
+        log(f"  {r.get('issued','?'):19s} | {r.get('tier_label','?'):8s} | "
+            f"{r.get('code','?'):38s} | {r.get('customer') or '(未填)'}"
+            f"{' | ' + r['device'] if r.get('device') else ''}"
+            f"{' | ' + r['channel'] if r.get('channel') else ''}")
     return 0
 
 
@@ -141,8 +229,25 @@ def main():
     p.add_argument("tier", help="500 / 1000 / 2000 / 20000（旗舰版）")
     p.add_argument("--days", type=int, default=0, help="有效天数（0=永久，粒度 8 天）")
     p.add_argument("--count", type=int, default=1, help="生成个数")
-    p.add_argument("--note", default="", help="备注（客户名，仅打印）")
+    p.add_argument("--note", default="", help="备注（仅打印 + 记台账）")
+    # ---- 台账字段（作者侧追溯，见 tools/ledger.py）----
+    p.add_argument("--customer", default="", help="客户名/昵称（记台账）")
+    p.add_argument("--contact", default="", help="联系方式，如「闲鱼:abc123」「微信:zs」")
+    p.add_argument("--channel", default="", help="销售渠道，如「闲鱼」「微信」")
+    p.add_argument("--price", default="", help="成交价（记台账，便于统计）")
+    p.add_argument("--device", default="", help="设备码（ver=2 绑定版用，暂未启用）")
+    p.add_argument("--no-ledger", action="store_true",
+                   help="不登记台账（默认登记；仅测试时用）")
     p.set_defaults(func=cmd_gen)
+
+    p = sub.add_parser("ledger", help="查台账（追溯谁泄露了码）")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "find", "device", "stats"],
+                   help="list=列表（默认）/ find=按码反查 / "
+                        "device=按设备码查 / stats=统计")
+    p.add_argument("value", nargs="?", default="",
+                   help="find/device 时的查询值（授权码或设备码）")
+    p.set_defaults(func=cmd_ledger)
 
     p = sub.add_parser("verify", help="校验授权码")
     p.add_argument("code")
