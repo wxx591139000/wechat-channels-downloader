@@ -116,6 +116,29 @@ def run_selftest(args):
         sys.exit(1)
 
 
+def run_selftest_license(args):
+    """授权码自检（v2.0.17）：验证构建产物里授权密钥已正确注入，
+    且 4 档往返生成/校验一致。release.py 构建后自动调用 —— 密钥注入
+    失败（漏注入/写坏）会在这里立刻暴露，避免发出去的包"所有授权码都无效"。
+    """
+    from sphdl import license as lic
+
+    print("授权密钥:", "已注入" if lic.license_available() else "缺失 ❌")
+    if not lic.license_available():
+        raise SystemExit("❌ 授权密钥缺失：构建未注入 sphdl/_lic_key.py")
+    bad = 0
+    for name, ok, detail in lic.selftest():
+        print(f"{'[PASS]' if ok else '[FAIL]'} {name} {detail}")
+        bad += 0 if ok else 1
+    # 再真实生成一个码打印出来（作者可用来核对发布包的档位行为）
+    demo = lic.make_code(1000, days=0)
+    print("示例授权码(1000 档):", demo)
+    if lic.verify_code(demo) is None:
+        bad += 1
+    print("授权自检:", "ALL PASS" if not bad else f"{bad} 项失败")
+    raise SystemExit(1 if bad else 0)
+
+
 def run_selftest_threaded(args):
     """线程自检：完全复刻 GUI 的引擎启动路径（后台线程 + 独立事件循环），
     验证冻结环境下后台线程启动引擎不死亡（2026-08-26「启动嗅探失败」
@@ -291,6 +314,8 @@ def main():
                     help="线程自检：引擎跑在后台线程（完全复刻 GUI 启动路径，"
                          "含引擎线程内首次导入 mitmproxy），验证冻结环境不"
                          "死亡后退出（2026-08-26 启动嗅探失败事故的回归测试）")
+    ap.add_argument("--selftest-license", action="store_true",
+                    help="授权自检：验证授权密钥已注入 + 4 档往返校验后退出")
     ap.add_argument("-v", "--verbose", action="store_true", help="调试输出")
     args = ap.parse_args()
 
@@ -336,6 +361,8 @@ def main():
         run_selftest(args)
     elif args.selftest_threaded:
         run_selftest_threaded(args)
+    elif args.selftest_license:
+        run_selftest_license(args)
     elif args.paste or args.paste_text:
         run_paste(args)
     else:

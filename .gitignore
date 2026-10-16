@@ -34,3 +34,14 @@ dist/微信视频号下载器-v1.2.2-win64-portable.zip
 
 # 测试临时文件
 tests/_smoke/
+tests/*.mp4
+tests/*.enc.tmp
+
+# 授权密钥（绝不入库）
+.license_secret
+sphdl/_lic_key.py
+
+# 旧构建/试验产物（不入库；10/12 瘦身方案里已移出项目树的那些）
+build_v121/
+dist123x/
+dist_v121/

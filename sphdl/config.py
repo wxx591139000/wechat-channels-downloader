@@ -54,3 +54,84 @@ BATCH_CALLBACK_PATH = "/__sphdl/batch"
 
 # 嗅探范围：只关注这些域名的 JSON 响应
 SNIFF_HOST_SUFFIXES = ("qq.com",)
+
+# ============================ 列表容量档位（v2.0.17） ============================
+# 列表（records.json / 界面清单）容量档位。
+# **档位由作者掌控，客户端不可自行配置**：只认两条通道 ——
+#   ① 授权码（sphdl/license.py，客户在界面输入）→ 解锁对应档位
+#   ② 构建预置（release.py --max-records N）→ 该版本档位写死
+# 语义：填满档位即**停止加载后续视频**（不顶掉已有记录）。
+#       填满后客户删除部分记录使列表低于上限 → 自动恢复接收新视频
+#       （小套餐客户只要勤删记录即可长期使用）。
+#
+# v2.0.17 定稿：4 档全部为**确定数值**（不再有「不限量」概念）。
+#   旗舰版 = 20000 条（实测：插入 0.12s / 落盘 1.14s / 内存 +18MB /
+#   启动加载 0.29s；20000 条为经实测的容量上限，超过后界面排序等操作明显变慢）。
+MAX_RECORDS_TIERS = (500, 1000, 2000, 20000)
+DEFAULT_MAX_RECORDS = 500           # 未授权版本的默认档位
+
+# 档位名称（v2.0.17 定稿，参考软件行业档位梯度命名）
+#   轻量版(500) / 标准版(1000) / 专业版(2000) / 旗舰版(20000)
+# 界面、状态栏、标题、弹窗统一走这里，改档位名只改这一处。
+MAX_RECORDS_NAMES = {500: "轻量版", 1000: "标准版",
+                     2000: "专业版", 20000: "旗舰版"}
+
+# 档位完整展示名（名称 + 容量括号），如「标准版（1000 条）」
+MAX_RECORDS_LABELS = {
+    500: "轻量版（500 条）",
+    1000: "标准版（1000 条）",
+    2000: "专业版（2000 条）",
+    20000: "旗舰版（2 万条）",
+}
+
+# 档位容量部分的展示名（用于「满 N 条」等只讲容量的句子）
+MAX_RECORDS_QUOTA = {500: "500 条", 1000: "1000 条",
+                     2000: "2000 条", 20000: "2 万条"}
+
+
+def label_of(max_records: int) -> str:
+    """档位的展示名（如「标准版（1000 条）」）；未知值退回「N 条」。"""
+    n = int(max_records)
+    return MAX_RECORDS_LABELS.get(n, f"{n} 条")
+
+
+def name_of(max_records: int) -> str:
+    """档位名称（如「标准版」）；未知值退回「N 条档」。"""
+    n = int(max_records)
+    return MAX_RECORDS_NAMES.get(n, f"{n} 条档")
+
+
+def quota_of(max_records: int) -> str:
+    """档位容量展示名（如「1000 条」，旗舰版为「2 万条」）。"""
+    n = int(max_records)
+    return MAX_RECORDS_QUOTA.get(n, f"{n} 条")
+
+
+def _edition_attr(name):
+    try:
+        from . import _edition  # noqa: WPS433（未注入时按默认处理）
+        return getattr(_edition, name, None)
+    except Exception:
+        return None
+
+
+def locked_max_records():
+    """构建预置的**锁定**档位（release.py --max-records 写 sphdl/_edition.py）。
+
+    返回 None = 未锁档（档位由授权码决定）；返回 int = 档位写死
+    （500/1000/2000/20000；v2.0.17 起不再支持 0=不限量），界面隐藏授权入口。
+    """
+    v = _edition_attr("LOCKED_MAX_RECORDS")
+    return None if v is None else int(v)
+
+
+def build_default_max_records() -> int:
+    """未授权时的默认档位（release.py --default-records 可覆盖，默认 500）。"""
+    v = _edition_attr("DEFAULT_MAX_RECORDS_OVERRIDE")
+    if v is None:
+        return DEFAULT_MAX_RECORDS
+    try:
+        return max(0, int(v))
+    except Exception:
+        return DEFAULT_MAX_RECORDS
+

@@ -216,6 +216,7 @@ class SphAddon:
         # ---- ⚡ 批量拉取（v2.0.8）----
         self.batch_mode = False       # GUI「⚡ 批量拉取」开关
         self.batch_count = 0          # 批量期间新增捕获数
+        self.rejected_count = 0       # 列表满档被 GUI 拒收（未加载）的视频数（v2.0.17）
         self._batch_active = False    # 页面滚动驱动是否在跑
         self.last_batch_ts = 0.0      # 最近一次批量心跳
         self._batch_page = None       # 当前选中的视频号页面 id（最近获得焦点者）
@@ -558,11 +559,25 @@ class SphAddon:
             self.batch_count += 1
         logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")
         logger.debug(f"🧬 捕获结构: {describe_capture(vd)}")
+        accepted = True
         if self.on_capture:
             try:
-                self.on_capture(vd, source)
+                accepted = self.on_capture(vd, source)
             except Exception:
-                pass
+                accepted = True
+        if accepted is False:
+            # 列表已满被 GUI 拒收（v2.0.17：满档 = 不再加载后续视频）。
+            # 关键：撤回「已见」标记 —— 否则用户调高档位后重新拉取时，
+            # 这条会被内存去重永远挡掉，等于白拉。
+            with self._seen_lock:
+                self.seen.discard(key)
+                self._dedup_logged.discard(key)
+            self.rejected_count += 1
+            if self.rejected_count in (1, 10, 50) or self.rejected_count % 100 == 0:
+                logger.warn(f"📵 列表已满，本条未加载"
+                            f"（累计未加载 {self.rejected_count} 条；"
+                            "调高「列表上限」后重新拉取即可加载）")
+            return
         if self.auto_download:
             if self.duplicate_check and self.duplicate_check(vd):
                 if key not in self._dedup_logged:

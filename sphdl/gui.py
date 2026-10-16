@@ -27,7 +27,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # 应用主目录（开发=sphdl/，冻结打包=exe 所在目录 → 便携布局）
 if getattr(sys, "frozen", False):
@@ -36,7 +36,7 @@ else:
     BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from sphdl import config, __version__   # noqa: E402
+from sphdl import config, license as lic, __version__   # noqa: E402
 from sphdl.entities import VideoData           # noqa: E402
 from sphdl.logger import logger                # noqa: E402
 from sphdl.pipeline import Pipeline            # noqa: E402
@@ -46,7 +46,12 @@ from sphdl.downloader import format_size       # noqa: E402
 
 CONFIG_FILE = BASE_DIR / "config.json"
 RECORDS_FILE = BASE_DIR / "records.json"
-MAX_RECORDS = 500
+
+# 列表容量档位（v2.0.17）：真实档位由 AppConfig.max_records 驱动（500/1000/2000/0=不限）。
+# 这里保留常量为「默认档」，仅为兼容旧引用与测试。
+MAX_RECORDS = config.DEFAULT_MAX_RECORDS
+MAX_RECORDS_TIERS = config.MAX_RECORDS_TIERS
+MAX_RECORDS_LABELS = config.MAX_RECORDS_LABELS
 
 STATUS_TEXT = {
     "waiting": "待下载",
@@ -79,11 +84,25 @@ GUIDE_TEXT = """\
 【小技巧】
 · 鼠标悬停任意按钮/开关 2 秒，会弹出该控件的用法与注意点说明
 · 「🎯 自然捕获」= 只捕获当前播放的视频+随后几条，不会整页入库
+· 「列表上限」= 视频清单容量档位（v2.0.17，由发布方授权管控）：
+  · 档位共 4 档：轻量版（500 条）/ 标准版（1000 条）/ 专业版（2000 条）/
+    旗舰版（2 万条）；当前档位显示在按钮左侧
+  · **列表填满档位后不再加载后续视频**（不会顶掉已有记录），日志提示「列表已满」
+  · **填满后可删掉部分记录**，列表低于上限即自动恢复加载新视频
+    （买小套餐只要勤删记录，就能一直用来拉新视频）
+  · 想提升容量：点「🔑 授权管理」→ 粘贴发布方提供的授权码 → 点「激活」，
+    **立即生效、无需重启**
+  · 换码随时可换（升级/降级都行）；降档会裁掉最旧的超出记录（磁盘文件保留）
+  · 想一次拉完整个视频号（几百上千条）：需先授权「专业版」或「旗舰版」
+  · 满档期间未加载的视频不会被记成「已捕获」，升级档位或删记录后重新播放/
+    重新拉取即可加载；授权码无效/过期时会回落到默认档（记录不删，磁盘文件保留）
 · 列表点击表头可按 状态/大小/时间 升降序排列
 · 「📋 复制日志」= 出问题一键复制日志发给开发者
 · 「停止所有下载 / 取消所有排队 / 删除全部记录」= 批量任务管理
 
 【状态栏怎么看】
+· 列表: 共 X 条 / 上限 N = 当前清单条数与容量档位（「上限 不限」= 无上限）
+  · 出现「（已满·未加载 N 条）」= 列表已满，这 N 条新视频没有加载
 · 钩子: Xs前 = 页面钩子正常；「钩子: 无 ⚠」= 请重新进入视频号页面
 · ⚡批量: 拉取中(+N) = 正在批量拉取，被其他窗口遮挡也会继续
 """
@@ -169,6 +188,13 @@ class AppConfig:
         self.download_images = True   # 默认下载图片：图片显示在列表并可下载（v2.0.4 开关）
         self.natural_capture = True   # 默认自然捕获：当前播放+随后几条，不整页入库（v2.0.7）
         self.guide_auto_shown = False  # 内置使用说明是否已自动弹出过（v2.0.16）
+        # 列表容量档位（v2.0.17）：**客户端不可自行配置**
+        #   ① 构建预置档位（release.py --max-records）→ 写死，无需授权码
+        #   ② 否则由授权码决定（sphdl/license.py），未授权时用默认档
+        self.locked_max_records = config.locked_max_records()
+        self.default_max_records = config.build_default_max_records()
+        self.license_code = ""
+        self.license_activated_at = 0.0
         self._load()
 
     def _load(self):
@@ -182,6 +208,11 @@ class AppConfig:
             self.download_images = bool(d.get("download_images", True))
             self.natural_capture = bool(d.get("natural_capture", True))
             self.guide_auto_shown = bool(d.get("guide_auto_shown", False))
+            self.license_code = str(d.get("license_code", "") or "")
+            try:
+                self.license_activated_at = float(d.get("license_activated_at", 0) or 0)
+            except Exception:
+                self.license_activated_at = 0.0
         except Exception:
             pass
 
@@ -194,7 +225,9 @@ class AppConfig:
                  "prefer_highest_quality": self.prefer_highest_quality,
                  "download_images": self.download_images,
                  "natural_capture": self.natural_capture,
-                 "guide_auto_shown": self.guide_auto_shown},
+                 "guide_auto_shown": self.guide_auto_shown,
+                 "license_code": self.license_code,
+                 "license_activated_at": self.license_activated_at},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -221,16 +254,31 @@ class Record:
 
 
 class RecordStore:
-    def __init__(self, path: Path):
+    """列表持久化。容量档位（v2.0.17）由 max_records 决定：
+    500=轻量版 / 1000=标准版 / 2000=专业版 / 20000=旗舰版（全部为确定数值）。
+
+    约定：add() / set_max_records() 只负责数据结构，**返回被淘汰的记录 id 列表**，
+    由 GUI 侧负责同步删除 Treeview 行与去重映射（修复 v2.0.16 的
+    「幽灵行 + 被淘汰视频永久去重黑洞」，见 docs/SPEC-列表上限四档.md R3/R4）。
+    """
+
+    def __init__(self, path: Path, max_records: int = config.DEFAULT_MAX_RECORDS):
         self.path = path
+        self.max_records = int(max_records or 0)
         self.items: dict = {}      # id -> Record
         self.order: list = []      # 新 → 旧
+        self.trimmed_on_load = 0   # 启动时因上限被裁掉的旧记录数（供 GUI 提示）
         self._load()
 
     def _load(self):
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            for d in raw[:MAX_RECORDS]:
+            if not isinstance(raw, list):
+                raw = []
+            if self.max_records > 0 and len(raw) > self.max_records:
+                self.trimmed_on_load = len(raw) - self.max_records
+                raw = raw[:self.max_records]
+            for d in raw:
                 kw = {k: d.get(k, "") for k in
                       ("id", "title", "url", "decode_key", "size",
                        "source", "created", "status", "file", "error",
@@ -250,12 +298,44 @@ class RecordStore:
         except Exception:
             self.items, self.order = {}, []
 
-    def add(self, rec: Record):
+    def is_full(self) -> bool:
+        """列表是否已达档位上限。
+
+        v2.0.17 定稿：4 档全部为确定数值（无「不限量」概念），
+        max_records 恒为正数，达到即满。"""
+        return self.max_records > 0 and len(self.order) >= self.max_records
+
+    def _trim_to_limit(self) -> list:
+        """把超出档位的部分裁掉（只可能发生在**下调档位**时）。
+
+        返回被裁掉的 **Record 对象** 列表——返回对象而非 id，是因为记录已从
+        items 删除、取不回 video_id，而 GUI 必须用它清去重索引（v2.0.17）。
+        """
+        removed = []
+        if self.max_records > 0:
+            while len(self.order) > self.max_records:
+                old = self.order.pop()
+                rec = self.items.pop(old, None)
+                if rec is not None:
+                    removed.append(rec)
+        return removed
+
+    def add(self, rec: Record) -> bool:
+        """新记录入列表头。**已满则拒收**（v2.0.17：满档 = 不再加载后续视频，
+        不顶掉已有记录），返回是否入库成功。"""
+        if self.is_full():
+            return False
         self.items[rec.id] = rec
         self.order.insert(0, rec.id)
-        while len(self.order) > MAX_RECORDS:
-            old = self.order.pop()
-            self.items.pop(old, None)
+        return True
+
+    def set_max_records(self, n: int) -> list:
+        """调整档位；仅当**下调**时裁掉最旧的超出部分（返回被裁掉的 Record 列表）。
+
+        上调档位不删除任何记录；上调后若列表不再满，会自动恢复接收新视频。
+        """
+        self.max_records = int(n or 0)
+        return self._trim_to_limit()
 
     def update(self, rid, **kw):
         if rid in self.items:
@@ -271,13 +351,21 @@ class RecordStore:
         return [self.items[i] for i in self.order if i in self.items
                 and self.items[i].status == status]
 
-    def save(self):
+    def save(self) -> bool:
+        """原子落盘：先写 .tmp 再 os.replace 替换。
+
+        避免 v2.0.16 全量直接改写 records.json 时（大数据量下）掉电/崩溃
+        留下半截 JSON → 下次启动整份记录丢失（_load 会兜底清空）。
+        """
         try:
             data = [asdict(self.items[i]) for i in self.order if i in self.items]
-            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=1),
-                                 encoding="utf-8")
+            blob = json.dumps(data, ensure_ascii=False, indent=1)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(blob, encoding="utf-8")
+            os.replace(tmp, self.path)
+            return True
         except Exception:
-            pass
+            return False
 
 
 # ============================== 嗅探引擎（线程封装） ==============================
@@ -499,6 +587,7 @@ class SniffEngine:
 # ============================== 主界面 ==============================
 class App:
     POLL_MS = 300
+    SAVE_MIN_INTERVAL = 3.0   # records.json 落盘最小间隔（秒，v2.0.17 节流）
 
     def __init__(self):
         self.cfg = AppConfig()
@@ -506,13 +595,14 @@ class App:
         self.log_q: "queue.Queue" = queue.Queue()
         logger.subscribe(self._on_log)
 
-        self.store = RecordStore(RECORDS_FILE)
+        self.store = RecordStore(RECORDS_FILE, self._resolve_tier())
         self.engine = SniffEngine(self)
 
         self.ca_state = "checking"     # checking / installed / missing / unknown
         self._dirty = False
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
+        self._vid_index: set = set()   # video_id 集合（v2.0.17：去重 O(1)，不再线性扫全表）
         self._known_logged: set = set()  # 已提示过"列表中已有"的 video_id/url（防刷屏）
         self._sort_col = None          # 表头排序（v2.0.12）：None=默认最新在前
         self._sort_desc = False
@@ -520,9 +610,17 @@ class App:
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
         self._last_hb_log = 0.0
+        # 列表容量档位（v2.0.17）：淘汰提示只打一次；落盘节流时间戳
+        self._limit_warned = False
+        self._rejected_count = 0       # 满档后拒收（未加载）的新视频数
+        self._pending_slots = 0        # 已投递未处理的捕获占位数（并发防穿透）
+        self._full_event_pending = False   # 满档事件是否已投递（防刷屏）
+        self._last_save = 0.0
         for rid in self.store.order:
             r = self.store.items[rid]
             self._url_to_rid[r.url] = rid
+            if r.video_id:
+                self._vid_index.add(r.video_id)
 
         # 「🖼 下载图片」关闭时（v2.0.4）：启动即移除历史图片记录，
         # 列表不显示、不参与下载/去重；已下载的图片文件保留在磁盘，
@@ -530,6 +628,9 @@ class App:
         if not self.cfg.download_images:
             dropped = 0
             for rid in [r.id for r in self.store.items.values() if r.is_image]:
+                rec = self.store.items.get(rid)
+                if rec is not None and rec.video_id:
+                    self._vid_index.discard(rec.video_id)
                 self.store.remove(rid)
                 for k in [k for k, v in self._url_to_rid.items() if v == rid]:
                     self._url_to_rid.pop(k, None)
@@ -543,6 +644,22 @@ class App:
         self._build_root()
         self._build_ui()
 
+        # 启动裁剪提示（v2.0.17）：records.json 里超出当前档位的旧记录已被裁掉，
+        # 必须显式告知（v2.0.16 是静默丢弃 → 用户以为"数据丢了"）。
+        if self.store.trimmed_on_load:
+            self.push_log(
+                "warn",
+                f"⚠️ 列表上限 {self._limit_text()}：启动时已裁掉 {self.store.trimmed_on_load} "
+                "条最早的历史记录（磁盘文件不受影响）。\n"
+                "如需保留更多记录，请把「列表上限」调到更大档位后重新拉取。")
+        if self.store.is_full():
+            self.push_log(
+                "warn",
+                f"⚠️ 列表已满（{self._tier_label_of()}）："
+                "后续捕获的视频将不再加载。\n"
+                "如需继续加载：点「🔑 授权管理」升级档位；"
+                "或删除部分记录后继续拉取。")
+
         # 下载管线 + 嗅探插件（管线独立于代理，停止嗅探后仍可下载/重试）
         # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
         # 捕获即自动入队（v1.2.5，状态持久化 config.json）
@@ -553,6 +670,9 @@ class App:
         self.addon.natural_capture = self.cfg.natural_capture
         # 自动下载提交前的跨会话去重（records.json 已有同视频/链接 → 不重复下载）
         self.addon.duplicate_check = self._is_known_video
+
+        # 档位显示/状态栏首次刷新（此时 self.addon 已就绪）
+        self._refresh_limit_display()
 
         threading.Thread(target=self._check_ca, daemon=True).start()
 
@@ -574,6 +694,288 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(self.POLL_MS, self._poll)
 
+    # ---------------- 列表上限档位（v2.0.17，客户端不可自配） ----------------
+    def _limit_text(self, n=None) -> str:
+        """档位容量文案（纯数字，如「1000」）；n 省略时取当前档位。"""
+        n = self.store.max_records if n is None else int(n)
+        return str(n)
+
+    def _tier_name_of(self, n=None) -> str:
+        """档位名称（轻量版/标准版/专业版/旗舰版）；n 省略时取当前档位。"""
+        n = self.store.max_records if n is None else int(n)
+        return config.name_of(n)
+
+    def _tier_label_of(self, n=None) -> str:
+        """档位完整展示名（如「标准版（1000 条）」）。"""
+        n = self.store.max_records if n is None else int(n)
+        return config.label_of(n)
+
+    def _license_info(self):
+        """当前授权码解析结果（无效/未填 → None）。"""
+        code = getattr(self.cfg, "license_code", "") or ""
+        return lic.verify_code(code) if code else None
+
+    def _license_expired(self) -> bool:
+        info = self._license_info()
+        if not info:
+            return False
+        return lic.license_expired(info["days"], self.cfg.license_activated_at)
+
+    def _resolve_tier(self) -> int:
+        """档位解析（唯一入口）：
+        ① 构建预置档位（写死）→ 用它
+        ② 有效授权码（未过期）→ 用码里的档位
+        ③ 否则 → 构建默认档（一般 500）
+        """
+        if self.cfg.locked_max_records is not None:
+            return self.cfg.locked_max_records
+        info = self._license_info()
+        if info and not self._license_expired():
+            return info["tier"]
+        return self.cfg.default_max_records
+
+    def _tier_source_text(self) -> str:
+        """档位来源文案（界面提示用）。"""
+        if self.cfg.locked_max_records is not None:
+            return "版本预置"
+        info = self._license_info()
+        if not info:
+            return "未授权 · 默认档"
+        if self._license_expired():
+            return "授权已过期 · 默认档"
+        if info["days"]:
+            left = lic.days_left(info["days"], self.cfg.license_activated_at)
+            return f"已授权 · 剩余 {left} 天"
+        return "已授权 · 永久"
+
+    def _refresh_limit_hint(self):
+        """档位说明文案（随档位/授权状态变化）。"""
+        n = self.store.max_records
+        head = (f"满 {n} 条即停止加载后续视频"
+                f"（删掉部分记录后可继续加载）")
+        try:
+            self.limit_hint.config(text=f"{head}　｜　{self._tier_source_text()}")
+        except Exception:
+            pass
+        try:
+            self.limit_value_lbl.config(text=self._tier_label_of(n))
+        except Exception:
+            pass
+        try:
+            # 「🔑 授权管理」按钮文案随授权状态变化：未授权→「🔑 授权管理」，
+            # 已授权→「🔑 授权管理」（保持一致，状态在提示里体现）
+            self.btn_license.config(text="🔑 授权管理")
+        except Exception:
+            pass
+
+    def _refresh_limit_display(self):
+        """界面控件建好后的首次刷新（等价 _refresh_limit_hint + 状态栏）。"""
+        self._refresh_limit_hint()
+        self._update_status_bar()
+
+    def _apply_tier(self, n: int, reason: str):
+        """切换生效档位（**立即生效，无需重启**）：调小会裁掉最旧记录
+        （只删列表记录，磁盘文件保留）。"""
+        old = self.store.max_records
+        if int(n) == old:
+            self._refresh_limit_hint()
+            self._update_status_bar()
+            return
+        removed = self.store.set_max_records(n)
+        self._drop_records_ui(removed)
+        self._limit_warned = False          # 新档位下允许再次提示满档
+        self._full_event_pending = False
+        self._force_save()
+        if removed:
+            self.push_log("warn",
+                          f"列表上限 {config.label_of(old)} → "
+                          f"{config.label_of(n)}："
+                          f"已裁掉最旧的 {len(removed)} 条记录（磁盘文件保留）")
+        self.push_log("ok", f"列表上限 {config.label_of(old)} → "
+                            f"{config.label_of(n)}（{reason}）")
+        if not self.store.is_full():
+            self.push_log("ok", "✅ 列表未满，已恢复加载新捕获的视频（无需重启）")
+        self._refresh_limit_hint()
+        self._update_status_bar()
+
+    def _clear_license(self):
+        """清除授权（售后用）：回落到默认档。返回是否真的清除过。"""
+        if not getattr(self.cfg, "license_code", ""):
+            return False
+        self.cfg.license_code = ""
+        self.cfg.license_activated_at = 0.0
+        self.cfg.save()
+        self.push_log("warn", "🗑 已清除授权，档位回落到默认档")
+        self._apply_tier(self.cfg.default_max_records, reason="清除授权")
+        return True
+
+    # ---------------- 授权管理弹窗（v2.0.17） ----------------
+    def _on_license_input(self):
+        """「🔑 授权管理」：查看当前授权 / 更换授权码 / 清除授权。
+
+        换码**立即生效、无需重启**：激活后直接刷新列表上限与界面状态。
+        """
+        if self.cfg.locked_max_records is not None:
+            messagebox.showinfo(
+                "无需授权",
+                f"本版本档位已由发布方预置为「{config.label_of(self.cfg.locked_max_records)}」，"
+                "无需（也不能）输入授权码。")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("授权管理")
+        win.transient(self.root)
+        win.resizable(False, False)
+
+        pad = ttk.Frame(win, padding=14)
+        pad.pack(fill="both", expand=True)
+
+        info = self._license_info()
+        cur_label = config.label_of(self.store.max_records)
+        source = self._tier_source_text()
+
+        # ---- 当前状态区 ----
+        ttk.Label(pad, text="当前档位：", font=("Microsoft YaHei UI", 9)).grid(
+            row=0, column=0, sticky="e", pady=(0, 2))
+        ttk.Label(pad, text=cur_label,
+                  font=("Microsoft YaHei UI", 10, "bold"),
+                  foreground="#0f766e").grid(row=0, column=1, columnspan=3,
+                                             sticky="w", pady=(0, 2))
+        ttk.Label(pad, text="授权状态：").grid(row=1, column=0, sticky="e",
+                                               pady=(0, 2))
+        ttk.Label(pad, text=source, foreground="#374151").grid(
+            row=1, column=1, columnspan=3, sticky="w", pady=(0, 2))
+
+        # 当前授权码（完整显示，可框选复制；未授权时提示）
+        ttk.Label(pad, text="当前授权码：").grid(row=2, column=0, sticky="e",
+                                                 pady=(0, 8))
+        code_shown = (info["code"] if info else
+                      (getattr(self.cfg, "license_code", "") or "（未输入）"))
+        code_var = tk.StringVar(value=code_shown)
+        code_entry = ttk.Entry(pad, textvariable=code_var, width=44,
+                               state="readonly")
+        code_entry.grid(row=2, column=1, columnspan=3, sticky="we", pady=(0, 8))
+
+        ttk.Separator(pad, orient="horizontal").grid(
+            row=3, column=0, columnspan=4, sticky="we", pady=(2, 10))
+
+        # ---- 更换授权码区 ----
+        ttk.Label(pad, text="更换授权码：",
+                  font=("Microsoft YaHei UI", 9, "bold")).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        ttk.Label(pad, text="把发布方发来的授权码粘到下面，点「激活」立即生效"
+                           "（无需重启）：",
+                  foreground="#6b7280", wraplength=380, justify="left").grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
+
+        new_var = tk.StringVar()
+        new_entry = ttk.Entry(pad, textvariable=new_var, width=44)
+        new_entry.grid(row=6, column=0, columnspan=4, sticky="we", pady=(0, 4))
+
+        hint_var = tk.StringVar(value="")
+        hint_lbl = ttk.Label(pad, textvariable=hint_var, foreground="#b91c1c",
+                             wraplength=380, justify="left")
+        hint_lbl.grid(row=7, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        def do_activate():
+            code = (new_var.get() or "").strip()
+            if not code:
+                hint_var.set("请先输入授权码。")
+                return
+            info2 = lic.verify_code(code)
+            if not info2:
+                hint_var.set("❌ 授权码无效：请核对是否完整复制"
+                             "（含 SPHDL- 前缀，注意区分 0/O、1/I）。")
+                return
+            old_label = config.label_of(self.store.max_records)
+            self._activate_license(code)          # 立即生效（无需重启）
+            new_label = config.label_of(self.store.max_records)
+            hint_var.set("")
+            code_var.set(info2["code"])
+            messagebox.showinfo(
+                "授权成功",
+                f"授权码已生效（无需重启）。\n\n"
+                f"档位：{old_label}  →  {new_label}\n"
+                f"有效期：{'永久' if not info2['days'] else str(info2['days']) + ' 天（自首次激活）'}\n\n"
+                f"当前列表上限 {self.store.max_records} 条，"
+                + ("已恢复加载新捕获的视频。"
+                   if not self.store.is_full() else "列表仍处于满档状态。"),
+                parent=win)
+            win.destroy()
+
+        def do_paste():
+            """从剪贴板取码填入输入框（客户从微信复制后一键贴上）。"""
+            try:
+                txt = self.root.clipboard_get()
+            except Exception:
+                txt = ""
+            txt = (txt or "").strip()
+            if not txt:
+                hint_var.set("剪贴板为空，请先复制授权码（选中后 Ctrl+C）。")
+                return
+            new_var.set(txt)
+            hint_var.set("")
+
+        def do_clear():
+            if not messagebox.askyesno(
+                    "清除授权",
+                    f"确定清除当前授权码吗？\n\n"
+                    f"清除后档位回落到默认档（{config.label_of(self.cfg.default_max_records)}），"
+                    "超出部分记录会被裁掉（磁盘文件保留）。\n"
+                    "如需恢复请重新输入授权码。",
+                    parent=win):
+                return
+            if self._clear_license():
+                code_var.set("（未输入）")
+                new_var.set("")
+                hint_var.set("")
+                messagebox.showinfo("已清除授权",
+                                    f"档位已回落到 {config.label_of(self.store.max_records)}。",
+                                    parent=win)
+
+        btns = ttk.Frame(pad)
+        btns.grid(row=8, column=0, columnspan=4, sticky="we", pady=(2, 0))
+        ttk.Button(btns, text="激活", width=10,
+                   command=do_activate).pack(side="left")
+        ttk.Button(btns, text="📋 粘贴并激活", width=14,
+                   command=lambda: (do_paste(), do_activate())[-1]).pack(
+            side="left", padx=6)
+        ttk.Button(btns, text="🗑 清除授权", width=12,
+                   command=do_clear).pack(side="left", padx=6)
+        ttk.Button(btns, text="关闭", width=8,
+                   command=win.destroy).pack(side="right")
+
+        new_entry.focus_set()
+        win.bind("<Return>", lambda e: do_activate())
+        win.update_idletasks()
+        # 居中到主窗
+        try:
+            x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+            y = self.root.winfo_rooty() + 80
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    def _activate_license(self, code: str) -> bool:
+        """校验并激活授权码（供界面按钮与测试调用）。成功返回 True。
+
+        换码立即生效（调 _apply_tier 刷新内存档位与界面），**无需重启**。
+        """
+        info = lic.verify_code(code)
+        if not info:
+            self.push_log("error", "❌ 授权码校验失败（格式/签名不符），档位不变")
+            return False
+        first_activation = not self.cfg.license_code or not self.cfg.license_activated_at
+        self.cfg.license_code = info["code"]
+        if first_activation:
+            self.cfg.license_activated_at = time.time()
+        self.cfg.save()
+        self.push_log("ok", f"🔑 授权成功：档位 {config.label_of(info['tier'])}，"
+                            + ("永久有效" if not info["days"]
+                               else f"{info['days']} 天（自首次激活）"))
+        self._apply_tier(info["tier"], reason="授权码解锁")
+        return True
+
     # ---------------- 跨线程安全工具 ----------------
     def push_event(self, item):
         self.ui_q.put(item)
@@ -586,13 +988,38 @@ class App:
         self.log_q.put((level, msg))
 
     def _on_capture(self, vd, source):
+        """（解析工作线程调用）投递捕获事件。
+
+        返回 False = 列表已满 → 本次捕获被拒收（不再加载后续视频）。
+        addon 收到 False 会把该视频从「已见」集合里撤回，这样用户调高
+        档位后重新拉取还能再次捕获到它（不会被永久判重挡掉）。
+        """
+        if self._capture_full():
+            self._rejected_count += 1
+            if not self._full_event_pending:
+                # 满档提示/自动停批量都要动 tkinter → 只能在主线程做，
+                # 这里只投一个轻量事件（每次满档只投一次，防刷屏）
+                self._full_event_pending = True
+                self.push_event(("full",))
+            return False
+        self._pending_slots += 1       # 占位：防并发投递穿透上限
         self.push_event(("capture", vd, source))
+        return True
+
+    def _capture_full(self) -> bool:
+        """是否已满（把「已投递未处理」的捕获一起算上，避免并发超额）。
+
+        v2.0.17 定稿：无「不限量」档，max_records 恒为正数。
+        """
+        n = self.store.max_records
+        if n <= 0:
+            return False
+        return len(self.store.order) + self._pending_slots >= n
 
     def _is_known_video(self, vd) -> bool:
         """跨会话去重判断（供 addon 在自动下载提交前调用，v2.0.5）：
         同一视频（video_id=内容哈希）或同一 URL 已在列表 → True。"""
-        if vd.video_id and any(r.video_id == vd.video_id
-                               for r in self.store.items.values()):
+        if vd.video_id and vd.video_id in self._vid_index:
             return True
         return vd.url in self._url_to_rid
 
@@ -602,7 +1029,10 @@ class App:
     # ---------------- 窗口与控件 ----------------
     def _build_root(self):
         self.root = tk.Tk()
-        self.root.title(f"微信视频号下载器  sphdl v{__version__}")
+        _ed_sfx = ""
+        if self.cfg.locked_max_records is not None:
+            _ed_sfx = "·" + config.label_of(self.cfg.locked_max_records)
+        self.root.title(f"微信视频号下载器  sphdl v{__version__}{_ed_sfx}")
         self.root.geometry("1240x780")
         self.root.minsize(1080, 660)
         try:
@@ -775,6 +1205,31 @@ class App:
         # 当前模式提示（随开关实时变化）
         self.mode_label = ttk.Label(capf, foreground="#6b7280")
         self.mode_label.pack(side="right", padx=4)
+
+        # ===== ②-b 列表上限档位（v2.0.17：档位由发布方掌控，客户端不可自配） =====
+        limf = ttk.Frame(main)
+        limf.pack(fill="x", pady=(8, 0))
+        ttk.Label(limf, text="列表上限:").pack(side="left")
+        self.limit_value_lbl = ttk.Label(
+            limf, text="", font=("Microsoft YaHei UI", 9, "bold"),
+            foreground="#0f766e")
+        self.limit_value_lbl.pack(side="left", padx=(6, 2))
+        self.btn_license = ttk.Button(limf, text="🔑 授权管理", width=14,
+                                      command=self._on_license_input)
+        if self.cfg.locked_max_records is None:
+            self.btn_license.pack(side="left", padx=6)
+        self._tt(self.btn_license,
+                 "查看/更换授权码，解锁对应的列表上限档位：\n"
+                 "轻量版（500 条）/ 标准版（1000 条）/ 专业版（2000 条）/\n"
+                 "旗舰版（2 万条）。\n"
+                 "授权码与档位绑定，输入后立即生效并永久记住（config.json）。\n"
+                 "换码随时可换：把新码粘进弹窗点「激活」即可，"
+                 "降档会裁掉超出记录（磁盘文件保留）。\n"
+                 "本版本档位由发布方预置时，无需也不能自行修改。")
+        self.limit_hint = ttk.Label(limf, foreground="#6b7280")
+        self.limit_hint.pack(side="left", padx=6)
+        # 注：状态栏首次刷新要等 self.addon 建好（_update_status_bar 会读它），
+        # 故不在此处调用，见 App.__init__ 末尾的 _refresh_limit_display()
 
         # ===== ③ 下载目录 =====
         dirf = ttk.Frame(main)
@@ -1049,11 +1504,16 @@ class App:
         self._update_capture_hint()
 
     def _on_batch_toggle(self):
-        """「⚡ 批量拉取」按钮（v2.0.8）：
-        开启 = 整页列表入库（临时关闭自然捕获）+ 往视频号页面注入
-        自动滚动驱动，尽量拉取整个视频号的所有视频，拉到底自动停止；
-        再点一次停止并恢复自然捕获。"""
-        on = not self.addon.batch_mode
+        """「⚡ 批量拉取」按钮（v2.0.8）：开/关一次。"""
+        self._set_batch(not self.addon.batch_mode)
+
+    def _set_batch(self, on: bool, auto: str = ""):
+        """批量拉取开关（v2.0.8；v2.0.17 抽出以便「满档自动停止」复用）。
+
+        auto 非空时用于区分自动停止（满档）与用户手动停止的日志文案。
+        """
+        if on == self.addon.batch_mode and not auto:
+            return
         self.addon.batch_mode = on
         self.addon.batch_count = 0
         if on:
@@ -1064,7 +1524,7 @@ class App:
             self.btn_batch.config(text="■ 停止批量")
             self.push_log("ok",
                 "⚡ 批量拉取已开启：列表数据将整页入库。\n"
-                "只滚动**当前选中**的视频号窗口（最近点击/获得焦点者）；"
+                "只滚动「当前选中」的视频号窗口（最近点击/获得焦点者）；"
                 "即使被 Excel 等窗口遮挡也持续滚动，直到点『停止拉取』"
                 "或拉到底自动停止。\n"
                 "若要切换拉取对象，点击/选中目标视频号窗口即可。\n"
@@ -1074,9 +1534,12 @@ class App:
             self.natural_var.set(self.cfg.natural_capture)
             self.addon._batch_active = False
             self.btn_batch.config(text="⚡ 批量拉取")
-            self.push_log("info",
-                f"⚡ 批量拉取已停止（本次新增 {self.addon.batch_count} 条，"
-                "已恢复自然捕获）")
+            if auto:
+                pass          # 自动停止的提示由调用方（满档）给出，避免重复
+            else:
+                self.push_log("info",
+                    f"⚡ 批量拉取已停止（本次新增 {self.addon.batch_count} 条，"
+                    "已恢复自然捕获）")
         self._update_status_bar()
         self._update_capture_hint()
 
@@ -1647,6 +2110,9 @@ class App:
     def _remove_row(self, rid):
         # 同步清理 url 映射（可能有多条：切换清晰度后旧/新 url 都映射本记录）。
         # 否则删除记录后同 URL 再捕获会被误判「重复链接」而无法重新入列表。
+        rec = self.store.items.get(rid)
+        if rec is not None and rec.video_id:
+            self._vid_index.discard(rec.video_id)
         for k in [k for k, v in self._url_to_rid.items() if v == rid]:
             self._url_to_rid.pop(k, None)
         self.store.remove(rid)
@@ -1659,11 +2125,75 @@ class App:
                                tags=(STATUS_TAG.get(r.status, "tag_pending"),))
         self._row_of[r.id] = iid
         self._url_to_rid[r.url] = r.id
+        if r.video_id:
+            self._vid_index.add(r.video_id)
         self._apply_sort()
+
+    def _drop_records_ui(self, rec_list):
+        """把「已从 store 删除的记录」从界面与去重索引中清干净（v2.0.17）。
+
+        注意：这些记录已不在 store.items 里，必须用传进来的 Record 数据清
+        _vid_index —— 否则该视频被永久判「列表中已有」、再也回不到列表
+        （v2.0.16 的去重黑洞缺陷）。只删列表记录，磁盘文件一律保留。
+
+        删记录后若列表不再满，**重置满档门闩并提示恢复加载**：这是"买小套餐
+        的客户勤删记录就能一直拉新视频"的关键路径（v2.0.17 用户需求）。
+        """
+        for rec in rec_list:
+            if rec.video_id:
+                self._vid_index.discard(rec.video_id)
+            for k in [k for k, v in self._url_to_rid.items() if v == rec.id]:
+                self._url_to_rid.pop(k, None)
+            iid = self._row_of.pop(rec.id, None)
+            if iid and self.tree.exists(iid):
+                self.tree.delete(iid)
+        if rec_list:
+            self._after_records_removed()
+
+    def _after_records_removed(self):
+        """删除记录后的容量状态回调：列表不再满 → 复位门闩 + 提示恢复加载。
+
+        满档门闩（_limit_warned / _full_event_pending）必须随"列表脱离满档"
+        复位，否则客户删记录后再次填满时将**静默无提示**（只在换档位时复位
+        是不够的——删记录同样会让列表脱离满档）。
+        """
+        if self.store.is_full():
+            self._rejected_count = 0
+            self._update_status_bar()
+            return
+        was_limited = self._limit_warned or self._full_event_pending or self._rejected_count
+        self._limit_warned = False
+        self._full_event_pending = False
+        if was_limited:
+            self._rejected_count = 0
+            self.push_log(
+                "ok",
+                f"✅ 列表已降至 {len(self.store.order)}/{self.store.max_records} 条，"
+                "已恢复加载新捕获的视频（继续拉取即可，无需重启）")
+        self._update_status_bar()
+
+    def _warn_full_once(self):
+        """列表满档时给出一次明确提示（并自动停掉批量滚动，避免空转）。"""
+        if self._limit_warned:
+            return
+        self._limit_warned = True
+        self.push_log(
+            "warn",
+            f"⚠️ 列表已满（{self._tier_label_of()}，共 {self.store.max_records} 条）："
+            "已停止加载后续视频（不会顶掉已有记录）。\n"
+            "如需继续加载：点「🔑 授权管理」升级档位；或删除部分记录后继续拉取。\n"
+            "（满档期间未加载的视频不会被记成「已捕获」，"
+            "升级档位或删记录后重新播放/拉取即可加载）")
+        if self.addon.batch_mode:
+            self.push_log("warn",
+                          "⚡ 批量拉取已自动停止（列表满，继续滚动也不会再加载）")
+            self._set_batch(False, auto="full")
 
     def _refresh_tree_all(self):
         self.tree.delete(*self.tree.get_children())
         self._row_of.clear()
+        self._url_to_rid.clear()
+        self._vid_index.clear()
         for rid in self.store.order:
             r = self.store.items.get(rid)
             if r:
@@ -1716,16 +2246,28 @@ class App:
     # ---------------- 事件处理（主线程） ----------------
     def _handle_event(self, item):
         kind = item[0]
-        if kind == "engine_state":
+        if kind == "full":
+            # 列表满档（v2.0.17）：给出一次明确提示 + 自动停掉批量滚动
+            self._full_event_pending = False
+            self._warn_full_once()
+            self._update_status_bar()
+        elif kind == "engine_state":
             self._apply_engine_state(bool(item[1]))
         elif kind == "ca_state":
             self._apply_ca_state(item[1])
         elif kind == "capture":
+            self._pending_slots = max(0, self._pending_slots - 1)
             vd, source = item[1], item[2]
+            # 满档 = 不再加载后续视频（v2.0.17 策略：不顶掉已有记录）
+            if self.store.is_full():
+                self._rejected_count += 1
+                self._warn_full_once()
+                self._update_status_bar()
+                return
             # 跨会话去重：同一视频（video_id=md5sum）或同一 URL 已在列表 → 跳过。
             # （addon 的内存去重只在本次 GUI 运行内有效，重启后靠这里兜底）
-            if vd.video_id and any(r.video_id == vd.video_id
-                                   for r in self.store.items.values()):
+            # v2.0.17：video_id 走集合索引（O(1)），不再线性扫全表（不限档位下会 O(n²)）
+            if vd.video_id and vd.video_id in self._vid_index:
                 if vd.video_id not in self._known_logged:
                     self._known_logged.add(vd.video_id)
                     self.push_log("info", f"⏭ 重复视频（列表中已有），跳过: {(vd.description or '')[:30]}")
@@ -1743,7 +2285,12 @@ class App:
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
                 renditions=vd.renditions or [], quality_note=vd.quality_note or "")
-            self.store.add(rec)
+            if not self.store.add(rec):
+                # 竞态兜底：投递期间被别的记录填满 → 本条不入库
+                self._rejected_count += 1
+                self._warn_full_once()
+                self._update_status_bar()
+                return
             self._add_row(rec)
             self._dirty = True
             self.push_log("ok", f"已捕获，加入待下载列表: {rec.title[:30]}"
@@ -1821,15 +2368,20 @@ class App:
         failed = len(self.store.by_status("failed"))
         waiting = len(self.store.by_status("waiting"))
         total = len(self.store.order)
+        limit = self._tier_label_of()
+        if self.store.is_full():
+            limit += f"（已满·未加载 {self._rejected_count} 条）"
+        elif self._rejected_count:
+            limit += f"（已加载 {self._rejected_count} 条前曾满档）"
         batch_txt = ""
-        if self.addon.batch_mode:
+        if getattr(self, "addon", None) is not None and self.addon.batch_mode:
             batch_txt = (f"   |   ⚡批量: "
                          f"{'拉取中' if self.addon._batch_active else '待重进页面'}"
                          f"(+{self.addon.batch_count})")
         self.status_bar.config(
             text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
-                 f"{hook_txt}   |   列表: 共 {total} 条 · 待下载 {waiting}"
-                 f" · 完成 {done} · 失败 {failed}{batch_txt}")
+                 f"{hook_txt}   |   列表: 共 {total} 条 / 上限 {limit}"
+                 f" · 待下载 {waiting} · 完成 {done} · 失败 {failed}{batch_txt}")
 
     def _hook_watchdog(self):
         """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
@@ -1852,7 +2404,7 @@ class App:
                 "⚠️ 视频在播放，但 90 秒以上没有收到视频号页面的钩子数据"
                 "——页面里没有捕获钩子（可能是在启动嗅探前就打开的，"
                 "或钩子被页面刷新/回收）。\n"
-                "处理：**完全关闭视频号页面**（或退出微信视频号后重进），"
+                "处理：「完全关闭视频号页面」（或退出微信视频号后重进），"
                 "让页面重新走网络加载、代理自动注入钩子；\n"
                 "也可重启嗅探引擎后重进页面。仅刷新可能仍走缓存，"
                 "务必先关闭再打开。")
@@ -1890,12 +2442,20 @@ class App:
                 self._handle_event(self.ui_q.get_nowait())
         except queue.Empty:
             pass
-        if self._dirty:
-            self.store.save()
-            self._dirty = False
+        # 落盘节流（v2.0.17）：旗舰版 records.json 可达 13MB，每 300ms 全量
+        # 重写会造成 I/O 抖动。改为最多每 SAVE_MIN_INTERVAL 秒一次；退出/上限
+        # 变更/Done 等关键点仍会强制落盘（见 _force_save）。
+        if self._dirty and (time.time() - self._last_save) >= self.SAVE_MIN_INTERVAL:
+            self._force_save()
         self._hook_watchdog()
         self._update_status_bar()
         self.root.after(self.POLL_MS, self._poll)
+
+    def _force_save(self):
+        """立即落盘（原子写）。失败不抛异常——落盘失败不能影响界面。"""
+        self._last_save = time.time()
+        self._dirty = False
+        self.store.save()
 
     # ---------------- 退出 ----------------
     def _on_close(self):
@@ -1906,7 +2466,7 @@ class App:
             self.btn_engine.config(state="disabled", text="退出中…")
             self.engine.stop()
         self.cfg.save()
-        self.store.save()
+        self.store.save()   # 退出强制落盘（节流窗口内也要写）
         self.root.destroy()
 
     def run(self):
