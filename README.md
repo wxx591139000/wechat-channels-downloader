@@ -60,6 +60,80 @@
 1. 安装 [Python 3.10+](https://python.org)（勾选 "Add to PATH"）
 2. 双击 `run.bat`（首次自动建 `.venv` 并装依赖，约 1-2 分钟）
 
+## 参与开发（协作者必读）
+
+### 怎么提交修改
+
+用 **Fork + Pull Request** 流程，不要直接改主仓库：
+
+```bash
+# 1. 先 Fork：https://github.com/wxx591139000/wechat-channels-downloader
+# 2. 克隆自己的 fork
+git clone https://github.com/<你的用户名>/wechat-channels-downloader.git
+cd wechat-channels-downloader
+
+# 3. 加上游（用于同步主仓库更新）
+git remote add upstream https://github.com/wxx591139000/wechat-channels-downloader.git
+
+# 4. 建分支改代码（别在 main 上直接改）
+git checkout -b fix/xxx-bug
+
+# 5. 改完跑测试
+cd sphdl
+python tests/test_sniff_smoke.py     # ★ 改核心代码必跑（15 项）
+python tests/test_offline.py         # 离线基础（11 项）
+
+# 6. 提交（⚠️ 用显式文件列表，不要 git add -A）
+git add sphdl/gui.py
+git commit -m "fix: 修复 XXX
+
+现象：...
+根因：...
+修法：..."
+
+# 7. 推到自己 fork
+git push origin fix/xxx-bug
+
+# 8. 在 GitHub 上提 Pull Request
+```
+
+### ⚠️ 三条必知
+
+**① 不要用 `git add -A`**
+
+历史上出过事故：`.gitignore` 的通配例外让 `git add -A` 把 17 个 30MB 的
+zip 全提交了（仓库涨到 580MB）。**永远用显式文件列表**。
+
+**② 源码里没有授权密钥（故意的）**
+
+`sphdl/_lic_key.py` 是构建期注入、**绝不入库**。所以：
+
+- 你本地跑 GUI，粘授权码会显示"无效"（正常，缺密钥）
+- **不影响**开发嗅探/下载/解密/解析/界面
+- 需要测授权相关功能 → 找作者要一个**测试授权码**（真码自带校验数据，
+  客户端不需要密钥就能验证）
+
+**③ 改之前先看 `docs/PITFALLS.md`**
+
+里面有 **66 条**实战踩过的坑，每条都是真实事故。改任何相关代码前
+grep 一遍能避免重复踩坑。特别容易踩的：
+
+| 坑 | 后果 |
+|---|---|
+| `after` 定时器在里面再排任务 | 指数增殖 → **界面卡死** |
+| `.bat` 存成 UTF-8 | cmd 下乱码，报"不是内部或外部命令" |
+| 改档位名只改一处 | 界面/台账出现两个版本的名字（要搜全 7 处） |
+| 同步采集设备指纹 | 启动卡 4 秒 |
+
+### 文档在哪
+
+`docs/` 在 git 仓库**外面**（仓库根是 `sphdl/`），clone 下来看不到，
+向作者索取。仓库内的文档只有本 README。
+
+### 版本号
+
+不要自己改 `sphdl/__init__.py` 的 `__version__`，由作者统一管理发布节奏。
+
 ## 安装 CA 证书（一次性，仅嗅探模式需要）
 
 工具通过本地代理（127.0.0.1:8899）拦截 HTTPS 流量，系统必须信任 mitmproxy 的 CA：
