@@ -24,7 +24,7 @@ rem mitmproxy 的 CA 在「第一次启动嗅探」时才生成。
 rem 纯证书文件才有：mitmproxy-ca.pem 里含私钥，certutil 会拒绝导入。
 set "CA=%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.pem"
 if not exist "%CA%" set "CA=%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer"
-if not exist "%CA%" set "CA=%~dp0ca.pem"
+rem 注意：不查 exe 同目录的 ca.pem —— 那是开发样例，会误判
 
 if not exist "%CA%" (
     echo [原因] 还没有生成 CA 证书文件。

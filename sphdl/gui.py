@@ -2422,14 +2422,34 @@ class App:
             self.btn_engine.config(state="disabled")
             threading.Thread(target=self._stop_engine_job, daemon=True).start()
             return
+        # ★ v2.1.1：点下去立刻给反馈（原先"点了没反应"，用户以为按钮坏了）
+        #   启动流程要等端口监听（最长 30 秒），期间必须有可见状态。
+        try:
+            self.btn_engine.config(state="disabled", text="启动中…")
+            self.push_log("info", "▶ 正在启动嗅探引擎…（首次启动需 3~10 秒，"
+                                  "杀毒软件扫描可能更慢）")
+            self.root.update_idletasks()
+        except Exception:
+            pass
         # 解析端口
         try:
             port = int(self.port_var.get())
             assert 1 <= port <= 65535
         except Exception:
             messagebox.showerror("端口无效", "请输入 1-65535 的端口号")
+            try:
+                self.btn_engine.config(state="normal", text="▶  启动嗅探")
+            except Exception:
+                pass
             return
         auto = bool(self.auto_var.get())
+        # ★ v2.1.1：把 CA 状态打进日志，用户/售后一眼看到卡在哪
+        try:
+            _ca_file = self._ca_file_exists()
+            self.push_log("info", f"ℹ CA 状态: {self.ca_state}｜证书文件: "
+                                  f"{'已生成' if _ca_file else '未生成'}")
+        except Exception:
+            _ca_file = False
         # ★ CA 证书检查（2026-10-17 修死循环）
         #
         #   原逻辑：CA 未装 → 弹窗问"要装吗" → 用户点"是" → 拉起向导 + return
@@ -2439,8 +2459,8 @@ class App:
         #
         #   新逻辑：**先让嗅探启动**（它会在几秒内生成 CA），再提示去装。
         #   这样证书文件必然存在，向导一定能成功。
-        if self.ca_state == "missing":
-            if not self._ca_file_exists():
+        if self.ca_state != "installed":
+            if not _ca_file:
                 # 证书还没生成 → 必须先启动嗅探
                 self.push_log(
                     "info", "ℹ 首次使用：先启动嗅探生成证书，再点【安装/检测】安装")
@@ -2533,10 +2553,10 @@ class App:
                     return True
         except Exception:
             pass
-        try:
-            return (BASE_DIR / "ca.pem").exists()
-        except Exception:
-            return False
+        # 注意：**不再**回退查 BASE_DIR/ca.pem —— 项目里那个是开发时的样例
+        # 文件，会被误判成"已有证书"，导致新用户点启动时不提示、装证书时
+        # 又用到不对的文件。只认 mitmproxy 真正生成的路径。
+        return False
 
     def _on_cert_btn(self):
         # 先检查证书文件是否已生成 —— 没有就别拉起必然失败的向导
