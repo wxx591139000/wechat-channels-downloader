@@ -40,8 +40,10 @@ def ledger_path() -> Path:
 def append(code: str, tier: int, tier_label: str, days: int = 0,
            customer: str = "", contact: str = "", device: str = "",
            price: str = "", note: str = "", channel: str = "",
-           features: int = 0, path: Path = None) -> bool:
+           features: int = 0, max_devices=None, path: Path = None) -> bool:
     """追加一条发码记录。返回是否写入成功。
+
+    max_devices（v2.0.19）：限台数码的允许台数（None=不限）。
 
     失败**不抛异常**（不能因为台账写不了就发不出码），但会打印告警，
     避免"以为记了其实没记"。
@@ -54,7 +56,8 @@ def append(code: str, tier: int, tier_label: str, days: int = 0,
         "days": days,                       # 0 = 永久
         "customer": customer,
         "contact": contact,
-        "device": device,                   # ver=2 绑定版才有；ver=1 为空
+        "device": device,                   # ver=3 绑定版才有；其他为空
+        "max_devices": max_devices,         # ver=4 限台数；None=不限
         "price": price,
         "note": note,
         "channel": channel,                 # 如「闲鱼」「微信」

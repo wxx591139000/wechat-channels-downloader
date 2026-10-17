@@ -350,12 +350,97 @@ def _post(url: str, payload: dict) -> bool:
             pass
 
 
+def _post_json(url: str, payload: dict, timeout: float = 6.0):
+    """发一次 POST 并**返回服务端 JSON**（v2.0.19 台数校验用）。
+
+    与 _post 的区别：_post 只要 HTTP 2xx 就返回 True（上报用，结果丢弃）；
+    本函数需要服务端的 JSON 内容（判断 allowed），所以解析响应。
+
+    返回：dict（服务端响应）或 None（网络失败/非 JSON）。
+    ★ 超时默认 6 秒（比上报的 2 秒宽）—— 激活是同步等待，值得多等一点，
+      但仍要有个上限，绝不能让客户界面卡死。
+    """
+    import socket
+    import urllib.request
+    body = json.dumps(payload).encode("utf-8")
+    old_to = socket.getdefaulttimeout()
+    try:
+        socket.setdefaulttimeout(timeout)
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json", "User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read(8192)
+            if not (200 <= getattr(r, "status", 200) < 300):
+                return None
+            try:
+                return json.loads(raw.decode("utf-8", errors="replace"))
+            except Exception:
+                return None
+    except Exception:
+        return None
+    finally:
+        try:
+            socket.setdefaulttimeout(old_to)
+        except Exception:
+            pass
+
+
+def check_device_limit(code: str, max_devices, version: str = "",
+                       endpoint: str = "") -> tuple:
+    """激活时向服务端校验「本码已用台数是否超限」（v2.0.19）。
+
+    返回 (allowed, msg, info)：
+        (True,  "", ...)          → 允许（未超限 / 不限台 / 服务器不可达）
+        (False, "原因", ...)       → 拒绝（明确超限）
+
+    ★ 设计原则（重要）：
+      **服务器不可达时一律放行**（返回 True）。理由：不能因为网络问题
+      把正版客户挡在门外。代价是断网时可以用，但这是业界通行的取舍
+      （JetBrains 也是断网宽限而不是锁死）。
+      联网时服务器仍会记录该设备，作者在追踪页能看到真实台数。
+
+    只在 max_devices 有效（>0）时才真的联网；否则完全不发请求。
+    """
+    try:
+        md = int(max_devices or 0)
+    except Exception:
+        md = 0
+    if md <= 0:
+        return True, "", {}               # 不限台数 → 不查，零网络开销
+    if not _enabled():
+        return True, "", {}
+    if not code:
+        return True, "", {}
+    try:
+        dev = device_display()
+        url = endpoint or ENDPOINT
+        payload = _payload(code, dev, version or "")
+        payload["max_devices"] = md
+        resp = _post_json(url, payload)
+    except Exception:
+        return True, "", {}               # 任何异常 → 放行
+    if not isinstance(resp, dict):
+        return True, "", {}               # 服务器不可达 → 放行
+    if resp.get("ok") is False:
+        return True, "", {}               # 服务端拒收（非超限原因）→ 放行
+    if resp.get("allowed") is False:
+        used = resp.get("devices")
+        return False, (
+            f"此授权码只允许在 {md} 台电脑上使用，目前已有 {used} 台激活。\n"
+            f"如需在新电脑使用，请联系发布方（可为您增加设备数或解绑旧设备）。"
+        ), resp
+    return True, "", resp
+
+
 def report_activation(code: str, version: str = "", block: bool = False,
-                      endpoint: str = "") -> bool:
+                      endpoint: str = "", max_devices=None) -> bool:
     """激活成功后上报一次（默认后台线程，不阻塞）。
 
     ★ 返回 True 仅表示"已发出请求"，**不表示服务端收到**（这是刻意的：
       上报是尽力而为，客户端不关心结果）。
+
+    max_devices（v2.0.19）：限台数码的允许台数。带上它服务端才能判定超限。
 
     总开关关闭时：立即 return False，不采集指纹、不发请求、不记日志。
     """
@@ -368,7 +453,14 @@ def report_activation(code: str, version: str = "", block: bool = False,
         try:
             dev = device_display()        # 采集 + 哈希（仅此时发生）
             url = endpoint or ENDPOINT
-            _post(url, _payload(code, dev, version or ""))
+            p = _payload(code, dev, version or "")
+            try:
+                md = int(max_devices or 0)
+            except Exception:
+                md = 0
+            if md > 0:
+                p["max_devices"] = md
+            _post(url, p)
         except Exception:
             pass                          # ★ 任何异常都吞掉
 

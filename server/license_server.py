@@ -102,8 +102,20 @@ def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def record(code: str, device: str, version: str, ip: str) -> dict:
-    """记录一条上报。返回 {first, devices, count}。"""
+def record(code: str, device: str, version: str, ip: str,
+           max_devices: int = None) -> dict:
+    """记录一条上报。返回 {first, devices, count, allowed, ...}。
+
+    max_devices（v2.0.19）：客户端传上来的「本码允许台数」。
+        这是**服务端执行上限的唯一依据** —— 客户端会传它自己从码里解出的值，
+        但真正的判定在服务端做（客户端只是提示）。
+        None / 0 → 不限。
+
+    allowed：本次上报后，该设备是否仍被允许使用。
+        判定规则：devices（该码已用的不同设备数）<= max_devices
+        ★ 注意：**已超限的设备也照样记录**（便于作者追踪），
+          只是返回 allowed=False 让客户端提示。
+    """
     ch, dh = h16(code), h16(device)
     ts = now_iso()
     i24 = ip24(ip)
@@ -125,7 +137,17 @@ def record(code: str, device: str, version: str, ip: str) -> dict:
             first = True
         n = c.execute("SELECT COUNT(DISTINCT device_hash) FROM reports "
                       "WHERE code_hash=?", (ch,)).fetchone()[0]
-    return {"first": first, "devices": n}
+
+    # ★ 台数上限判定（v2.0.19）
+    allowed = True
+    limited = bool(max_devices and max_devices > 0)
+    if limited and n > max_devices:
+        allowed = False
+        log(f"⚠ 超限：code={ch[:8]} 已用 {n} 台 > 允许 {max_devices} 台"
+            f"（设备 {dh[:8]}）")
+    return {"first": first, "devices": n, "allowed": allowed,
+            "limited": limited, "max_devices": max_devices,
+            "remaining": (max(0, max_devices - n) if limited else None)}
 
 
 def stats() -> dict:
@@ -238,11 +260,16 @@ class Handler(BaseHTTPRequestHandler):
             code = str(data.get("code") or "")[:128]
             device = str(data.get("device") or "")[:128]
             version = str(data.get("version") or "")[:32]
+            # ★ v2.0.19：允许台数（客户端从码里解出后上报；0/缺失=不限）
+            try:
+                max_dev = int(data.get("max_devices") or 0)
+            except Exception:
+                max_dev = 0
             if not code:
                 self._send(200, {"ok": False, "err": "no code"})
                 return
             ip = self._client_ip()
-            r = record(code, device, version, ip)
+            r = record(code, device, version, ip, max_devices=(max_dev or None))
             self._send(200, {"ok": True, **r})
         except Exception as e:                          # noqa: BLE001
             log(f"report 异常（已容忍）: {e}")

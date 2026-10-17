@@ -74,6 +74,30 @@ _V2_MSG_PREFIX = b"SPHDLv2"
 _VERSION3 = 3
 _V3_PAYLOAD_LEN = 10
 _V3_MSG_PREFIX = b"SPHDLv3"
+
+#   ver=4（设备数限制，v2.0.19 新增）: 7B 载荷 + 10B MAC = 17B → 40 字符
+#      载荷: ver(4) | tier(1) | days//8(1) | product(1) | maxdev(1) | rand(2)
+#      maxdev = 允许激活的电脑台数（0=不限；1~255）
+#
+#      ★ 与 ver=3（绑定单机）的区别：
+#        ver=3 = 死绑某一台（设备分量写进码里）→ 换机就失效
+#        ver=4 = 允许 N 台任意设备 → 灵活性好，靠**服务器统计**执行上限
+#
+#      ★ 关键设计说明（诚实记录技术边界）：
+#        "最多 N 台"**无法纯离线实现** —— 软件在 A 机上不知道 B 机是否用过。
+#        因此 ver=4 的真实执行依赖激活时的服务器校验：
+#          客户端激活 → 上报（码 + 设备）→ 服务器查该码已用设备数
+#          → 未超限：放行；超限：返回拒绝
+#        断网时**默认放行**（宁可放过，不可误伤正版客户），
+#        下次联网上报时服务器仍会记录，作者在追踪页能看到超限。
+#
+#      一句话：ver=4 把台数**写进码里防篡改**，由**服务器执行**，
+#      而不是指望客户端自己数。
+_VERSION4 = 4
+_V4_PAYLOAD_LEN = 7
+_V4_MSG_PREFIX = b"SPHDLv4"
+MAX_DEV_UNLIMITED = 0           # maxdev=0 表示不限台数
+
 VERSION_BOUND = _VERSION3      # 对外暴露：设备绑定型
 
 # 产品线（v2.0.19：视频号 4 档 + 公众号 1 个，共 5 个独立产品）
@@ -161,7 +185,9 @@ def _mac(payload: bytes, ver: int = 1) -> bytes:
     secret = get_secret()
     if not secret:
         return b"\x00" * _MAC_LEN
-    if ver == _VERSION3:
+    if ver == _VERSION4:
+        prefix = _V4_MSG_PREFIX
+    elif ver == _VERSION3:
         prefix = _V3_MSG_PREFIX
     elif ver == _VERSION2:
         prefix = _V2_MSG_PREFIX
@@ -259,7 +285,8 @@ def _group(code: str) -> str:
 
 # ---------------------------------------------------------------- 生成（作者侧）
 def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
-              product: int = 0, device: str = "") -> str:
+              product: int = 0, device: str = "",
+              max_devices: int = None) -> str:
     """生成授权码（**仅作者侧使用**，依赖内置密钥；客户拿不到密钥）。
 
     tier: 视频号档位 500/1000/2000/20000；公众号产品传 0（不分档）
@@ -272,7 +299,15 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
         product=PRODUCT_MP_ARTICLE, tier=0      → ver=2 码（38字符，公众号）
 
     device: **设备码（可选）**。传了就生成 ver=3 绑定码（46字符），
-            该码只能在这台设备上激活；不传则发 ver=2 不绑机。
+            该码只能在这台设备上激活（死绑单机）。
+
+    max_devices: **允许激活的电脑台数（v2.0.19 新增）**。
+        None → 不限制（ver=2/3，与旧行为一致）
+        1~255 → 生成 ver=4 码（40字符），靠服务器统计执行上限
+        0     → 显式"不限"，也走 ver=4（便于统一处理）
+
+    ★ 优先级：device（死绑单机）> max_devices（限台数）> 普通码。
+      死绑和限台数是两种不同诉求，不要同时给。
 
     ★ v2.0.19：**一个码只解锁一条产品线**（不再有 all 组合码）。
       flags 参数保留仅为向后兼容，等价于 product。
@@ -313,6 +348,12 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
         payload = (bytes([_VERSION3, tier_code, days_step, prod])
                    + dev_bind + rand[:2])
         blob = payload + _mac(payload, ver=_VERSION3)
+    elif max_devices is not None:
+        # ---- ver=4（限台数码，v2.0.19 新增）----
+        # 载荷: ver(4) | tier(1) | days//8(1) | product(1) | maxdev(1) | rand(2)
+        md = min(255, max(0, int(max_devices)))
+        payload = bytes([_VERSION4, tier_code, days_step, prod, md]) + rand[:2]
+        blob = payload + _mac(payload, ver=_VERSION4)
     elif prod == PRODUCT_VIDEO and flags in (0,) and product in (0,):
         # ---- ver=1（老码型，完全不变；语义=视频号）----
         payload = bytes([_VERSION, tier_code, days_step]) + rand[:2]
@@ -347,6 +388,7 @@ def verify_code(code: str) -> Optional[dict]:
         return None
 
     ver = blob[0]
+    max_dev = 0                  # ver=4 专用；其他码型保持 0（不限）
 
     if ver == _VERSION:
         # ---- ver=1（老码，5B 载荷 + 10B MAC）----
@@ -381,6 +423,18 @@ def verify_code(code: str) -> Optional[dict]:
         if product not in PRODUCT_LABELS:
             return None
         dev_bind = payload[4:8]        # 4 字节设备绑定值
+    elif ver == _VERSION4:
+        # ---- ver=4（限台数码，7B 载荷 + 10B MAC）----
+        if len(blob) < _V4_PAYLOAD_LEN + _MAC_LEN:
+            return None
+        payload = blob[:_V4_PAYLOAD_LEN]
+        mac = blob[_V4_PAYLOAD_LEN:_V4_PAYLOAD_LEN + _MAC_LEN]
+        if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION4)):
+            return None
+        tier_code, days_step, product = payload[1], payload[2], payload[3]
+        if product not in PRODUCT_LABELS:
+            return None
+        max_dev = int(payload[4])
     else:
         return None                          # 未知码型
 
@@ -405,6 +459,14 @@ def verify_code(code: str) -> Optional[dict]:
         info["_bind4"] = dev_bind           # 内部用；不参与展示
     else:
         info["device_bound"] = False
+
+    # ★ v2.0.19：允许台数（ver=4 才有；其他码型为 None=不限制）
+    if ver == _VERSION4:
+        info["max_devices"] = max_dev if max_dev > 0 else None
+        info["device_limited"] = max_dev > 0
+    else:
+        info["max_devices"] = None
+        info["device_limited"] = False
     return info
 
 

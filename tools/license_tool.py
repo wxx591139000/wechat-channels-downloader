@@ -144,7 +144,8 @@ def cmd_gen(args):
     codes = []
     for _ in range(max(1, args.count)):
         code = lic.make_code(tier, days=args.days, product=flags,
-                             device=(args.device or ""))
+                             device=(args.device or ""),
+                             max_devices=args.max_devices)
         codes.append(code)
         log(code)
     # 台账登记（作者侧追溯，见 tools/ledger.py）
@@ -156,16 +157,25 @@ def cmd_gen(args):
                      customer=args.customer, contact=args.contact,
                      device=args.device, price=args.price,
                      note=args.note, channel=args.channel,
-                     features=flags)
+                     features=flags, max_devices=args.max_devices)
         p = L.ledger_path()
         log(f"📒 已登记台账 {len(codes)} 条 → {p}")
         if not args.customer and not args.note:
             log("   ⚠️ 未填 --customer/--note：建议补上，否则出事查不到是谁")
-    feat_txt = ("、".join(lbl for bit, lbl in lic.FEATURE_LABELS.items()
-                          if flags & bit) or "视频号下载")
+    feat_txt = lic.PRODUCT_LABELS.get(flags, "视频号下载")
+    # ★ v2.0.19：码型说明要准确反映实际生成的码（ver=1/2/3/4）
+    if args.device:
+        ver_txt = "ver=3（死绑单机）"
+    elif args.max_devices is not None:
+        ver_txt = (f"ver=4（限 {args.max_devices} 台）"
+                   if args.max_devices > 0 else "ver=4（不限台数）")
+    elif flags:
+        ver_txt = "ver=2（不限台数）"
+    else:
+        ver_txt = "ver=1（老码型）"
     log(f"（档位: {label}｜功能: {feat_txt}｜有效期: "
         f"{'永久' if not args.days else str(args.days) + ' 天自首次激活'}"
-        f"｜码型: {'ver=2' if flags else 'ver=1'}）")
+        f"｜码型: {ver_txt}）")
     return 0
 
 
@@ -466,8 +476,11 @@ def main():
     p.add_argument("--channel", default="", help="销售渠道，如「闲鱼」「微信」")
     p.add_argument("--price", default="", help="成交价（记台账，便于统计）")
     p.add_argument("--device", default="",
-                   help="★设备码（如 4770-0AEB-18B6-1AB4）→ 生成设备绑定码"
-                        "（ver=3，只能在该设备激活）。不填则生成不绑机的码")
+                   help="★设备码（如 4770-0AEB-18B6-1AB4）或绑定串（8位如 163145d5）"
+                        "→ 生成设备绑定码（ver=3，只能在该设备激活）")
+    p.add_argument("--max-devices", type=int, default=None,
+                   help="★允许激活的电脑台数（如 3）→ 生成限台数码（ver=4）。"
+                        "靠激活时的服务器校验执行；不填=不限台数")
     p.add_argument("--no-ledger", action="store_true",
                    help="不登记台账（默认登记；仅测试时用）")
     p.add_argument("--feature", action="append", metavar="F",

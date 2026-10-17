@@ -1307,6 +1307,37 @@ class App:
                 pass
             return False
 
+        # ★ v2.0.19 台数上限校验：限台数码必须联网确认还有余量
+        #   （"最多 N 台"无法纯离线实现 —— 本机不知道别的机器用过没有。
+        #    服务器不可达时放行，不因网络问题拦正版客户。）
+        if info.get("device_limited") and info.get("max_devices"):
+            self.push_log(
+                "info", f"🔍 校验设备数（此码允许 {info['max_devices']} 台）…")
+            try:
+                _allowed, _lmsg, _linfo = _tel.check_device_limit(
+                    info["code"], info["max_devices"],
+                    version=__import__("sphdl").__version__)
+            except Exception as _e:                        # noqa: BLE001
+                _allowed, _lmsg, _linfo = True, "", {}
+                self.push_log("warn", f"⚠ 设备数校验异常（已放行）：{_e}")
+            if not _allowed:
+                self.push_log("error", "❌ " + _lmsg.replace("\n", " "))
+                try:
+                    messagebox.showerror("设备数已达上限", _lmsg)
+                except Exception:
+                    pass
+                return False
+            _used = (_linfo or {}).get("devices")
+            _rem = (_linfo or {}).get("remaining")
+            if _used is not None:
+                self.push_log(
+                    "info", f"✅ 设备数校验通过：已用 {_used}/"
+                            f"{info['max_devices']} 台"
+                            + (f"，还可激活 {_rem} 台" if _rem is not None else ""))
+            else:
+                self.push_log("warn", "⚠ 无法连接授权服务器，本次跳过台数校验"
+                                      "（离线可用，联网后会自动记录）")
+
         # 该产品线是否首次激活（决定要不要记 activated_at 起点）
         first_activation = not self.cfg.code_of(prod) \
             or not self.cfg.activated_at_of(prod)
@@ -1349,8 +1380,10 @@ class App:
         # 激活上报（防盗版追溯）。总开关关闭时为空操作。
         try:
             from . import telemetry as _tel
-            _tel.report_activation(info["code"], version=__import__(
-                "sphdl").__version__)
+            _tel.report_activation(
+                info["code"],
+                version=__import__("sphdl").__version__,
+                max_devices=info.get("max_devices"))
         except Exception:
             pass
         return True

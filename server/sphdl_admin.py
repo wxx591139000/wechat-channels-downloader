@@ -46,9 +46,9 @@ BIND = os.environ.get("SPHDL_ADMIN_BIND", "127.0.0.1")
 # ---- 授权码算法（与 sphdl/license.py 保持一致）----
 CODE_PREFIX = "SPHDL"
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-PAYLOAD_LEN_V1, MAC_LEN, V1, V2, V3 = 5, 10, 1, 2, 3
-V2_PAYLOAD_LEN, V3_PAYLOAD_LEN = 6, 10
-MSG_V1, MSG_V2, MSG_V3 = b"SPHDLv1", b"SPHDLv2", b"SPHDLv3"
+PAYLOAD_LEN_V1, MAC_LEN, V1, V2, V3, V4 = 5, 10, 1, 2, 3, 4
+V2_PAYLOAD_LEN, V3_PAYLOAD_LEN, V4_PAYLOAD_LEN = 6, 10, 7
+MSG_V1, MSG_V2, MSG_V3, MSG_V4 = b"SPHDLv1", b"SPHDLv2", b"SPHDLv3", b"SPHDLv4"
 PRODUCT_VIDEO, PRODUCT_MP = 1, 2
 TIER_TO_CODE = {500: 1, 1000: 2, 2000: 3, 20000: 4}
 CODE_TO_TIER = {v: k for k, v in TIER_TO_CODE.items()}
@@ -69,7 +69,8 @@ def _mac(payload: bytes, ver: int) -> bytes:
     sec = _secret()
     if not sec:
         return b"\x00" * MAC_LEN
-    pre = MSG_V3 if ver == V3 else (MSG_V2 if ver == V2 else MSG_V1)
+    pre = (MSG_V4 if ver == V4 else MSG_V3 if ver == V3
+           else MSG_V2 if ver == V2 else MSG_V1)
     return hmac.new(sec, pre + payload, hashlib.sha256).digest()[:MAC_LEN]
 
 
@@ -86,8 +87,12 @@ def _group(code: str) -> str:
 
 
 def make_code(tier: int, product: int = PRODUCT_VIDEO, days: int = 0,
-              device: str = "") -> str:
-    """生成授权码。device 非空 → ver=3 绑定码。
+              device: str = "", max_devices=None) -> str:
+    """生成授权码。
+
+    device 非空 → ver=3 绑定码（死绑单机）
+    max_devices 非 None → ver=4 限台数码（靠服务器统计执行上限）
+    都不给 → ver=2 普通码（不限台数）
 
     ⚠️ 关于 device 的格式（v2.0.19 抗硬件变动改造后的关键约束）：
 
@@ -100,7 +105,7 @@ def make_code(tier: int, product: int = PRODUCT_VIDEO, days: int = 0,
       两边一致 → 校验通过。代价是不能享受"换单项仍通过"的宽容度。
 
       ★ 想要真正的"4 项取 2"，需要让客户端把分量也告诉作者：
-        客户端「授权管理」页可以显示一行「绑定码串」（四项首字节的十六进制，
+        客户端「授权管理」页可以显示一行「绑定串」（四项首字节的十六进制，
         如 163145d5），作者填这个即可。见 _bind_token()。
     """
     if not _secret():
@@ -110,8 +115,13 @@ def make_code(tier: int, product: int = PRODUCT_VIDEO, days: int = 0,
     rand = secrets.token_bytes(2)
     if device:
         dev4 = _bind4_from_token(device)
+        # 绑定码保持 ver=3 不变（载荷结构与台数码不同，不能混）
         payload = bytes([V3, tier_code, days_step, product]) + dev4 + rand
         blob = payload + _mac(payload, V3)
+    elif max_devices is not None:
+        md = min(255, max(0, int(max_devices)))
+        payload = bytes([V4, tier_code, days_step, product, md]) + rand
+        blob = payload + _mac(payload, V4)
     else:
         payload = bytes([V2, tier_code, days_step, product]) + rand
         blob = payload + _mac(payload, V2)
@@ -389,8 +399,20 @@ class H(BaseHTTPRequestHandler):
 <option>闲鱼</option><option>微信</option><option>朋友</option><option>其他</option>
 </select>
 <label>成交价</label><input name="price" inputmode="decimal" placeholder="199">
-<label>设备码（选填 → 生成设备绑定版）</label>
-<input name="device" placeholder="4770-0AEB-18B6-1AB4" autocapitalize="characters">
+<label>允许激活的电脑台数（★ 用于控制转卖）</label>
+<select name="max_devices">
+<option value="">不限台数（默认）</option>
+<option value="1">1 台</option>
+<option value="2">2 台</option>
+<option value="3">3 台</option>
+<option value="5">5 台</option>
+<option value="10">10 台</option>
+</select>
+<p class="meta" style="margin-top:4px">
+选台数后：客户在第 N+1 台电脑激活时会失败（需联网校验）。
+断网时放行，但会记录下来。</p>
+<label>设备码 / 绑定串（选填 → 死绑单机，与台数二选一）</label>
+<input name="device" placeholder="163145d5 或 1594-8EBB-7A1F-B22F" autocapitalize="characters">
 <button>生成授权码</button>
 </form></div>"""
         return self._send(200, page("发码", body,
@@ -402,8 +424,14 @@ class H(BaseHTTPRequestHandler):
             tier = int(form.get("tier") or 20000)
             if product == PRODUCT_MP:
                 tier = 0
-            code = make_code(tier, product=product,
-                             device=form.get("device", "").strip())
+            dev = form.get("device", "").strip()
+            md_raw = (form.get("max_devices") or "").strip()
+            # 台数与死绑二选一：填了设备码就死绑（优先），否则看台数
+            md = None
+            if not dev and md_raw:
+                md = int(md_raw)
+            code = make_code(tier, product=product, device=dev,
+                             max_devices=md)
         except Exception as e:                              # noqa: BLE001
             return self._send(200, page("发码", f"<div class='card'>"
                 f"<div class='err'>生成失败：{html.escape(str(e))}</div>"
@@ -421,6 +449,7 @@ class H(BaseHTTPRequestHandler):
             "channel": form.get("channel", "").strip(),
             "price": form.get("price", "").strip(),
             "device": form.get("device", "").strip(),
+            "max_devices": md,
             "note": "", "features": product,
             "source": "web-admin",
             "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
