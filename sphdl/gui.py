@@ -766,6 +766,8 @@ class App:
         # 列表容量档位（v2.0.17）：淘汰提示只打一次；落盘节流时间戳
         self._limit_warned = False
         self._rejected_count = 0       # 满档后拒收（未加载）的新视频数
+        # ★ v2.1.6：批量拉取是否因「满档」被自动停掉（决定升档后要不要自动恢复）
+        self._batch_stopped_by_full = False
         self._pending_slots = 0        # 已投递未处理的捕获占位数（并发防穿透）
         self._full_event_pending = False   # 满档事件是否已投递（防刷屏）
         self._last_save = 0.0
@@ -1014,6 +1016,9 @@ class App:
                             f"{config.label_of(n)}（{reason}）")
         if not self.store.is_full():
             self.push_log("ok", "✅ 列表未满，已恢复加载新捕获的视频（无需重启）")
+        # ★ v2.1.6：升档后若批量是被满档停的 → 自动恢复
+        #   （_apply_tier 不一定经过 _after_records_removed，这里必须显式调一次）
+        self._maybe_resume_batch()
         self._refresh_limit_hint()
         self._update_status_bar()
 
@@ -3327,7 +3332,42 @@ class App:
                 "ok",
                 f"✅ 列表已降至 {len(self.store.order)}/{self.store.max_records} 条，"
                 "已恢复加载新捕获的视频（继续拉取即可，无需重启）")
+        # ★ v2.1.6：列表脱离满档 → 恢复被「满档」自动停掉的批量拉取
+        self._maybe_resume_batch()
         self._update_status_bar()
+
+    def _maybe_resume_batch(self):
+        """若批量拉取是被「列表满档」自动停掉的，且现在已不满 → 自动恢复。
+
+        ★ 为什么需要（2026-10-17 客户实测）：
+          用户开着批量拉取，抓到 500 条满档 → `_warn_full_once()` 自动停批量
+          → 用户去「🔑 授权管理」升级到 1000 档
+          → 档位变了但没有恢复批量 → 用户看到"批量被关掉了，抓取还卡在 500"
+          → **误以为是授权动作导致的**，实际是满档先停的。
+
+          修复后：档位升上去 / 删掉记录，只要列表脱离满档，批量自动恢复。
+          用户视角变成"升级完就继续拉了"，符合直觉。
+
+        ⚠️ 只恢复**因满档自动停止**的批量（`_batch_stopped_by_full`），
+           用户主动点「停止批量」的绝不自动重启。
+        """
+        if not getattr(self, "_batch_stopped_by_full", False):
+            return
+        if self.addon.batch_mode:
+            self._batch_stopped_by_full = False
+            return
+        if self.store.is_full():
+            return                      # 仍满档，别恢复（会空转）
+        self._batch_stopped_by_full = False
+        try:
+            self._set_batch(True)
+            self.push_log(
+                "ok",
+                f"⚡ 列表上限已提升到 {self._tier_label_of()}，"
+                f"批量拉取已自动恢复（当前 {len(self.store.order)}/"
+                f"{self.store.max_records} 条）")
+        except Exception as e:                            # noqa: BLE001
+            self.push_log("warn", f"⚠ 批量拉取自动恢复失败：{e}")
 
     def _warn_full_once(self):
         """列表满档时给出一次明确提示（并自动停掉批量滚动，避免空转）。"""
@@ -3343,7 +3383,10 @@ class App:
             "升级档位或删记录后重新播放/拉取即可加载）")
         if self.addon.batch_mode:
             self.push_log("warn",
-                          "⚡ 批量拉取已自动停止（列表满，继续滚动也不会再加载）")
+                          "⚡ 批量拉取已自动停止（列表满，继续滚动也不会再加载）\n"
+                          "  → 升级档位或删掉部分记录后，批量会**自动恢复**")
+            # ★ 标记"是满档停的"，供 _maybe_resume_batch() 判断能不能自动恢复
+            self._batch_stopped_by_full = True
             self._set_batch(False, auto="full")
 
     def _refresh_tree_all(self):

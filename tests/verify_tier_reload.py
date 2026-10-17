@@ -129,10 +129,10 @@ def main():
         check("4 档为确定数值 (500/1000/2000/20000)",
               tuple(config.MAX_RECORDS_TIERS) == (500, 1000, 2000, 20000),
               f"{config.MAX_RECORDS_TIERS}")
-        check("无「不限量」档（label_of(0) 不再是旗舰版）",
+        check("无「不限量」档（label_of(0) 不是任何档位）",
               config.label_of(0) != "旗舰版（不限量）" and 0 not in config.MAX_RECORDS_TIERS)
-        check("旗舰版标签 = 旗舰版（2 万条）",
-              config.label_of(20000) == "旗舰版（2 万条）", config.label_of(20000))
+        check("至尊标签 = 至尊（2 万条）",
+              config.label_of(20000) == "至尊（2 万条）", config.label_of(20000))
 
         # ---------- D 段 ----------
         print("\n" + "=" * 74)
