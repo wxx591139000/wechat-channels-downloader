@@ -816,6 +816,11 @@ class App:
         self.cfg.save()
         self.push_log("warn", "🗑 已清除授权，档位回落到默认档")
         self._apply_tier(self.cfg.default_max_records, reason="清除授权")
+        # v2.0.19：清除授权后「📄 公众号视频」应回到锁定态
+        try:
+            self._refresh_mp_button()
+        except Exception:
+            pass
         return True
 
     # ---------------- 授权管理弹窗（v2.0.17） ----------------
@@ -1001,6 +1006,11 @@ class App:
                                else f"{info['days']} 天（自首次激活）")
                             + f"｜功能：{'、'.join(info.get('features') or [])}")
         self._apply_tier(info["tier"], reason="授权码解锁")
+        # ★ v2.0.19：换码后刷新「📄 公众号视频」按钮（新码可能含/不含此功能）
+        try:
+            self._refresh_mp_button()
+        except Exception:
+            pass
         # ★ 激活上报（防盗版追溯，作者侧）。
         # 总开关 sphdl/config.py 的 TELEMETRY_ENABLED 关闭时为空操作：
         # 不采集指纹、不发请求、无日志。开启时后台线程发一次，超时 3 秒、
@@ -1242,6 +1252,26 @@ class App:
         # 当前模式提示（随开关实时变化）
         self.mode_label = ttk.Label(capf, foreground="#6b7280")
         self.mode_label.pack(side="right", padx=4)
+
+        # ===== ②-a2 「📄 公众号视频」按钮（v2.0.19 附加模块） =====
+        # 默认不可用；仅当授权码含 FLAG_MP_ARTICLE_VIDEO 时才能真正解析下载。
+        # 未授权时按钮仍在（客户能看到有这个功能、知道要加钱解锁），
+        # 点击后弹出说明并引导去「🔑 授权管理」——比藏起来更利于成交。
+        self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=13,
+                                 command=self._on_mp_article)
+        self.btn_mp.pack(side="left", padx=(16, 2))
+        self._tt(self.btn_mp,
+                 "【公众号文章视频】下载公众号文章里的视频（附加功能）。\n"
+                 "\n"
+                 "用法：粘贴公众号文章链接（形如 https://mp.weixin.qq.com/s/xxx）\n"
+                 "→ 自动解析出文章内全部视频 → 选清晰度下载。\n"
+                 "\n"
+                 "⚠ 与「视频号」是两个不同入口：\n"
+                 "  · 视频号：微信→发现→视频号（用嗅探抓）\n"
+                 "  · 公众号：文章页里的视频（粘贴链接解析）\n"
+                 "\n"
+                 "此功能需专用授权码开启；未授权时点它会提示如何解锁。")
+        self._refresh_mp_button()
 
         # ===== ②-b 列表上限档位（v2.0.17：档位由发布方掌控，客户端不可自配） =====
         limf = ttk.Frame(main)
@@ -2313,6 +2343,16 @@ class App:
     # ---------------- 事件处理（主线程） ----------------
     def _handle_event(self, item):
         kind = item[0]
+        # ★ v2.0.19：公众号视频窗口的事件（解析完成 / 下载完成）优先分发给
+        #   当前打开的窗口处理器；没开窗口就忽略（窗口关了自然收不到）。
+        if kind in ("mp_parse_done", "mp_dl_done"):
+            h = getattr(self, "_mp_event_handler", None)
+            if h is not None:
+                try:
+                    if h(item):
+                        return
+                except Exception as e:
+                    self.push_log("error", f"公众号视频事件处理失败：{e}")
         if kind == "full":
             # 列表满档（v2.0.17）：给出一次明确提示 + 自动停掉批量滚动
             self._full_event_pending = False
@@ -2524,6 +2564,276 @@ class App:
             return ok, cur if enable else "(未启用)"
         except Exception:
             return True, ""
+
+    def _refresh_mp_button(self):
+        """刷新「📄 公众号视频」按钮外观（v2.0.19）。
+
+        授权了 → 正常可点；未授权 → 显示 🔒 但**仍可点**（点了给解锁引导，
+        比禁用更利于客户理解与成交）。
+
+        ⚠️ 安全性：本方法可能在 UI 尚未构建完成时被调用（如启动期
+        _activate_license 恢复授权），因此对 btn_mp 做存在性保护。
+        """
+        if getattr(self, "btn_mp", None) is None:
+            return False
+        try:
+            info = self._license_info()
+            has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
+        except Exception:
+            has_mp = False
+        try:
+            if has_mp:
+                self.btn_mp.config(text="📄 公众号视频", state="normal")
+            else:
+                self.btn_mp.config(text="📄 公众号视频 🔒", state="normal")
+        except Exception:
+            pass
+        return has_mp
+
+    def _on_mp_article(self):
+        """「📄 公众号视频」入口（v2.0.19）。
+
+        未授权 → 说明这是附加功能 + 引导去授权管理；
+        已授权 → 打开解析窗口（粘贴链接 → 列视频 → 选清晰度下载）。
+        """
+        if not self._refresh_mp_button():
+            if messagebox.askyesno(
+                    "公众号视频（未授权）",
+                    "「公众号文章视频下载」是独立附加功能，当前授权码未包含。\n\n"
+                    "说明：\n"
+                    "  · 视频号：微信「发现 → 视频号」里的视频（现有功能已支持）\n"
+                    "  · 公众号：公众号文章正文里插入的视频（本功能）\n"
+                    "  两者是不同入口、不同处理方式。\n\n"
+                    "如需开通，请联系发布方获取含此功能的授权码，\n"
+                    "拿到后在「🔑 授权管理」里粘贴激活即可（立即生效）。\n\n"
+                    "要去「🔑 授权管理」看看当前授权吗？"):
+                self._on_license_input()
+            return
+        self._open_mp_window()
+
+    def _open_mp_window(self):
+        """公众号视频解析/下载窗口。"""
+        from sphdl import mp_article as mpmod
+
+        win = tk.Toplevel(self.root)
+        win.title("公众号文章视频下载")
+        win.transient(self.root)
+        win.geometry("760x520")
+
+        pad = ttk.Frame(win, padding=12)
+        pad.pack(fill="both", expand=True)
+
+        ttk.Label(pad, text="公众号文章链接：",
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
+        ttk.Label(pad, text="把公众号文章链接粘到下面（形如 https://mp.weixin.qq.com/s/xxxxx），"
+                            "点「解析」列出文章内全部视频。",
+                  foreground="#6b7280", wraplength=720,
+                  justify="left").pack(anchor="w", pady=(2, 6))
+
+        row = ttk.Frame(pad)
+        row.pack(fill="x")
+        url_var = tk.StringVar()
+        ent = ttk.Entry(row, textvariable=url_var)
+        ent.pack(side="left", fill="x", expand=True)
+        btn_parse = ttk.Button(row, text="解析", width=8,
+                               command=lambda: _do_parse())
+        btn_parse.pack(side="left", padx=(6, 0))
+        btn_paste = ttk.Button(row, text="📋 粘贴", width=9,
+                               command=lambda: _do_paste())
+        btn_paste.pack(side="left", padx=(6, 0))
+        self._tt(btn_paste, "从剪贴板粘贴链接（先从微信里复制文章链接）")
+
+        # ---- 结果列表 ----
+        cols = ("idx", "vid", "quality")
+        tv = ttk.Treeview(pad, columns=cols, show="headings", height=12)
+        tv.heading("idx", text="序号")
+        tv.heading("vid", text="视频标识")
+        tv.heading("quality", text="可用清晰度")
+        tv.column("idx", width=50, anchor="center")
+        tv.column("vid", width=420, anchor="w")
+        tv.column("quality", width=200, anchor="w")
+        tv.pack(fill="both", expand=True, pady=(10, 6))
+        # 空表占位提示（v2.0.19）：未解析时表格大片空白显得像"坏了"，
+        # 给一行引导文字说明下一步该做什么。
+        tv.insert("", "end", values=("—", "① 粘贴公众号文章链接 → ② 点「解析」", "③ 选清晰度下载"),
+                  tags=("hint",))
+        tv.tag_configure("hint", foreground="#9ca3af")
+
+        # ---- 清晰度选择 ----
+        qrow = ttk.Frame(pad)
+        qrow.pack(fill="x", pady=(0, 6))
+        ttk.Label(qrow, text="下载清晰度：").pack(side="left")
+        q_var = tk.StringVar(value="最高")
+        q_combo = ttk.Combobox(qrow, textvariable=q_var, width=14,
+                               state="readonly", values=["最高"])
+        q_combo.pack(side="left", padx=(4, 12))
+        self._tt(q_combo, "同一视频微信提供多档清晰度，默认选最高。\n"
+                          "解析后这里会列出该视频可用的档位。")
+
+        btn_dl = ttk.Button(qrow, text="⬇ 下载选中", width=12,
+                            command=lambda: _do_download())
+        btn_dl.pack(side="left")
+        self._tt(btn_dl, "下载列表里选中的视频（可多选，按住 Ctrl 点选）")
+
+        status = ttk.Label(pad, text="等待解析…", foreground="#6b7280")
+        status.pack(anchor="w")
+
+        state = {"videos": [], "article_title": ""}
+
+        def _do_paste():
+            try:
+                s = self.root.clipboard_get()
+                if s.strip():
+                    url_var.set(s.strip())
+                    status.config(text="已粘贴链接，点「解析」开始")
+            except Exception:
+                status.config(text="剪贴板里没有文本")
+
+        def _do_parse():
+            u = url_var.get().strip()
+            if not u:
+                status.config(text="请先粘贴公众号文章链接")
+                return
+            if not mpmod.is_mp_article_url(u):
+                status.config(text="× 这不是公众号文章链接（应形如 "
+                                    "https://mp.weixin.qq.com/s/xxxxx）")
+                return
+            status.config(text="正在抓取文章页…（大文章可能需 10-30 秒）")
+            btn_parse.config(state="disabled")
+            win.update_idletasks()
+
+            def _work():
+                try:
+                    h = mpmod.fetch_article(u)
+                    title = mpmod.article_title(h)
+                    vids = mpmod.parse_article(h)
+                except Exception as e:                   # noqa: BLE001
+                    self.push_event(("mp_parse_done", None, None,
+                                     f"× 解析失败：{type(e).__name__}: {e}"))
+                    return
+                self.push_event(("mp_parse_done", vids, title, ""))
+
+            import threading
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _on_parse_done(vids, title, err):
+            btn_parse.config(state="normal")
+            if err:
+                status.config(text=err)
+                return
+            for i in tv.get_children():
+                tv.delete(i)
+            state["videos"] = vids
+            state["article_title"] = title or ""
+            for i, v in enumerate(vids, 1):
+                qs = "、".join(lbl for _f, _u, lbl in v.renditions) or "未知"
+                tv.insert("", "end", values=(i, v.vid, qs))
+            if not vids:
+                status.config(text="× 没解析到视频。可能原因：文章里没有视频、"
+                                   "文章需要登录/付费、或链接已失效。")
+                return
+            # 更新清晰度下拉：取第一个视频的档位
+            labels = [lbl for _f, _u, lbl in vids[0].renditions]
+            q_combo.config(values=["最高"] + labels)
+            q_var.set("最高")
+            status.config(text=f"✅ 解析到 {len(vids)} 个视频"
+                               f"（文章：{title[:30]}）")
+
+        def _do_download():
+            sel = tv.selection()
+            if not sel:
+                status.config(text="请先在列表里选中要下载的视频")
+                return
+            if not state["videos"]:
+                return
+            want_label = q_var.get()
+            tasks = []
+            for iid in sel:
+                idx = int(tv.item(iid, "values")[0]) - 1
+                if not (0 <= idx < len(state["videos"])):
+                    continue
+                v = state["videos"][idx]
+                url = v.url
+                if want_label != "最高":
+                    for _f, u2, lbl in v.renditions:
+                        if lbl == want_label:
+                            url = u2
+                            break
+                tasks.append((v, url))
+            if not tasks:
+                return
+            base = mpmod.safe_filename(state["article_title"])
+            outdir = Path(self.cfg.download_dir)
+            try:
+                outdir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            status.config(text=f"开始下载 {len(tasks)} 个视频…")
+            self.push_log("ok", f"📄 公众号视频：开始下载 {len(tasks)} 个"
+                                f"（文章：{state['article_title'][:40]}）")
+
+            import threading
+            import urllib.request
+
+            def _dl_one(n, v, url):
+                name = f"{base}_{n:02d}.mp4" if len(tasks) > 1 else f"{base}.mp4"
+                dst = outdir / name
+                self.push_log("info", f"📄 [{n}/{len(tasks)}] 下载中：{name}")
+                try:
+                    req = urllib.request.Request(
+                        url, headers=dict(mpmod.DOWNLOAD_HEADERS))
+                    with urllib.request.urlopen(req, timeout=60) as r, \
+                            open(dst, "wb") as f:
+                        total = int(r.headers.get("Content-Length") or 0)
+                        got = 0
+                        while True:
+                            chunk = r.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            got += len(chunk)
+                    mb = got / 1024 / 1024
+                    self.push_log("ok", f"✅ 已保存：{dst.name}（{mb:.1f} MB）")
+                    return True, name, mb
+                except Exception as e:                   # noqa: BLE001
+                    self.push_log("error",
+                                  f"❌ 下载失败 {name}：{type(e).__name__}: {e}")
+                    return False, name, 0
+
+            def _work():
+                okn = 0
+                for n, (v, url) in enumerate(tasks, 1):
+                    ok, _nm, _mb = _dl_one(n, v, url)
+                    okn += 1 if ok else 0
+                self.push_event(("mp_dl_done", okn, len(tasks),
+                                 str(outdir)))
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        # ---- 注册事件处理 ----
+        def _handle(item):
+            kind = item[0] if item else ""
+            if kind == "mp_parse_done":
+                _on_parse_done(item[1], item[2], item[3])
+                return True
+            if kind == "mp_dl_done":
+                okn, tot, d = item[1], item[2], item[3]
+                status.config(text=f"下载完成：{okn}/{tot} 成功，文件在 {d}")
+                self.push_log("ok" if okn == tot else "warn",
+                              f"📄 公众号视频下载结束：{okn}/{tot} 成功 → {d}")
+                if okn:
+                    try:
+                        messagebox.showinfo(
+                            "下载完成",
+                            f"成功 {okn}/{tot} 个。\n\n文件位置：\n{d}")
+                    except Exception:
+                        pass
+                return True
+            return False
+
+        self._mp_event_handler = _handle
+        ent.focus_set()
+        self.push_log("ok", "📄 已打开公众号视频窗口：粘贴文章链接 → 解析 → 选清晰度下载")
 
     def _hook_watchdog(self):
         """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
