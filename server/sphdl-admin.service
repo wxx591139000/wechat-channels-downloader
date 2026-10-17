@@ -1,0 +1,24 @@
+[Unit]
+Description=sphdl Admin (发码后台 · 手机可用)
+Documentation=https://github.com/wxx591139000/wechat-channels-downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sphdl-admin
+EnvironmentFile=/opt/sphdl-admin/env
+Environment=SPHDL_ADMIN_PORT=3011
+Environment=SPHDL_ADMIN_BIND=127.0.0.1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /opt/sphdl-admin/sphdl_admin.py
+Restart=always
+RestartSec=3
+# 资源上限：非常轻的服务，限死防意外
+MemoryMax=128M
+CPUQuota=30%
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

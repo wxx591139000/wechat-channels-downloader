@@ -158,4 +158,8 @@ def build_default_max_records() -> int:
 #           （可用环境变量 SPHDL_TELEMETRY_URL 覆盖，便于本地测试）
 #
 # ⚠️ 开启后请确保使用说明/授权条款中已告知用户"会记录激活设备信息"。
-TELEMETRY_ENABLED = False
+#    使用说明的「隐私说明」一节已写明（2026-10-17 加入）。
+#
+# 2026-10-17：按作者要求**已开启**（用于识别转卖：同一授权码出现在多台
+# 设备即视为可疑）；需要关闭时改回 False 重新打包即可。
+TELEMETRY_ENABLED = True

@@ -46,3 +46,9 @@ build_v121/
 dist123x/
 dist_v121/
 mp_records.json
+
+# 发码后台的本地密件（绝不入库）
+server/.admin_token
+server/data/
+licenses.jsonl
+.env

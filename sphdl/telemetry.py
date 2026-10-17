@@ -114,11 +114,82 @@ def collect_raw() -> dict:
     return out
 
 
-def device_fingerprint() -> str:
-    """设备指纹 = SHA256(cpu|board|disk)。三项拼接后哈希，单项不可反推。"""
+def device_components() -> list:
+    """把四项硬件标识分别哈希，返回 4 个独立指纹分量（v2.0.19）。
+
+    ★ 为什么要分量而不是整串哈希：
+      整串哈希（SHA256(cpu|board|disk|guid)）的致命问题是**任一项变化
+      结果全变** —— 客户加一块硬盘、换一根内存、主板返修，设备码就变了，
+      绑定的授权码立刻失效，售后成本高（行业里叫"误伤"）。
+
+      行业通行做法（JetBrains/Cryptlex/Keygen 等）：取 3~5 项，
+      **容忍 N 项不匹配**，常见是"3 项里对上 2 项就算同一台机器"。
+
+    返回：4 个 16 位十六进制串（每项各自 SHA256 前 16 位），空项为空串。
+    顺序固定：cpu, board, guid, disk（disk 放最后，因为它最容易变）。
+    """
     r = collect_raw()
-    raw = "|".join([r["cpu"], r["board"], r["disk"]])
+    out = []
+    for key in ("cpu", "board", "guid", "disk"):
+        v = (r.get(key) or "").strip()
+        if not v:
+            out.append("")
+        else:
+            out.append(hashlib.sha256(v.encode("utf-8")).hexdigest()[:16])
+    return out
+
+
+def device_fingerprint() -> str:
+    """设备指纹（展示/上报用）= SHA256(四项分量拼接)。
+
+    ⚠️ 注意：这个值**不能用于绑定校验** —— 任一项硬件变化它就会变。
+    绑定校验请用 device_components() + match_components()（容许硬件变动）。
+    本函数保留用于：上报去重、水印展示、台账记录（"这台机器当前长这样"）。
+    """
+    comps = device_components()
+    raw = "|".join(comps)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def match_components(comps_a, comps_b, need: int = 2) -> bool:
+    """两组分量是否属于同一台机器（v2.0.19 设备绑定校验核心）。
+
+    规则：**4 项里有 >= need 项相同**即视为同一台机器（默认 need=2）。
+      · 换硬盘 → cpu/board/guid 三项目匹配 → 通过 ✓
+      · 换主板 → cpu/guid/disk 三项目匹配 → 通过 ✓
+      · 重装系统 → cpu/board/disk 匹配 → 通过 ✓
+      · 换整机 → 最多 0~1 项目匹配 → 拒绝 ✗
+
+    空分量不参与比较（采集失败的项不能既不算匹配也不算不匹配）。
+    """
+    a = [x for x in (comps_a or []) if x]
+    b = [x for x in (comps_b or []) if x]
+    if not a or not b:
+        return True          # 任一侧采集失败 → 不阻止（宁可放过）
+    same = sum(1 for x, y in zip(a, b) if x and y and x == y)
+    # 可用项太少时（比如只采到 2 项），放宽为"至少 1 项匹配"
+    avail = min(len(a), len(b))
+    need2 = max(1, min(need, avail))
+    return same >= need2
+
+
+def bind_token(components=None) -> str:
+    """绑定码串（v2.0.19）= 四个分量首字节的十六进制，共 8 位。
+
+    例如 166b4c9c... / 3163c4f0... / 45d36977... / d536c46e...
+      → "163145d5"
+
+    ★ 为什么需要它：
+      客户发「设备码」（1594-8EBB-7A1F-B22F）只能做**严格比对**；
+      发「绑定码串」（163145d5）才能做**4 项取 2** 的宽容比对。
+      作者在发码后台填这个串，客户换硬盘/重装系统就不会失效。
+    """
+    comps = components if components is not None else device_components()
+    out = []
+    for i in range(4):
+        h = (comps[i] if i < len(comps) else "") or ""
+        out.append(h[:2] if len(h) >= 2 else "00")
+    return "".join(out)
 
 
 def device_display(fingerprint: str = "") -> str:

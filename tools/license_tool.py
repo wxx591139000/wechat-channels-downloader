@@ -143,7 +143,8 @@ def cmd_gen(args):
 
     codes = []
     for _ in range(max(1, args.count)):
-        code = lic.make_code(tier, days=args.days, product=flags)
+        code = lic.make_code(tier, days=args.days, product=flags,
+                             device=(args.device or ""))
         codes.append(code)
         log(code)
     # 台账登记（作者侧追溯，见 tools/ledger.py）
@@ -168,8 +169,208 @@ def cmd_gen(args):
     return 0
 
 
+def _vps_query(path: str, base: str, token: str, timeout: float = 12.0):
+    """向 VPS 授权服务查询（作者侧）。失败返回 (None, 错误说明)。
+
+    ★ 关于 User-Agent：域名走 Cloudflare 隧道，Cloudflare 默认会拦
+      非浏览器 UA（返回 `403 error code: 1010` —— 这是 Cloudflare 的
+      Browser Integrity Check，请求根本没到 VPS）。
+      这里带一个明确的自家 UA 并附 Accept 头，让请求被当作正常 API 调用；
+      如果 Cloudflare 侧仍然拦，需要在 CF 后台为该路径配 WAF 跳过规则。
+    """
+    import urllib.error
+    import urllib.request
+    url = base.rstrip("/") + path
+    headers = {
+        "X-Auth": token,
+        "User-Agent": "sphdl-track/1.0 (author tool)",
+        "Accept": "application/json",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8")), ""
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            pass
+        if e.code == 403 and "1010" in body:
+            return None, ("被 Cloudflare 拦截（error code 1010）—— 请求未到 VPS。\n"
+                          "   解决：Cloudflare 后台 → 安全性 → WAF → 为 "
+                          "/api/suspect 与 /api/stats 加跳过规则；\n"
+                          "   或临时用 SSH 隧道查询：\n"
+                          "     ssh -N -L 3010:127.0.0.1:3010 vps-aliyun &\n"
+                          "     python tools/license_tool.py ledger track "
+                          "--vps http://127.0.0.1:3010")
+        return None, f"HTTP {e.code} {body}"
+    except Exception as e:                              # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _code_hash(code: str) -> str:
+    """授权码哈希（必须与服务端/客户端算法一致：strip+upper 后 sha256 前16）。"""
+    import hashlib
+    return hashlib.sha256((code or "").strip().upper().encode("utf-8")
+                          ).hexdigest()[:16]
+
+
+def _cmd_track(args):
+    """★ 盗版追踪：把 VPS 上报数据与本地台账关联，输出可执行报告。
+
+    用法：
+        python tools/license_tool.py ledger track
+        python tools/license_tool.py ledger track --token <管理令牌>
+
+    令牌也可用环境变量 SPHDL_ADMIN_TOKEN 提供，或放在
+    ~/.sphdl_admin_token（本机私密文件）。
+
+    报告内容：
+        · 每个已发出的码 → 出现在几台设备上（>1 = 疑似转卖）
+        · 每台设备 → 激活过几个码（>1 = 有人在收集码）
+        · 前者会带上台账里的客户信息，能直接找到是谁流出去的
+    """
+    base = args.vps or "https://license.zhuanlu.xyz"
+    token = args.token or os.environ.get("SPHDL_ADMIN_TOKEN", "")
+    if not token:
+        tf = Path.home() / ".sphdl_admin_token"
+        if tf.exists():
+            token = tf.read_text(encoding="utf-8").strip()
+    if not token:
+        log("❌ 需要 VPS 管理令牌。三种提供方式（任选其一）：")
+        log("   ① --token <令牌>")
+        log("   ② 环境变量 SPHDL_ADMIN_TOKEN")
+        log(f"   ③ 写入文件 {Path.home() / '.sphdl_admin_token'}")
+        log("")
+        log("   令牌在 VPS 上：cat /opt/sphdl-license/.admin_token")
+        return 1
+
+    log(f"🔍 查询 {base} …")
+    sus, err = _vps_query("/api/suspect", base, token)
+    if sus is None:
+        log(f"❌ 查询失败：{err}")
+        log("   检查：① VPS 服务在跑（systemctl is-active sphdl-license）")
+        log("         ② 令牌是否正确  ③ 网络能否访问该域名")
+        return 1
+    stats, err2 = _vps_query("/api/stats", base, token)
+
+    # ---- 台账建索引：code_hash → 台账记录 ----
+    ledger_rows = L.load()
+    by_hash = {}
+    for r in ledger_rows:
+        code = r.get("code") or ""
+        if code:
+            by_hash[_code_hash(code)] = r
+
+    one_code = sus.get("one_code_many_devices") or []
+    one_dev = sus.get("one_device_many_codes") or []
+
+    print()
+    print("=" * 78)
+    print("授权激活追踪报告")
+    print("=" * 78)
+    if stats:
+        print(f"上报总数 {stats.get('total_reports', 0)} 条 "
+              f"｜不同授权码 {stats.get('distinct_codes', 0)} 个 "
+              f"｜不同设备 {stats.get('distinct_devices', 0)} 台 "
+              f"｜最后上报 {stats.get('last_report') or '无'}")
+    print(f"台账记录 {len(ledger_rows)} 条（其中可匹配哈希 {len(by_hash)} 条）")
+    print()
+
+    # ---------- ① 一码多机：最需要关注的转卖信号 ----------
+    print("【① 一码多机 —— 强转卖信号】")
+    if not one_code:
+        print("  ✅ 没有发现。所有授权码都只在一台设备上激活过。")
+    else:
+        for item in one_code:
+            h = item.get("code_hash", "")
+            n = item.get("devices", 0)
+            rec = by_hash.get(h)
+            print(f"  ⚠️  {h}  出现在 {n} 台设备上")
+            if rec:
+                print(f"      档位: {rec.get('tier_label', '?')}")
+                print(f"      客户: {rec.get('customer') or '（未填）'}")
+                print(f"      联系: {rec.get('contact') or '（未填）'}")
+                print(f"      渠道: {rec.get('channel') or '（未填）'} "
+                      f"｜价格: {rec.get('price') or '（未填）'}")
+                print(f"      发码: {rec.get('issued', '?')}")
+                print(f"      原码: {rec.get('code', '')}")
+            else:
+                print(f"      ⚠ 台账里没有这个哈希 → 该码不是本机发出的，"
+                      f"或台账不全")
+            print(f"      首次 {item.get('first_seen')}  "
+                  f"｜最后 {item.get('last_seen')}")
+            print()
+
+    # ---------- ② 一机多码：有人在收集码 ----------
+    print("【② 一机多码 —— 有人在收集/测试授权码】")
+    if not one_dev:
+        print("  ✅ 没有发现。")
+    else:
+        for item in one_dev:
+            h = item.get("device_hash", "")
+            n = item.get("codes", 0)
+            print(f"  ⚠️  设备 {h} 激活过 {n} 个不同的码")
+            codes = (item.get("code_hashes") or "").split(",")
+            for ch in codes[:12]:
+                ch = ch.strip()
+                if not ch:
+                    continue
+                rec = by_hash.get(ch)
+                who = (f"{rec.get('customer') or '未填'} / "
+                       f"{rec.get('tier_label', '')}") if rec else "（台账无此码）"
+                print(f"        {ch}  {who}")
+            if len(codes) > 12:
+                print(f"        …还有 {len(codes) - 12} 个")
+            print()
+
+    # ---------- ③ 已发出但从未激活的码 ----------
+    print("【③ 已发出但从未激活的码】")
+    reported = {(_code_hash(r.get("code", "")))
+                for r in ledger_rows if r.get("code")}
+    if stats:
+        # 用一机多码/一码多机里出现的哈希反推；更准确的做法是服务端提供全量
+        seen = set()
+        for item in one_code:
+            seen.add(item.get("code_hash", ""))
+        for item in one_dev:
+            for ch in (item.get("code_hashes") or "").split(","):
+                if ch.strip():
+                    seen.add(ch.strip())
+        missing = [h for h in reported if h and h not in seen]
+        if missing:
+            for h in missing:
+                rec = by_hash.get(h) or {}
+                print(f"  · {rec.get('code', '?')[:26]}…  "
+                      f"{rec.get('tier_label', '')[:16]:18s} "
+                      f"{rec.get('customer') or '（未填）'}")
+            print(f"  （共 {len(missing)} 个：可能是还没激活，或客户还没用）")
+        else:
+            print("  ✅ 台账里的码都已有激活记录。")
+    print()
+
+    print("=" * 78)
+    print("处置建议")
+    print("=" * 78)
+    if one_code:
+        print("  · 上表「一码多机」的客户 → 私聊确认是否换了电脑/重装系统")
+        print("  · 若非本人换机 → 该码已外流，可停止后续售后支持")
+        print("  · 保留本报告作为证据（闲鱼投诉/维权时用）")
+    if one_dev:
+        print("  · 「一机多码」多为测试或批量试用；若客户身份明确且非测试，")
+        print("    提防是同行在收集你的授权码")
+    if not one_code and not one_dev:
+        print("  · 当前无异常，保持关注即可。")
+    print()
+    return 0
+
+
 def cmd_ledger(args):
-    """台账查询：list / find / device / stats。"""
+    """台账查询：list / find / device / stats / track。"""
+    if args.action == "track":
+        return _cmd_track(args)
+
     if args.action == "stats":
         st = L.stats()
         log(f"📒 台账: {L.ledger_path()}")
@@ -264,7 +465,9 @@ def main():
     p.add_argument("--contact", default="", help="联系方式，如「闲鱼:abc123」「微信:zs」")
     p.add_argument("--channel", default="", help="销售渠道，如「闲鱼」「微信」")
     p.add_argument("--price", default="", help="成交价（记台账，便于统计）")
-    p.add_argument("--device", default="", help="设备码（ver=2 绑定版用，暂未启用）")
+    p.add_argument("--device", default="",
+                   help="★设备码（如 4770-0AEB-18B6-1AB4）→ 生成设备绑定码"
+                        "（ver=3，只能在该设备激活）。不填则生成不绑机的码")
     p.add_argument("--no-ledger", action="store_true",
                    help="不登记台账（默认登记；仅测试时用）")
     p.add_argument("--feature", action="append", metavar="F",
@@ -274,11 +477,16 @@ def main():
 
     p = sub.add_parser("ledger", help="查台账（追溯谁泄露了码）")
     p.add_argument("action", nargs="?", default="list",
-                   choices=["list", "find", "device", "stats"],
-                   help="list=列表（默认）/ find=按码反查 / "
-                        "device=按设备码查 / stats=统计")
-    p.add_argument("value", nargs="?", default="",
-                   help="find/device 时的查询值（授权码或设备码）")
+                   choices=["list", "find", "device", "stats", "track"],
+                   help="list=全部 find=按码查 device=按设备码查 "
+                        "stats=统计 track=★VPS 追踪报告（查转卖）")
+    p.add_argument("--value", default="",
+                   help="find/device 的查询值（授权码或设备码）")
+    p.add_argument("--token", default="",
+                   help="track 用的 VPS 管理令牌（也可用环境变量 "
+                        "SPHDL_ADMIN_TOKEN 或 ~/.sphdl_admin_token）")
+    p.add_argument("--vps", default="",
+                   help="track 用的服务地址（默认 https://license.zhuanlu.xyz）")
     p.set_defaults(func=cmd_ledger)
 
     p = sub.add_parser("verify", help="校验授权码")

@@ -61,9 +61,20 @@ _OBF_MASK = b"sphdl-lic-v1"      # 与 tools/license_tool.py 保持一致
 #      载荷: ver(1) | tier(1) | days//8(1) | product(1) | rand(2)
 #      product 取值见 PRODUCT_* 常量
 #   MAC 的消息前缀按 ver 区分（SPHDLv1 / SPHDLv2），防跨版本签名互窜。
+#   ver=3（设备绑定，v2.0.19 新增）: 10B 载荷 + 10B MAC = 20B → 46 字符
+#      载荷: ver(3) | tier(1) | days//8(1) | product(1) | dev4(4) | rand(2)
+#      dev4 = 设备码哈希的前 4 字节（32 bit）→ 碰撞概率 1/43 亿，足够
+#      ★ 绑定版与非绑定版并存：不传 --device 就发 ver=2（不绑机），
+#        传了 --device 才发 ver=3。作者按需决定哪些客户用绑定版。
+#   MAC 的消息前缀按 ver 区分（SPHDLv1 / SPHDLv2 / SPHDLv3），防跨版本签名互窜。
 _VERSION2 = 2
 _V2_PAYLOAD_LEN = 6
 _V2_MSG_PREFIX = b"SPHDLv2"
+
+_VERSION3 = 3
+_V3_PAYLOAD_LEN = 10
+_V3_MSG_PREFIX = b"SPHDLv3"
+VERSION_BOUND = _VERSION3      # 对外暴露：设备绑定型
 
 # 产品线（v2.0.19：视频号 4 档 + 公众号 1 个，共 5 个独立产品）
 PRODUCT_VIDEO = 1          # 视频号下载（基础产品，4 档位）
@@ -150,8 +161,95 @@ def _mac(payload: bytes, ver: int = 1) -> bytes:
     secret = get_secret()
     if not secret:
         return b"\x00" * _MAC_LEN
-    prefix = _V2_MSG_PREFIX if ver == _VERSION2 else _MSG_PREFIX
+    if ver == _VERSION3:
+        prefix = _V3_MSG_PREFIX
+    elif ver == _VERSION2:
+        prefix = _V2_MSG_PREFIX
+    else:
+        prefix = _MSG_PREFIX
     return hmac.new(secret, prefix + payload, hashlib.sha256).digest()[:_MAC_LEN]
+
+
+def _components_from_display(s: str) -> list:
+    """把「绑定码串」或「设备码展示串」转成分量列表（v2.0.19）。
+
+    支持两种输入：
+      ① 8 位十六进制「绑定码串」如 163145d5
+         → 每个字节作为一个分量（首位），能享受"4 项取 2"
+      ② 设备码展示串如 1594-8EBB-7A1F-B22F
+         → 整串当唯一分量（严格比对，退化为旧行为）
+
+    ⚠️ 设计说明：设备码展示串是"分量拼接后再哈希"的结果，无法反推分量，
+    所以正式发码请让客户发「绑定码串」（客户端授权管理页会显示）。
+    """
+    import hashlib as _h
+    t = (s or "").strip().replace("-", "").replace(" ", "").lower()
+    # ① 8 位纯十六进制 = 四分量首字节
+    if len(t) == 8:
+        try:
+            bytes.fromhex(t)
+            return [t[i:i + 2] for i in range(0, 8, 2)]
+        except ValueError:
+            pass
+    if not t:
+        return []
+    # ② 其他 → 唯一分量（严格比对）
+    return [_h.sha256(t.upper().encode()).hexdigest()[:16], "", "", ""]
+
+
+def device_bind_bytes(components) -> bytes:
+    """设备分量 → 用于绑定的 4 字节（v2.0.19）。
+
+    components: telemetry.device_components() 返回的 4 个 16 位哈希串。
+    每个分量取**首字节**（1B），共 4B —— 刚好填满 ver=3 载荷的 dev4 字段。
+
+    ★ 为什么不是整串哈希取 4B：
+      整串哈希"任一硬件变就全变"，客户换硬盘/重装系统就会被误判为换机。
+      存分量后，客户端可以**逐项比对、容许 N 项不同**（见 bind_matches）。
+
+    错配风险（4 项取 2）：不同机器 2 项偶然相撞的概率约
+    C(4,2)*(1/256)^2 ≈ 0.009%（约十万分之一），对本场景足够。
+    """
+    out = bytearray()
+    comps = list(components or [])
+    for i in range(4):
+        h = (comps[i] if i < len(comps) else "") or ""
+        out.append(int(h[:2], 16) if len(h) >= 2 else 0)
+    return bytes(out)
+
+
+def bind_matches(components, bind4: bytes, need: int = 2) -> bool:
+    """本机设备分量是否匹配授权码里绑定的信息（v2.0.19）。
+
+    规则：4 项里 **至少 need 项首字节相同** 即视为同一台机器。
+      · 换硬盘 / 换主板 / 重装系统 → 仍有 ≥2 项相同 → 通过
+      · 换整机 → 低于阈值 → 拒绝
+
+    空分量（采集失败）不参与比较，避免误伤。
+    """
+    if not bind4:
+        return True
+    b = bytes(bind4)
+    if len(b) < 4 or b == b"\x00\x00\x00\x00":
+        return True                       # 未绑定 → 一律通过
+    comps = list(components or [])
+    tried = 0
+    same = 0
+    for i in range(4):
+        h = (comps[i] if i < len(comps) else "") or ""
+        if len(h) < 2:
+            continue                      # 该分量没采到 → 跳过
+        try:
+            v = int(h[:2], 16)
+        except (ValueError, TypeError):
+            continue                      # 脏数据（非十六进制）→ 跳过，不崩
+        tried += 1
+        if v == b[i]:
+            same += 1
+    if tried == 0:
+        return True                       # 一项都没采到 → 不阻止
+    need2 = max(1, min(need, tried))
+    return same >= need2
 
 
 def _group(code: str) -> str:
@@ -161,7 +259,7 @@ def _group(code: str) -> str:
 
 # ---------------------------------------------------------------- 生成（作者侧）
 def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
-              product: int = 0) -> str:
+              product: int = 0, device: str = "") -> str:
     """生成授权码（**仅作者侧使用**，依赖内置密钥；客户拿不到密钥）。
 
     tier: 视频号档位 500/1000/2000/20000；公众号产品传 0（不分档）
@@ -172,6 +270,9 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
         flags=0, product=0                     → ver=1 码（35字符，视频号）
         product=PRODUCT_VIDEO, tier=档位        → ver=2 码（38字符，视频号）
         product=PRODUCT_MP_ARTICLE, tier=0      → ver=2 码（38字符，公众号）
+
+    device: **设备码（可选）**。传了就生成 ver=3 绑定码（46字符），
+            该码只能在这台设备上激活；不传则发 ver=2 不绑机。
 
     ★ v2.0.19：**一个码只解锁一条产品线**（不再有 all 组合码）。
       flags 参数保留仅为向后兼容，等价于 product。
@@ -198,12 +299,26 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
         rand = os.urandom(2)
     days_step = min(255, max(0, int(days) // 8))     # 粒度 8 天，最多 2040 天
 
-    if prod == PRODUCT_VIDEO and flags in (0,) and product in (0,):
+    # 设备绑定：传了 device（可传设备码字符串或分量列表）就绑定（ver=3）
+    dev_bind = None
+    if device:
+        if isinstance(device, (list, tuple)):
+            dev_bind = device_bind_bytes(device)
+        else:
+            dev_bind = device_bind_bytes(_components_from_display(str(device)))
+
+    if dev_bind is not None:
+        # ---- ver=3（设备绑定码，v2.0.19）----
+        # 载荷: ver(3) | tier(1) | days//8(1) | product(1) | dev4(4) | rand(2)
+        payload = (bytes([_VERSION3, tier_code, days_step, prod])
+                   + dev_bind + rand[:2])
+        blob = payload + _mac(payload, ver=_VERSION3)
+    elif prod == PRODUCT_VIDEO and flags in (0,) and product in (0,):
         # ---- ver=1（老码型，完全不变；语义=视频号）----
         payload = bytes([_VERSION, tier_code, days_step]) + rand[:2]
         blob = payload + _mac(payload, ver=_VERSION)
     else:
-        # ---- ver=2（新码型，含产品线）----
+        # ---- ver=2（新码型，含产品线，不绑设备）----
         payload = bytes([_VERSION2, tier_code, days_step, prod]) + rand[:2]
         blob = payload + _mac(payload, ver=_VERSION2)
     return f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"
@@ -254,6 +369,18 @@ def verify_code(code: str) -> Optional[dict]:
         tier_code, days_step, product = payload[1], payload[2], payload[3]
         if product not in PRODUCT_LABELS:
             return None
+    elif ver == _VERSION3:
+        # ---- ver=3（设备绑定码，10B 载荷 + 10B MAC）----
+        if len(blob) < _V3_PAYLOAD_LEN + _MAC_LEN:
+            return None
+        payload = blob[:_V3_PAYLOAD_LEN]
+        mac = blob[_V3_PAYLOAD_LEN:_V3_PAYLOAD_LEN + _MAC_LEN]
+        if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION3)):
+            return None
+        tier_code, days_step, product = payload[1], payload[2], payload[3]
+        if product not in PRODUCT_LABELS:
+            return None
+        dev_bind = payload[4:8]        # 4 字节设备绑定值
     else:
         return None                          # 未知码型
 
@@ -268,11 +395,59 @@ def verify_code(code: str) -> Optional[dict]:
         tier = 0
 
     days = days_step * 8
-    return {"tier": tier, "days": days, "ok": True, "ver": ver,
+    info = {"tier": tier, "days": days, "ok": True, "ver": ver,
             "product": product,
             "flags": product,                # 兼容旧字段名
             "features": [PRODUCT_LABELS[product]],
             "code": f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"}
+    if ver == _VERSION3:
+        info["device_bound"] = True
+        info["_bind4"] = dev_bind           # 内部用；不参与展示
+    else:
+        info["device_bound"] = False
+    return info
+
+
+def check_device(info: Optional[dict], device_display: str = "",
+                 components=None) -> tuple:
+    """校验授权码与本机设备的绑定关系（v2.0.19）。
+
+    components: telemetry.device_components() 的分量列表（**推荐传这个**，
+                才能享受"4 项取 2"的抗硬件变动能力）
+    device_display: 旧的整串设备码（仅兼容；传它则退化为严格比对）
+
+    返回 (ok, 说明)：
+        (True,  "")   → 通过（非绑定码 / 绑定且匹配 / 取不到设备信息）
+        (False, "原因") → 绑定码但设备不匹配
+
+    ★ 设计原则：取不到本机设备信息时**不阻止使用**（宁可放过，不可误伤）。
+    """
+    if not info:
+        return True, ""
+    if not info.get("device_bound"):
+        return True, ""                     # 非绑定码 → 一律通过
+    bind4 = info.get("_bind4") or b""
+    if not bind4 or bytes(bind4) == b"\x00\x00\x00\x00":
+        return True, ""
+
+    if components:
+        if bind_matches(components, bind4):
+            return True, ""
+        # ★ 兼容：作者可能用「设备码展示串」发码（严格模式）。
+        #   此时分量比对会失败，再退回按设备码串比一次，避免误判。
+        if device_display and bind_matches(
+                _components_from_display(device_display), bind4):
+            return True, ""
+        return False, ("此授权码绑定的是另一台电脑，无法在本机使用。\n"
+                       "如您更换了电脑，请联系发布方重新绑定（免费）。")
+
+    if not (device_display or "").strip():
+        return True, ""                     # 取不到设备码 → 不阻止
+    # 只有整串设备码时：退化为严格比对（旧行为）
+    if bind_matches(_components_from_display(device_display), bind4):
+        return True, ""
+    return False, ("此授权码绑定的是另一台电脑，无法在本机使用。\n"
+                   "如您更换了电脑，请联系发布方重新绑定（免费）。")
 
 
 def has_feature(info: Optional[dict], flag: int) -> bool:

@@ -139,18 +139,27 @@ try:
           "🔒" not in app.btn_mp.cget("text"), app.btn_mp.cget("text"))
     check("G4c _refresh_mp_button 返回 True",
           app._refresh_mp_button() is True)
-    info = app._license_info()
+    # ★ v2.0.19：_license_info() 无参时优先返回视频号信息，
+    #   要判断公众号必须按产品线查（与 _refresh_mp_button 内部一致）
+    info_mp = app._license_info(lic.PRODUCT_MP_ARTICLE)
     check("G4d 授权信息含公众号功能",
-          lic.has_feature(info, lic.PRODUCT_MP_ARTICLE), str(info.get("features")))
+          lic.is_mp_product(info_mp),
+          str(info_mp.get("features") if info_mp else None))
 
     # ---------- G4b2 视频号 ver=2 码也不解锁公众号（产品互斥） ----------
     print("\n" + "=" * 74)
     print("G4b2 ★产品互斥：视频号 ver=2 码不解锁公众号")
     print("=" * 74)
+    # ★ v2.0.19：激活视频号码**不应顶掉**已买的公众号授权（客户实测 bug 的修复）。
+    #   要验证"产品互斥"，必须先清掉公众号授权，再看视频号码是否能解锁它。
+    app._clear_license(lic.PRODUCT_MP_ARTICLE)
+    pump(app, 300)
+    check("G4b2-0 单独清公众号后按钮回到 🔒",
+          "🔒" in app.btn_mp.cget("text"), app.btn_mp.cget("text"))
     app._activate_license(CODE_V2)
     pump(app, 300)
     check("G4b2a 视频号 ver=2 码激活成功", True)
-    check("G4b2b ★公众号按钮仍带 🔒（互斥生效）",
+    check("G4b2b ★视频号码不解锁公众号（互斥生效）",
           "🔒" in app.btn_mp.cget("text"), app.btn_mp.cget("text"))
     check("G4b2c 档位为 20000", app.store.max_records == 20000,
           str(app.store.max_records))

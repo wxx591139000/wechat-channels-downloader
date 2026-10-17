@@ -186,7 +186,11 @@ class AppConfig:
         self.auto_proxy = True
         self.auto_download = False   # 默认手动：捕获只进列表，用户点选后下载（v1.2.5 开关可开）
         self.prefer_highest_quality = False  # 默认下载最高清晰度（原始画质优先）
-        self.download_images = True   # 默认下载图片：图片显示在列表并可下载（v2.0.4 开关）
+        # 图片捕获开关（v2.0.4 引入，v2.0.19 起**默认关闭**）：
+        #   本工具主打下载视频，图片帖混进列表会干扰视频挑选与批量操作，
+        #   因此出厂默认不捕获图片；需要的用户在「捕获设置」里自行勾选。
+        #   关闭时：图片不进列表、不参与下载/去重（已下载的图片文件保留）。
+        self.download_images = False
         self.natural_capture = True   # 默认自然捕获：当前播放+随后几条，不整页入库（v2.0.7）
         self.guide_auto_shown = False  # 内置使用说明是否已自动弹出过（v2.0.16）
         # 列表容量档位（v2.0.17）：**客户端不可自行配置**
@@ -194,8 +198,16 @@ class AppConfig:
         #   ② 否则由授权码决定（sphdl/license.py），未授权时用默认档
         self.locked_max_records = config.locked_max_records()
         self.default_max_records = config.build_default_max_records()
-        self.license_code = ""
-        self.license_activated_at = 0.0
+        # ★ v2.0.19：授权码**按产品线分别保存**。
+        #   视频号 4 档 与 公众号视频 是两条独立产品线，各自一个码；
+        #   以前只有单个 license_code 字段，激活新产品会把另一个顶掉
+        #   （2026-10-17 客户实测 bug）。现在：
+        #     license_codes = {产品号: 码}，互不影响
+        #   license_code 保留为"最近一次激活的码"，仅用于兼容旧配置/展示。
+        self.license_codes = {}          # {1: 视频号码, 2: 公众号码}
+        self.license_activated_at = {}   # {产品号: 首次激活时间戳}
+        self.license_code = ""           # 兼容旧字段（最近激活的码）
+        self.license_activated_at_legacy = 0.0
         self._load()
 
     def _load(self):
@@ -206,14 +218,74 @@ class AppConfig:
             self.auto_proxy = bool(d.get("auto_proxy", True))
             self.auto_download = bool(d.get("auto_download", False))
             self.prefer_highest_quality = bool(d.get("prefer_highest_quality", False))
-            self.download_images = bool(d.get("download_images", True))
+            # v2.0.19：缺省改为 False（与出厂默认一致）。老配置文件里
+            # 显式存了 true 的仍按 true 生效，不改变老用户既有行为。
+            self.download_images = bool(d.get("download_images", False))
             self.natural_capture = bool(d.get("natural_capture", True))
             self.guide_auto_shown = bool(d.get("guide_auto_shown", False))
-            self.license_code = str(d.get("license_code", "") or "")
+            # ---- v2.0.19：按产品线恢复授权码 ----
+            self.license_codes = {}
+            raw_codes = d.get("license_codes") or {}
+            if isinstance(raw_codes, dict):
+                for k, v in raw_codes.items():
+                    try:
+                        if v:
+                            self.license_codes[int(k)] = str(v)
+                    except Exception:
+                        continue
+            raw_at = d.get("license_activated_at") or {}
+            self.license_activated_at = {}
+            if isinstance(raw_at, dict):
+                for k, v in raw_at.items():
+                    try:
+                        self.license_activated_at[int(k)] = float(v or 0)
+                    except Exception:
+                        continue
+            # 旧配置迁移：单个 license_code → 按码里的产品号归档
+            legacy = str(d.get("license_code", "") or "")
+            self.license_code = legacy
             try:
-                self.license_activated_at = float(d.get("license_activated_at", 0) or 0)
+                self.license_activated_at_legacy = float(
+                    d.get("license_activated_at", 0) or 0)
             except Exception:
-                self.license_activated_at = 0.0
+                self.license_activated_at_legacy = 0.0
+            if legacy and not self.license_codes:
+                try:
+                    from sphdl import license as _lic
+                    info = _lic.verify_code(legacy)
+                    if info:
+                        prod = int(info.get("product") or 1)
+                        self.license_codes[prod] = legacy
+                        self.license_activated_at[prod] = \
+                            self.license_activated_at_legacy
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def code_of(self, product: int) -> str:
+        """取某产品线的授权码（无则空串）。"""
+        try:
+            return self.license_codes.get(int(product), "") or ""
+        except Exception:
+            return ""
+
+    def set_code(self, product: int, code: str):
+        """设置某产品线的授权码（不影响其他产品线）。"""
+        try:
+            self.license_codes[int(product)] = code or ""
+        except Exception:
+            pass
+
+    def activated_at_of(self, product: int) -> float:
+        try:
+            return float(self.license_activated_at.get(int(product), 0) or 0)
+        except Exception:
+            return 0.0
+
+    def set_activated_at(self, product: int, ts: float):
+        try:
+            self.license_activated_at[int(product)] = float(ts or 0)
         except Exception:
             pass
 
@@ -227,8 +299,17 @@ class AppConfig:
                  "download_images": self.download_images,
                  "natural_capture": self.natural_capture,
                  "guide_auto_shown": self.guide_auto_shown,
+                 # v2.0.19：按产品线分别存（视频号 / 公众号 互不覆盖）
+                 "license_codes": {str(k): v
+                                   for k, v in (self.license_codes or {}).items()
+                                   if v},
+                 "license_activated_at": {
+                     str(k): v for k, v in
+                     (self.license_activated_at or {}).items()},
+                 # 兼容旧版读取
                  "license_code": self.license_code,
-                 "license_activated_at": self.license_activated_at},
+                 "license_activated_at_legacy":
+                     self.license_activated_at_legacy},
                 ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
@@ -754,28 +835,87 @@ class App:
         n = self.store.max_records if n is None else int(n)
         return config.label_of(n)
 
-    def _license_info(self):
-        """当前授权码解析结果（无效/未填 → None）。"""
-        code = getattr(self.cfg, "license_code", "") or ""
-        return lic.verify_code(code) if code else None
+    def _license_info(self, product: int = None):
+        """授权解析（v2.0.19：按产品线）。
+
+        product=None → 返回**任一有效产品**的信息（优先视频号），用于
+                       界面通用展示；两条产品线的产品号都在返回值里。
+        product=N    → 只返回该产品线的授权信息（无/无效 → None）。
+
+        ★ 为什么按产品线：视频号与公众号是两条独立产品线，各自一个码；
+          以前读单个 license_code，激活一个就把另一个顶掉（实测 bug）。
+
+        ★ v2.0.19 设备绑定：绑定码若与本机不匹配，**视为无效授权**
+          （返回 None → 档位回落到默认档、公众号功能锁定）。
+          这样"拷到别人电脑上"的绑定码自动失效，无需额外流程。
+          取不到本机设备码时不判失败（宁可放过，不可误伤）。
+        """
+        if product is not None:
+            code = self.cfg.code_of(product)
+            info = lic.verify_code(code) if code else None
+            if info and int(info.get("product") or 0) == int(product):
+                return self._check_bound(info)
+            return None
+        # 无指定产品：优先视频号，其次公众号
+        for p in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE):
+            code = self.cfg.code_of(p)
+            info = lic.verify_code(code) if code else None
+            if info:
+                return self._check_bound(info)
+        return None
+
+    def _check_bound(self, info):
+        """设备绑定校验（info 无效 / 非绑定码 → 原样返回；不匹配 → None）。
+
+        ⚠️ 性能：设备采集要调 PowerShell（200~500ms），而 _license_info()
+        会被界面频繁调用（状态栏、横幅等），**必须缓存**，只采一次。
+
+        ★ v2.0.19：传**分量列表**给 check_device，才能享受"4 项取 2"的
+        抗硬件变动能力（客户换硬盘/重装系统不会被误判为换机）。
+        """
+        if not info or not info.get("device_bound"):
+            return info
+        comps = getattr(self, "_dev_comps_cache", None)
+        if comps is None:
+            try:
+                from . import telemetry as _tel
+                comps = _tel.device_components()
+            except Exception:
+                comps = []
+            self._dev_comps_cache = comps
+        ok, _why = lic.check_device(info, components=comps)
+        return info if ok else None
 
     def _license_expired(self) -> bool:
-        info = self._license_info()
+        """当前视频号授权是否过期（档位相关）。"""
+        info = self._license_info(lic.PRODUCT_VIDEO)
         if not info:
             return False
-        return lic.license_expired(info["days"], self.cfg.license_activated_at)
+        return lic.license_expired(
+            info["days"], self.cfg.activated_at_of(lic.PRODUCT_VIDEO))
 
     def _resolve_tier(self) -> int:
         """档位解析（唯一入口）：
         ① 构建预置档位（写死）→ 用它
         ② 有效授权码（未过期）→ 用码里的档位
         ③ 否则 → 构建默认档（一般 500）
+
+        ★ v2.0.19 关键修复：**公众号产品不影响视频号档位**。
+          公众号码的 tier 是 0（不分档），如果直接返回 0，界面会显示
+          "上限 0 条"、逻辑上等于一条视频都抓不进来（2026-10-17 实测 bug：
+          客户粘了公众号码后列表上限从 500 变成 0）。
+          公众号产品与视频号档位是两回事 → 遇到公众号码，档位回落到
+          构建默认档（未买视频号就该是最小档），而不是 0。
         """
         if self.cfg.locked_max_records is not None:
             return self.cfg.locked_max_records
-        info = self._license_info()
+        # 档位只跟**视频号**产品线有关（公众号不分档）
+        info = self._license_info(lic.PRODUCT_VIDEO)
         if info and not self._license_expired():
-            return info["tier"]
+            tier = int(info.get("tier") or 0)
+            if tier > 0:
+                return tier
+        return self.cfg.default_max_records
         return self.cfg.default_max_records
 
     def _tier_source_text(self) -> str:
@@ -795,8 +935,15 @@ class App:
     def _refresh_limit_hint(self):
         """档位说明文案（随档位/授权状态变化）。"""
         n = self.store.max_records
-        head = (f"满 {n} 条即停止加载后续视频"
-                f"（删掉部分记录后可继续加载）")
+        # v2.0.19：公众号产品不涉及视频号档位，说明文案要写清楚，
+        # 否则客户看到「满 500 条即停止」会以为公众号视频也受限。
+        info = self._license_info()
+        if info and lic.is_mp_product(info) and not self._license_expired():
+            head = ("当前授权为「公众号视频版」，不含视频号功能"
+                    f"（视频号保持默认档 {n} 条）")
+        else:
+            head = (f"满 {n} 条即停止加载后续视频"
+                    f"（删掉部分记录后可继续加载）")
         try:
             self.limit_hint.config(text=f"{head}　｜　{self._tier_source_text()}")
         except Exception:
@@ -842,18 +989,41 @@ class App:
         self._refresh_limit_hint()
         self._update_status_bar()
 
-    def _clear_license(self):
-        """清除授权（售后用）：回落到默认档。返回是否真的清除过。"""
-        if not getattr(self.cfg, "license_code", ""):
+    def _clear_license(self, product: int = None):
+        """清除授权（售后用）：回落到默认档。返回是否真的清除过。
+
+        product=None → 清除**所有**产品线的授权（旧行为）
+        product=N    → 只清除该产品线，另一条产品线保持不变
+
+        ★ v2.0.19：必须同时清 license_codes（按产品线存的码）——
+          只清旧的 license_code 字段会导致「点了清除授权但实际还有效」
+          （2026-10-17 修复）。
+        """
+        had = bool((self.cfg.license_codes or {}).get(
+            int(product))) if product is not None else bool(self.cfg.license_codes)
+        if not had and not getattr(self.cfg, "license_code", ""):
             return False
-        self.cfg.license_code = ""
-        self.cfg.license_activated_at = 0.0
+
+        if product is None:
+            self.cfg.license_codes = {}
+            self.cfg.license_activated_at = {}
+            self.cfg.license_code = ""
+            self.cfg.license_activated_at_legacy = 0.0
+            self.push_log("warn", "🗑 已清除全部授权，档位回落到默认档")
+        else:
+            try:
+                self.cfg.license_codes.pop(int(product), None)
+                self.cfg.license_activated_at.pop(int(product), None)
+            except Exception:
+                pass
+            name = ("公众号视频版" if int(product) == lic.PRODUCT_MP_ARTICLE
+                    else "视频号下载")
+            self.push_log("warn", f"🗑 已清除「{name}」授权")
         self.cfg.save()
-        self.push_log("warn", "🗑 已清除授权，档位回落到默认档")
-        self._apply_tier(self.cfg.default_max_records, reason="清除授权")
-        # v2.0.19：清除授权后「📄 公众号视频」应回到锁定态
+        self._apply_tier(self._resolve_tier(), reason="清除授权")
         try:
             self._refresh_mp_button()
+            self._refresh_watermark()
         except Exception:
             pass
         return True
@@ -912,23 +1082,73 @@ class App:
                   font=("Microsoft YaHei UI", 8, "bold")
                   ).pack(side="left", padx=(6, 0))
 
-        # 当前授权码（完整显示，可框选复制；未授权时提示）
-        ttk.Label(pad, text="当前授权码：").grid(row=2, column=0, sticky="e",
+        # ---- 本机设备码（v2.0.19 设备绑定）----
+        # 客户买绑定版时，需要把这个码发给作者，作者据此生成绑定码。
+        # 放在显眼处 + 一键复制按钮，避免客户手抄出错。
+        try:
+            from . import telemetry as _tel
+            # 一次采集，同时得到展示码和绑定串（PowerShell 200~500ms，别采两遍）
+            import hashlib as _hl
+            _comps0 = _tel.device_components()
+            _fp = _hl.sha256("|".join(_comps0).encode()).hexdigest()
+            _dev_txt = _tel.device_display(_fp) or "（读取失败）"
+            _tok = _tel.bind_token(_comps0)
+        except Exception:
+            _dev_txt = "（读取失败）"
+            _tok = ""
+        ttk.Label(pad, text="本机设备码：").grid(row=2, column=0, sticky="e",
+                                            pady=(0, 4))
+        tk.Label(pad, text=_dev_txt, fg="#1e3a5f",
+                 font=("Consolas", 11, "bold")).grid(
+            row=2, column=1, sticky="w", pady=(0, 4))
+
+        def _copy_dev():
+            # 用已缓存的绑定串（避免重复采集：PowerShell 每次 200~500ms）
+            txt = f"{_dev_txt}" + (f"  (绑定串 {_tok})" if _tok else "")
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(txt)
+                hint_var.set(f"✅ 已复制：{txt}")
+            except Exception:
+                hint_var.set("复制失败，请手动选中设备码复制")
+
+        _dev_btn = ttk.Button(pad, text="📋 复制", width=8, command=_copy_dev)
+        _dev_btn.grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(0, 4))
+        self._tt(_dev_btn,
+                 "复制本机设备码 + 绑定串，发给发布方开通「设备绑定版」授权。\n"
+                 "绑定后该授权码只能在本机使用；换电脑请联系发布方重新绑定。")
+        # 绑定串（v2.0.19）：8 位十六进制，用于"4 项取 2"的宽容比对
+        try:
+            from . import telemetry as _tel2
+            _tok = _tel2.bind_token()
+        except Exception:
+            _tok = ""
+        if _tok:
+            tk.Label(pad, text=f"（绑定串 {_tok}）", fg="#9ca3af",
+                     font=("Consolas", 9)).grid(
+                row=2, column=3, sticky="w", padx=(6, 0), pady=(0, 4))
+        else:
+            ttk.Label(pad, text="（购买设备绑定版时需发给发布方；普通版可忽略）",
+                      foreground="#9ca3af").grid(row=2, column=3, sticky="w",
+                                                  padx=(6, 0), pady=(0, 4))
+
+        # ---- 当前授权码 ----
+        ttk.Label(pad, text="当前授权码：").grid(row=3, column=0, sticky="e",
                                                  pady=(0, 8))
         code_shown = (info["code"] if info else
                       (getattr(self.cfg, "license_code", "") or "（未输入）"))
         code_var = tk.StringVar(value=code_shown)
         code_entry = ttk.Entry(pad, textvariable=code_var, width=44,
                                state="readonly")
-        code_entry.grid(row=2, column=1, columnspan=3, sticky="we", pady=(0, 8))
+        code_entry.grid(row=3, column=1, columnspan=3, sticky="we", pady=(0, 8))
 
         ttk.Separator(pad, orient="horizontal").grid(
-            row=3, column=0, columnspan=4, sticky="we", pady=(2, 10))
+            row=4, column=0, columnspan=4, sticky="we", pady=(2, 10))
 
         # ---- 更换授权码区 ----
         ttk.Label(pad, text="更换授权码：",
                   font=("Microsoft YaHei UI", 9, "bold")).grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(0, 4))
+            row=5, column=0, columnspan=4, sticky="w", pady=(0, 4))
         ttk.Label(pad, text="把发布方发来的授权码粘到下面，点「激活」立即生效"
                            "（无需重启）：",
                   foreground="#6b7280", wraplength=380, justify="left").grid(
@@ -1000,7 +1220,7 @@ class App:
                                     parent=win)
 
         btns = ttk.Frame(pad)
-        btns.grid(row=8, column=0, columnspan=4, sticky="we", pady=(2, 0))
+        btns.grid(row=9, column=0, columnspan=4, sticky="we", pady=(2, 0))
         ttk.Button(btns, text="激活", width=10,
                    command=do_activate).pack(side="left")
         ttk.Button(btns, text="📋 粘贴并激活", width=14,
@@ -1026,30 +1246,79 @@ class App:
         """校验并激活授权码（供界面按钮与测试调用）。成功返回 True。
 
         换码立即生效（调 _apply_tier 刷新内存档位与界面），**无需重启**。
+
+        ★ v2.0.19：按**产品线**分别保存 —— 激活视频号码不会顶掉公众号码，
+          反之亦然（2026-10-17 客户实测 bug：激活视频号码后公众号授权消失）。
         """
         info = lic.verify_code(code)
         if not info:
-            self.push_log("error", "❌ 授权码校验失败（格式/签名不符），档位不变")
+            self.push_log("error", "❌ 授权码校验失败（格式/签名不符），授权不变")
             return False
-        first_activation = not self.cfg.license_code or not self.cfg.license_activated_at
-        self.cfg.license_code = info["code"]
+
+        prod = int(info.get("product") or lic.PRODUCT_VIDEO)
+        is_mp = (prod == lic.PRODUCT_MP_ARTICLE)
+
+        # ★ v2.0.19 设备绑定校验：绑定码必须在本机激活
+        #   传分量列表 → 支持"4 项取 2"，抗硬件变动（换硬盘/重装系统仍可用）
+        #   取不到本机设备信息时不阻止（宁可放过，不可误伤正版客户）。
+        try:
+            from . import telemetry as _tel
+            _comps = _tel.device_components()
+            _dev = _tel.device_display()
+        except Exception:
+            _comps, _dev = [], ""
+        _ok, _why = lic.check_device(info, _dev, components=_comps)
+        if not _ok:
+            self.push_log("error", "❌ 该授权码绑定的不是本机：" + _why.replace("\n", " "))
+            try:
+                messagebox.showerror(
+                    "授权码与本机不匹配",
+                    _why + f"\n\n本机设备码：{_dev or '（读取失败）'}\n\n"
+                    "如需在本机使用，请把上面的设备码发给发布方重新绑定。")
+            except Exception:
+                pass
+            return False
+
+        # 该产品线是否首次激活（决定要不要记 activated_at 起点）
+        first_activation = not self.cfg.code_of(prod) \
+            or not self.cfg.activated_at_of(prod)
+        self.cfg.set_code(prod, info["code"])
         if first_activation:
-            self.cfg.license_activated_at = time.time()
+            self.cfg.set_activated_at(prod, time.time())
+        # 兼容旧字段：记住"最近一次激活的码"
+        self.cfg.license_code = info["code"]
         self.cfg.save()
-        self.push_log("ok", f"🔑 授权成功：档位 {config.label_of(info['tier'])}，"
-                            + ("永久有效" if not info["days"]
-                               else f"{info['days']} 天（自首次激活）")
-                            + f"｜功能：{'、'.join(info.get('features') or [])}")
-        self._apply_tier(info["tier"], reason="授权码解锁")
-        # ★ v2.0.19：换码后刷新「📄 公众号视频」按钮（新码可能含/不含此功能）
+
+        # 日志：按产品线分别说清楚，避免客户以为自己买了视频号却没生效
+        name = ("公众号视频版" if is_mp
+                else config.label_of(info["tier"]))
+        other = lic.PRODUCT_VIDEO if is_mp else lic.PRODUCT_MP_ARTICLE
+        other_txt = ""
+        if self.cfg.code_of(other):
+            other_name = ("公众号视频版" if other == lic.PRODUCT_MP_ARTICLE
+                          else "视频号下载")
+            other_txt = f"（另一产品「{other_name}」的授权保持不变）"
+        self.push_log("ok",
+                      f"🔑 授权成功：{name}，"
+                      + ("永久有效" if not info["days"]
+                         else f"{info['days']} 天（自首次激活）")
+                      + other_txt)
+
+        # 档位统一由 _resolve_tier() 决定（内部已处理公众号产品）：
+        #   · 视频号码 → 用码里的档位
+        #   · 公众号码 → 回落到默认档，**绝不设成 0**
+        #     （公众号 tier=0，误用会把上限设成 0 —— 客户实测过的 bug）
+        self._apply_tier(self._resolve_tier(),
+                         reason=("公众号产品（不影响视频号档位）" if is_mp
+                                 else "授权码解锁"))
+
+        # 换码后刷新公众号按钮（可能新解锁/失去该功能）+ 顶部防盗横幅
         try:
             self._refresh_mp_button()
+            self._refresh_watermark()
         except Exception:
             pass
-        # ★ 激活上报（防盗版追溯，作者侧）。
-        # 总开关 sphdl/config.py 的 TELEMETRY_ENABLED 关闭时为空操作：
-        # 不采集指纹、不发请求、无日志。开启时后台线程发一次，超时 3 秒、
-        # 失败静默 —— 不影响界面、不影响客户使用（见 sphdl/telemetry.py）。
+        # 激活上报（防盗版追溯）。总开关关闭时为空操作。
         try:
             from . import telemetry as _tel
             _tel.report_activation(info["code"], version=__import__(
@@ -1173,10 +1442,286 @@ class App:
                    command=_on_close).pack(side="right")
         win.protocol("WM_DELETE_WINDOW", _on_close)
 
+    def _build_watermark_bar(self, parent):
+        """防盗声明横幅（v2.0.19）。
+
+        设计要点：
+          · 放在最顶部、整行铺满，视觉上第一眼就能看到
+          · 深蓝底 + 浅色字：与界面其它灰色区域区分，像"正式声明"而非普通标签
+          · 右侧显示**本机设备码**：截图流传出去时，凭设备码能查到是谁
+          · 授权状态不同 → 文案不同（已授权 / 未授权）
+
+        ⚠️ 诚实说明它的作用边界：
+          界面文字**拦不住**有技术的人（改代码/截图裁掉即可）。它的价值是
+          ① 让普通买家知道"这软件有登记设备" → 降低购买二手的意愿
+          ② 让转卖者截图时带上设备码 → 你能反查来源
+          真正的溯源靠激活上报 + 台账（ledger track）。
+        """
+        bar = tk.Frame(parent, bg="#1e3a5f", height=30)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+
+        # 左侧：防盗声明（常驻）
+        self.wm_left = tk.Label(
+            bar,
+            text="🔒  正版授权软件 · 每份授权绑定设备并登记备案 · 严禁转售/破解",
+            bg="#1e3a5f", fg="#e8f0f8",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            anchor="w")
+        self.wm_left.pack(side="left", padx=(10, 0))
+
+        # 右侧：授权归属 + 设备码（随授权状态刷新）
+        self.wm_right = tk.Label(
+            bar, text="未授权 · 请点「🔑 授权管理」激活",
+            bg="#1e3a5f", fg="#ffd54f",
+            font=("Microsoft YaHei UI", 9), anchor="e")
+        self.wm_right.pack(side="right", padx=(0, 10))
+
+        self._refresh_watermark()
+
+        # 悬停说明：讲清"为什么显示设备码"，避免客户以为是监控
+        self._tt(bar, "【关于这行声明】\n"
+                      "本软件为正版授权软件，每次激活会登记授权码与本机设备码，\n"
+                      "用于授权管理与售后支持（如换机、重装）。\n\n"
+                      "· 不会上传您的视频、文件、浏览记录或微信信息\n"
+                      "· 不联网校验、不限制使用，软件可离线工作\n"
+                      "· 详细的收集范围见「使用说明 → 隐私说明」")
+
+    def _refresh_watermark(self):
+        """刷新防盗声明右侧的授权状态文案（v2.0.19）。"""
+        lbl = getattr(self, "wm_right", None)
+        if lbl is None:
+            return
+        try:
+            vc = self._license_info(lic.PRODUCT_VIDEO)
+            mp = self._license_info(lic.PRODUCT_MP_ARTICLE)
+            parts = []
+            if vc and not self._license_expired():
+                if vc.get("days"):
+                    left = lic.days_left(
+                        vc["days"], self.cfg.activated_at_of(lic.PRODUCT_VIDEO))
+                    parts.append(f"视频号 {left}天")
+                else:
+                    parts.append("视频号 永久")
+            if mp:
+                parts.append("公众号 永久" if not mp.get("days")
+                             else f"公众号 {mp['days']}天")
+            if parts:
+                txt = "✅ 已授权：" + " ｜ ".join(parts)
+                fg = "#a5f3a0"
+            else:
+                txt = "未授权 · 请点「🔑 授权管理」激活"
+                fg = "#ffd54f"
+            # 附本机设备码（截图流传时可反查来源）
+            try:
+                from . import telemetry as _t
+                dev = _t.device_display()
+                if dev:
+                    txt += f"   ｜  设备 {dev}"
+            except Exception:
+                pass
+            lbl.config(text=txt + "  ", fg=fg)
+        except Exception:
+            pass
+
+    def _init_overlay_watermark(self, anchor):
+        """创建浮层水印窗口（v2.0.19）。
+
+        anchor: 要覆盖的容器（这里是视频列表 LabelFrame）。
+
+        技术要点：
+          · overrideredirect(True) → 无标题栏、无边框
+          · -alpha 0.18 → 整体半透明（够淡，能读列表内容）
+          · -transparentcolor 白色 → 除文字外全部透传鼠标
+            这样用户点列表、拖滚动条都不受水印影响。
+        """
+        import random
+        self._wm_rng = random.Random()
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", False)
+        # ★ 透明度策略（v2.0.19 三次调整，关键）：
+        #   之前用窗口 -alpha 做半透明 → 整个窗口被整体淡化，
+        #   文字边缘一起发虚，中文小字糊成一团（实测"看不清、变形严重"）。
+        #   改为 **-alpha 1.0（不透明）+ 靠文字颜色本身取浅色**：
+        #   Canvas 的抗锯齿只作用于字形，笔画边缘锐利清晰，
+        #   视觉上同样是"半透明水印"，但可读性完全不同。
+        try:
+            win.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        # 让画布背景色成为"透明色"→ 只有文字可见、可点击穿透
+        KEY = "#ff00ff"          # 洋红作键控色（很少与水印文字撞）
+        try:
+            win.configure(bg=KEY)
+            win.attributes("-transparentcolor", KEY)
+        except Exception:
+            KEY = "white"
+            try:
+                win.configure(bg=KEY)
+                win.attributes("-transparentcolor", KEY)
+            except Exception:
+                pass
+
+        cv = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        win.withdraw()
+        self._wm_win = win
+        self._wm_cv = cv
+        self._wm_key = KEY
+        # 启动水印主循环（唯一 tick，60ms 一次，平滑飘动）
+        self._wm_state = None
+        self._wm_after_id = self.root.after(800, self._wm_tick)
+
+    def _device_text_for_watermark(self) -> str:
+        """水印文字：优先"设备码"，取不到则用版本号。"""
+        try:
+            from . import telemetry as _t
+            d = _t.device_display()
+            if d:
+                return d
+        except Exception:
+            pass
+        try:
+            from sphdl import __version__ as v
+            return f"v{v}"
+        except Exception:
+            return "sphdl"
+
+    def _wm_tick(self):
+        """水印主循环（v2.0.19 重写：平滑飘动 + 永不消失 + 不闪烁）。
+
+        ★ 为什么重写（原实现两个致命问题）：
+          ① **界面卡死**：_draw_watermark 里有 6 处提前 return，每处都调用
+             _schedule_watermark 重新排任务。而 after 任务里再排任务时，
+             旧的 after_cancel 未必生效 → 定时器指数增殖，最终界面无响应。
+             现在改为**唯一 tick 循环**：只在函数末尾排下一次，其他分支直接
+             return（由末尾统一续命）。
+          ② **闪烁 + 可被抓拍**：原实现每 2.5~5.5 秒"消失→在新位置出现"，
+             中间有 withdraw/deiconify 空档，用户截图正好能抓到无水印的瞬间。
+             现在改为**每 60ms 平移 1~2 像素**，窗口从不隐藏、文字从不重绘，
+             只有位置在动 → 视觉上是缓慢飘动，任何时刻截图都带水印。
+        """
+        win = getattr(self, "_wm_win", None)
+        if win is None:
+            return                       # 没有水印窗（初始化失败）→ 不续命
+        try:
+            if not self.root.winfo_exists() or not win.winfo_exists():
+                return                   # 窗口已销毁 → 停止循环
+        except Exception:
+            return
+
+        # 主窗口最小化/不可见 → 跳过本次移动，但仍然续命（保持单循环）
+        try:
+            if self.root.state() == "iconic" or not self.root.winfo_viewable():
+                self._wm_after_id = self.root.after(500, self._wm_tick)
+                return
+        except Exception:
+            pass
+
+        try:
+            self._wm_step()
+        except Exception:
+            pass                      # 任何异常都不让循环断掉
+
+        # ★ 唯一的续命点：整个循环只有这一处 after
+        try:
+            self._wm_after_id = self.root.after(60, self._wm_tick)
+        except Exception:
+            self._wm_after_id = None
+
+    def _wm_step(self):
+        """移动一次水印（约 60ms 一次）。首次调用时完成初始化+绘制文字。"""
+        win = self._wm_win
+        anchor = self._wm_anchor
+        if anchor is None:
+            return
+        ax = anchor.winfo_rootx()
+        ay = anchor.winfo_rooty()
+        aw = anchor.winfo_width()
+        ah = anchor.winfo_height()
+        if aw < 200 or ah < 120:
+            return                      # 列表区还没布局好
+
+        rng = self._wm_rng
+        st = getattr(self, "_wm_state", None)
+        bw, bh = min(520, aw - 16), min(240, ah - 16)
+        if bw < 120 or bh < 60:
+            return
+
+        if st is None:
+            # ---------- 首次：画文字 + 放在中央偏上，并给一个随机方向 ----------
+            self._wm_cv.delete("all")
+            self._wm_cv.configure(width=bw, height=bh)
+            dev = self._device_text_for_watermark()
+            # 文字只画这一次，之后只移动窗口 → 永不闪烁
+            line = f"正版授权 {dev}"
+            for r in range(3):
+                for c in range(2):
+                    self._wm_cv.create_text(
+                        24 + c * 240, 30 + r * 68, text=line, anchor="nw",
+                        fill="#8fa0b0",
+                        font=("Microsoft YaHei UI", 10))
+            # 初始位置：居中
+            x = ax + max(0, (aw - bw) // 2)
+            y = ay + max(0, (ah - bh) // 2)
+            # 速度：每 tick 移动 1~2 px，60ms 一次 → 约 25~35 px/秒，很慢
+            vx = rng.choice([-2, -1, 1, 2])
+            vy = rng.choice([-1, 0, 1])
+            if vy == 0:
+                vy = rng.choice([-1, 1])
+            self._wm_state = {"x": x, "y": y, "vx": vx, "vy": vy,
+                              "bw": bw, "bh": bh}
+            try:
+                win.geometry(f"{bw}x{bh}+{x}+{y}")
+                win.deiconify()          # 只在首次显示一次
+                win.lift()
+            except Exception:
+                pass
+            return
+
+        # ---------- 后续：只平移，不重绘文字 ----------
+        if st["bw"] != bw or st["bh"] != bh:
+            st["bw"], st["bh"] = bw, bh
+            try:
+                self._wm_cv.configure(width=bw, height=bh)
+                win.geometry(f"{bw}x{bh}+{st['x']}+{st['y']}")
+            except Exception:
+                pass
+
+        minx, maxx = ax, max(ax, ax + aw - bw)
+        miny, maxy = ay, max(ay, ay + ah - bh)
+        x = st["x"] + st["vx"]
+        y = st["y"] + st["vy"]
+        # 撞到边界 → 随机换一个方向（仍然平滑，不瞬移）
+        if x < minx or x > maxx:
+            st["vx"] = -st["vx"]
+            x = min(max(x, minx), maxx)
+        if y < miny or y > maxy:
+            st["vy"] = -st["vy"]
+            y = min(max(y, miny), maxy)
+        # 极小概率微调速度方向，让轨迹不呆板（但不瞬移）
+        if rng.random() < 0.01:
+            st["vx"] = rng.choice([-2, -1, 1, 2])
+            st["vy"] = rng.choice([-2, -1, 1, 2])
+
+        st["x"], st["y"] = x, y
+        try:
+            win.geometry(f"{bw}x{bh}+{x}+{y}")
+        except Exception:
+            pass
     def _build_ui(self):
         root = self.root
         main = ttk.Frame(root, padding=8)
         main.pack(fill="both", expand=True)
+
+        # ===== ⓿ 防盗声明横幅（v2.0.19）=====
+        # 目的：让客户一眼看到这是"有授权追溯的正版"，同时让转卖者有所顾忌。
+        # 内容随授权状态变化：已授权显示授权归属，未授权提示需授权。
+        # ⚠ 注意：这只是界面层提示，能被截图/改代码规避；真正的溯源靠
+        #   「激活上报 + 台账」（见 docs/发码台账使用说明.md 的 track 命令）。
+        self._build_watermark_bar(main)
 
         # ===== ① 引擎控制区 =====
         eng = ttk.LabelFrame(main, text=" 嗅探引擎 ", padding=8)
@@ -1251,16 +1796,19 @@ class App:
                  "不勾（默认）：只进列表，选中后手动下载。\n"
                  "注意：只对勾选之后新捕获的视频生效。")
 
-        # 「🖼 下载图片」开关（v2.0.4）：勾选（默认）= 图片显示在列表并可下载；
-        # 取消 = 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
+        # 「🖼 下载图片」开关（v2.0.4 引入，v2.0.19 起**默认不勾**）：
+        # 勾选 = 图片显示在列表并可下载；
+        # 不勾（默认）= 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
         self.images_var = tk.BooleanVar(value=self.cfg.download_images)
         self.images_chk = ttk.Checkbutton(capf, text="🖼 下载图片",
                                           variable=self.images_var,
                                           command=self._on_images_toggle)
         self.images_chk.pack(side="left", padx=16)
         self._tt(self.images_chk,
-                 "勾选：图片显示在列表并可下载。\n"
-                 "不勾：图片不显示、不下载（已下载的图片文件保留）。")
+                 "勾选：图片帖也会进列表并可下载。\n"
+                 "不勾（默认）：只处理视频，图片不进列表、不下载。\n"
+                 "说明：本工具主打下载视频；图片混进列表会干扰挑选与批量操作，\n"
+                 "因此默认关闭。需要时随时勾上（只影响勾选之后新捕获的内容）。")
 
         # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 播放到哪条才捕获哪条；
         # 关 = 整页列表捕获（v2.0.6 行为）
@@ -1292,7 +1840,25 @@ class App:
         # 默认不可用；仅当授权码含 FLAG_MP_ARTICLE_VIDEO 时才能真正解析下载。
         # 未授权时按钮仍在（客户能看到有这个功能、知道要加钱解锁），
         # 点击后弹出说明并引导去「🔑 授权管理」——比藏起来更利于成交。
-        self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=13,
+        # ★ v2.0.19：公众号入口做成**独立配色**，让用户一眼找到。
+        #   ttk.Button 不支持 bg 参数，必须走 Style 定义。
+        #   选暖橙底 + 深色字：与整界面的灰/蓝区分开，又不刺眼；
+        #   未授权时换成浅灰底（暗示需解锁），但**不禁用**（仍可点，给引导）。
+        try:
+            st = ttk.Style()
+            st.configure("Mp.TButton", background="#ffe0b2",
+                         foreground="#8a4b00")
+            st.map("Mp.TButton",
+                   background=[("active", "#ffcc80"),
+                               ("pressed", "#ffb74d")])
+            st.configure("MpLocked.TButton", background="#eceff1",
+                         foreground="#78909c")
+            st.map("MpLocked.TButton",
+                   background=[("active", "#e0e4e7")])
+        except Exception:
+            pass
+        self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=16,
+                                 style="MpLocked.TButton",
                                  command=self._on_mp_article)
         self.btn_mp.pack(side="left", padx=(16, 2))
         self._tt(self.btn_mp,
@@ -1388,6 +1954,30 @@ class App:
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+
+        # ===== 随机浮层水印（v2.0.19 防盗）=====
+        # 用一个**无边框、半透明、鼠标穿透**的 Toplevel 叠在列表区上方，
+        # 定时在随机位置绘制斜排水印（含本机设备码）。
+        #
+        # 为什么用 Toplevel 而不是 Canvas：
+        #   Canvas 盖在 Treeview 上会吃掉鼠标事件（没法点列表），
+        #   而 Toplevel + -transparentcolor 只让文字可见、其余像素透传，
+        #   鼠标点击照常落到下面的列表上。
+        #
+        # 效果：
+        #   · 转卖者截图时水印必被截进去
+        #   · 位置每次随机 → 无法靠"裁掉固定区域"规避
+        #   · 半透明浅灰 → 不干扰阅读
+        # ⚠ 它拦不住会改代码的人；价值是让流转的截图带上身份。
+        self._wm_win = None
+        self._wm_after_id = None
+        self._wm_seed = ""
+        self._wm_anchor = None       # 水印窗口锚在哪个 frame 上
+        try:
+            self._wm_anchor = listf
+            self._init_overlay_watermark(listf)
+        except Exception:
+            self._wm_win = None
         self.tree.tag_configure("tag_done", foreground="#15803d")
         self.tree.tag_configure("tag_failed", foreground="#dc2626")
         self.tree.tag_configure("tag_downloading", foreground="#2563eb")
@@ -2717,17 +3307,22 @@ class App:
 
         授权了 → 正常；未授权 → 显示 🔒 但**仍可点**（点了给解锁引导，
         比禁用更利于客户理解与成交）。
+
+        ★ v2.0.19 修复：必须**按公众号产品线**查询授权。
+          原先用 _license_info()（优先返回视频号），导致客户同时买了
+          视频号和公众号时，按钮仍显示 🔒（2026-10-17 实测）。
         """
         if getattr(self, "btn_mp", None) is None:
             return False
         try:
-            info = self._license_info()
-            has_mp = lic.has_feature(info, lic.PRODUCT_MP_ARTICLE)
+            has_mp = lic.is_mp_product(
+                self._license_info(lic.PRODUCT_MP_ARTICLE))
         except Exception:
             has_mp = False
         try:
             self.btn_mp.config(
                 text="📄 公众号视频" if has_mp else "📄 公众号视频 🔒",
+                style="Mp.TButton" if has_mp else "MpLocked.TButton",
                 state="normal")
         except Exception:
             pass
@@ -3045,6 +3640,16 @@ class App:
                 return
             self.btn_engine.config(state="disabled", text="退出中…")
             self.engine.stop()
+        # ★ v2.0.19：先停水印循环，避免窗口销毁后 tick 继续跑
+        try:
+            if getattr(self, "_wm_after_id", None):
+                self.root.after_cancel(self._wm_after_id)
+                self._wm_after_id = None
+            if getattr(self, "_wm_win", None) is not None:
+                self._wm_win.destroy()
+                self._wm_win = None
+        except Exception:
+            pass
         self.cfg.save()
         self.store.save()   # 退出强制落盘（节流窗口内也要写）
         self.root.destroy()

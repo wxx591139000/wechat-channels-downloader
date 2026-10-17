@@ -211,12 +211,12 @@ def _extract_encfilekey(url: str) -> str:
 
 class SphAddon:
     def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
-                 allow_images: bool = True):
+                 allow_images: bool = False):
         """auto_download=False 时（GUI 模式）：只捕获进列表，
         不自动提交下载队列，由用户点选后再下载。
-        allow_images=False 时（v2.0.4「🖼 下载图片」开关关闭）：
-        图片不捕获、不显示、不下载——直接跳过（不占去重名额，
-        重新开启后同一图片可再次被捕获）。"""
+        allow_images=False 时（v2.0.4「🖼 下载图片」开关关闭；
+        **v2.0.19 起为默认值**）：图片不捕获、不显示、不下载——直接跳过
+        （不占去重名额，重新开启后同一图片可再次被捕获）。"""
         self.pipeline = pipeline
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
         self.auto_download = auto_download
