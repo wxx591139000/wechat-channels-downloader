@@ -216,6 +216,25 @@ def verify_frozen(out_dir: Path):
     log("  ✅ 冻结自检通过")
 
 
+def stage_user_scripts(out_dir: Path):
+    """把用户要双击的 .bat 拷到**解压目录顶层**（v2.1.2）。
+
+    ★ 为什么需要：这两个脚本通过 spec 的 datas 进的是 _internal/，
+      用户解压后只看到 exe 和 使用说明.txt，**根本找不到诊断/装证书脚本**。
+      证书向导由程序自动拉起（能找到 _internal），但"诊断-双击我.bat"
+      必须能被用户自己双击，所以要在顶层放一份。
+    """
+    for nm in ("install-cert.bat", "诊断-双击我.bat"):
+        src = ROOT / nm
+        if not src.exists():
+            continue
+        try:
+            shutil.copy2(src, out_dir / nm)
+            log(f"  ✅ 已放置 {nm}（解压目录顶层）")
+        except Exception as e:                      # noqa: BLE001
+            log(f"  ⚠ 拷贝 {nm} 失败: {e}")
+
+
 def stage_usage_instructions(out_dir: Path, v: tuple):
     """把最新 usage_instructions_v*.txt 拷为 使用说明.txt，并更新版本号。"""
     cands = sorted(ROOT.glob("usage_instructions_v*.txt"))
@@ -372,6 +391,7 @@ def build_one_edition(v: tuple, force: bool, locked, args,
         verify_frozen(out_dir)
         verify_license_in_frozen(out_dir, expect=not args.no_license)
         stage_usage_instructions(out_dir, v)
+        stage_user_scripts(out_dir)
         pii_scan(out_dir)
         zip_path = make_share_zip(v, out_dir, force, sfx,
                                   dist_suffix=getattr(args, "dist_suffix", "") or "")

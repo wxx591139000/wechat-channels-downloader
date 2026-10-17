@@ -1,7 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('install-cert.bat', '.')]
+datas = [('install-cert.bat', '.'),
+         ('诊断-双击我.bat', '.')]
 binaries = []
 hiddenimports = ['mitmproxy.addons.anticache', 'mitmproxy.addons.anticomp', 'mitmproxy.addons.asgiapp', 'mitmproxy.addons.block', 'mitmproxy.addons.blocklist', 'mitmproxy.addons.browser', 'mitmproxy.addons.clientplayback', 'mitmproxy.addons.command_history', 'mitmproxy.addons.comment', 'mitmproxy.addons.core', 'mitmproxy.addons.cut', 'mitmproxy.addons.disable_h2c', 'mitmproxy.addons.dns_resolver', 'mitmproxy.addons.dumper', 'mitmproxy.addons.errorcheck', 'mitmproxy.addons.eventstore', 'mitmproxy.addons.export', 'mitmproxy.addons.intercept', 'mitmproxy.addons.keepserving', 'mitmproxy.addons.maplocal', 'mitmproxy.addons.mapremote', 'mitmproxy.addons.modifybody', 'mitmproxy.addons.modifyheaders', 'mitmproxy.addons.next_layer', 'mitmproxy.addons.onboarding', 'mitmproxy.addons.onboardingapp', 'mitmproxy.addons.proxyauth', 'mitmproxy.addons.proxyserver', 'mitmproxy.addons.readfile', 'mitmproxy.addons.save', 'mitmproxy.addons.savehar', 'mitmproxy.addons.script', 'mitmproxy.addons.server_side_events', 'mitmproxy.addons.serverplayback', 'mitmproxy.addons.stickyauth', 'mitmproxy.addons.stickycookie', 'mitmproxy.addons.strip_dns_https_records', 'mitmproxy.addons.termlog', 'mitmproxy.addons.tlsconfig', 'mitmproxy.addons.update_alt_svc', 'mitmproxy.addons.upstream_auth', 'mitmproxy.addons.view']
 tmp_ret = collect_all('mitmproxy_rs')

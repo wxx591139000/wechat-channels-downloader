@@ -1674,6 +1674,55 @@ class App:
         except Exception:
             return "sphdl"
 
+    def _main_window_obscured(self) -> bool:
+        """主窗口是否被**别的程序**挡住（v2.1.3）。
+
+        判断方法：Win32 WindowFromPoint 命中测试。
+          取主窗口中心点 → 问系统"这个点上最顶层是谁"
+            · 返回的窗口属于本进程（主窗口或其子控件）→ 没被挡
+            · 返回的是别的程序的窗口 → 被挡住
+
+        ★ 为什么用这个而不是"前台窗口"：
+          前台窗口判定会把"窗口打开了但没点它"也算成后台（实测水印一直
+          不显示）。而命中测试问的是"用户眼睛能不能看到这个窗口"，
+          和真实观感一致。
+
+        返回 True = 被遮挡 / 最小化 / 不可见 → 水印应隐藏。
+        """
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+            u = ctypes.windll.user32
+            # ① 最小化 / 不可见
+            if self.root.state() == "iconic":
+                return True
+            if not self.root.winfo_viewable():
+                return True
+            top = self.root.winfo_id()
+            for _ in range(8):
+                p = _win32_parent(top)
+                if not p:
+                    break
+                top = p
+            if u.IsIconic(int(top)):
+                return True
+            # ② 命中测试：窗口中心点上最顶层的是谁
+            rect = wt.RECT()
+            u.GetWindowRect(int(top), ctypes.byref(rect))
+            cx = (rect.left + rect.right) // 2
+            cy = (rect.top + rect.bottom) // 2
+            hit = int(u.WindowFromPoint(wt.POINT(cx, cy)))
+            if not hit:
+                return False          # 取不到 → 当作没被挡（宁可显示）
+            # ③ hit 是否属于本进程（含子控件）
+            pid = ctypes.c_ulong(0)
+            u.GetWindowThreadProcessId(hit, ctypes.byref(pid))
+            if int(pid.value) == os.getpid():
+                return False
+            return True               # 别的程序的窗口 → 被挡住
+        except Exception:
+            return False              # 任何异常都不隐藏（宁可显示）
+
     def _wm_tick(self):
         """水印主循环（v2.0.19 重写：平滑飘动 + 永不消失 + 不闪烁）。
 
@@ -1697,44 +1746,44 @@ class App:
         except Exception:
             return
 
-        # ★ v2.0.19：水印只在**主窗口可见且未被最小化**时显示。
+        # ★ v2.1.3：水印只在**主窗口真正可见（没被别的程序盖住）**时显示。
         #
-        #   历史教训（两次反复，记录清楚免得再改错）：
-        #   ① 最初 topmost=False → 被主窗口盖住，用户看不到水印。
-        #   ② 改 topmost=True → 切到后台后水印浮在桌面最上层，很突兀。
-        #   ③ 加"前台窗口判定" → 太严：窗口没被点击激活时也判定为后台，
-        #      结果水印一直不显示（实测 _wm_behind 恒为 True）。
+        #   历史教训（三次反复，写清楚免得再改错）：
+        #   ① topmost=False → 被主窗口盖住，用户看不到水印。
+        #   ② topmost=True  → 切到后台后水印浮在桌面最上层，挡住别的软件。
+        #   ③ 用"前台窗口"判定 → 太严：窗口没被点击激活时也判为后台，
+        #      水印一直不显示。
         #
-        #   最终方案：只用**可靠的**信号判断"不显示"——
-        #     · 主窗口最小化（state == iconic，或 Win32 IsIconic）
-        #     · 主窗口不可见（viewable == 0）
-        #   至于"被其他程序遮挡"这种情形，交给 Windows 的 Z 序自然处理：
-        #   水印是 topmost，会盖在自己的窗口上；别的程序是活动窗口时，
-        #   Windows 会把 topmost 窗口也一起压到后面（除非对方也 topmost）。
-        #   这样既不误隐藏，又不会孤零零浮在桌面（最小化时已隐藏）。
+        #   最终方案：用 Win32 **WindowFromPoint 命中测试**。
+        #     取主窗口中心点，问系统"这个点上最顶层的是哪个窗口"：
+        #       · 是本程序（或其子窗口）→ 可见，显示水印
+        #       · 是别的程序 → 被遮挡，隐藏水印
+        #     这个判断和"用户眼睛看到的"一致：别的程序挡在前面就隐藏，
+        #     主窗口露出来就显示。不依赖焦点，也不会误判。
+        #   另外仍然处理最小化（iconic / IsIconic）。
+        # ★ v2.1.3 关键修复：先完成初始化（画文字），再判断要不要显示。
+        #
+        #   原逻辑：被遮挡时直接 return，导致 _wm_state 一直是 None
+        #   → 水印文字从未被绘制 → 用户解除遮挡后也永远看不到水印
+        #   （实测：item 数 0，块尺寸乱）。
+        #   现在：首次 tick 一定把文字画好（窗口先 withdraw），
+        #   之后只管理"显示/隐藏"，恢复可见时立刻就有文字。
+        if getattr(self, "_wm_state", None) is None:
+            try:
+                was_visible = self._wm_visible
+                self._wm_visible = False
+                self._wm_step()          # 画文字 + 设定初始位置
+                if not was_visible and win.winfo_exists():
+                    win.withdraw()       # 画好先藏起来，等下面判断再决定显示
+                self._wm_visible = False
+            except Exception:
+                pass
+
         try:
             now_ms = int(time.time() * 1000)
-            if now_ms - getattr(self, "_wm_fg_ts", 0) >= 400:
+            if now_ms - getattr(self, "_wm_fg_ts", 0) >= 300:
                 self._wm_fg_ts = now_ms
-                hidden = False
-                try:
-                    if self.root.state() == "iconic":
-                        hidden = True
-                    elif not self.root.winfo_viewable():
-                        hidden = True
-                    else:
-                        import ctypes
-                        top_hwnd = self.root.winfo_id()
-                        for _ in range(8):
-                            p = _win32_parent(top_hwnd)
-                            if not p:
-                                break
-                            top_hwnd = p
-                        if ctypes.windll.user32.IsIconic(int(top_hwnd)):
-                            hidden = True
-                except Exception:
-                    hidden = False
-                self._wm_behind = hidden
+                self._wm_behind = self._main_window_obscured()
             behind = getattr(self, "_wm_behind", False)
             if behind:
                 if self._wm_visible:
@@ -1795,8 +1844,9 @@ class App:
 
         rng = self._wm_rng
         st = getattr(self, "_wm_state", None)
-        bw, bh = min(520, aw - 16), min(240, ah - 16)
-        if bw < 120 or bh < 60:
+        # ★ v2.1.3：一行水印 → 块做成长条（320×36），不再占半个列表区
+        bw, bh = min(340, aw - 16), 36
+        if bw < 120 or ah < 80:
             return
 
         if st is None:
@@ -1804,14 +1854,14 @@ class App:
             self._wm_cv.delete("all")
             self._wm_cv.configure(width=bw, height=bh)
             dev = self._device_text_for_watermark()
-            # 文字只画这一次，之后只移动窗口 → 永不闪烁
+            # ★ v2.1.3：水印改为**一行**（按用户要求）
+            #   原来 3×2 六行铺得满屏都是，太抢眼；一行足够"截图必带"，
+            #   又不打扰看列表。文字仍然只画这一次，之后只移动窗口。
             line = f"正版授权 {dev}"
-            for r in range(3):
-                for c in range(2):
-                    self._wm_cv.create_text(
-                        24 + c * 240, 30 + r * 68, text=line, anchor="nw",
-                        fill="#8fa0b0",
-                        font=("Microsoft YaHei UI", 10))
+            self._wm_cv.create_text(
+                16, bh // 2, text=line, anchor="w",
+                fill="#8fa0b0",
+                font=("Microsoft YaHei UI", 11))
             # 初始位置：居中
             x = ax + max(0, (aw - bw) // 2)
             y = ay + max(0, (ah - bh) // 2)
