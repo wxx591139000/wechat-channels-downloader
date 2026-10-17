@@ -24,7 +24,7 @@ sphdl 发布脚本：自动升版本（三位语义化 X.Y.Z）→ 构建冻结�
      python release.py --max-records 500        # 500 条版
      python release.py --max-records 1000       # 1000 条版
      python release.py --max-records 2000       # 2000 条版
-     python release.py --max-records 20000      # 旗舰版（2 万条）
+     python release.py --max-records 20000      # 至尊（2 万条）
      python release.py --all-editions           # 一次性构建上述 4 个版本
      说明：输出 dist/vX.Y.Z/微信视频号下载器-<档位>/ 与
            dist/微信视频号下载器-vX.Y.Z-<档位>-win64-portable.zip；
@@ -69,9 +69,16 @@ ZIP_INCLUDE = {"微信视频号下载器.exe", "_internal", "install-cert.bat",
                "使用说明.txt", "诊断-双击我.bat"}
 
 # 列表容量锁档（v2.0.17）：档位 → 产物名后缀；键与 sphdl.config.MAX_RECORDS_TIERS 一致
-EDITION_SUFFIX = {500: "轻量版", 1000: "标准版", 2000: "专业版", 20000: "旗舰版"}
+# v2.1.5 档位改名：轻量 / 标准 / 旗舰 / 至尊
+EDITION_SUFFIX = {500: "轻量", 1000: "标准", 2000: "旗舰", 20000: "至尊"}
 EDITION_CLI = {"500": 500, "1000": 1000, "2000": 2000, "20000": 20000,
-               "2万": 20000, "旗舰": 20000, "旗舰版": 20000}
+               "2万": 20000,
+               # ★ v2.1.5 新档位名
+               "轻量": 500, "标准": 1000, "旗舰": 2000, "至尊": 20000,
+               "至尊版": 20000,
+               # 兼容旧称呼（v2.1.4 及更早：专业版=2000，旗舰版=20000）
+               "轻量版": 500, "标准版": 1000, "专业版": 2000,
+               "旗舰版": 20000}
 EDITION_FILE = ROOT / "sphdl" / "_edition.py"   # 构建期档位文件（构建后还原）
 _LIC_NAME = ".license" + "_secret"   # 授权密钥文件名（不入库）
 LIC_KEY_SRC = ROOT / _LIC_NAME        # 授权密钥路径
@@ -327,7 +334,7 @@ def cleanup_license_key():
 
 
 def lic_label(n) -> str:
-    """档位展示名（与 config.MAX_RECORDS_LABELS 一致：轻量版/标准版/专业版/旗舰版）。"""
+    """档位展示名（与 config.MAX_RECORDS_LABELS 一致：轻量/标准/旗舰/至尊）。"""
     from sphdl import config as _cfg
     return _cfg.label_of(500 if n is None else n)
 

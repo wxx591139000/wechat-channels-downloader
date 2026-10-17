@@ -52,8 +52,8 @@ MSG_V1, MSG_V2, MSG_V3, MSG_V4 = b"SPHDLv1", b"SPHDLv2", b"SPHDLv3", b"SPHDLv4"
 PRODUCT_VIDEO, PRODUCT_MP = 1, 2
 TIER_TO_CODE = {500: 1, 1000: 2, 2000: 3, 20000: 4}
 CODE_TO_TIER = {v: k for k, v in TIER_TO_CODE.items()}
-TIER_LABEL = {500: "轻量版（500 条）", 1000: "标准版（1000 条）",
-              2000: "专业版（2000 条）", 20000: "旗舰版（2 万条）"}
+TIER_LABEL = {500: "轻量（500 条）", 1000: "标准（1000 条）",
+              2000: "旗舰（2000 条）", 20000: "至尊（2 万条）"}
 PRODUCT_LABEL = {PRODUCT_VIDEO: "视频号下载", PRODUCT_MP: "公众号文章视频"}
 
 SESSION = {}          # sid -> 过期时间戳

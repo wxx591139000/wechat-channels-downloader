@@ -108,7 +108,7 @@ try:
 
     # ---------- 准备：发一个 2000 的码 ----------
     print("=" * 74)
-    print("准备：发一个专业版(2000) 给「朋友小王」")
+    print("准备：发一个旗舰(2000) 给「朋友小王」")
     print("=" * 74)
     post("/gen", {"product": "1", "tier": "2000", "customer": "朋友小王",
                   "contact": "微信:xiaowang", "channel": "朋友",
@@ -138,7 +138,7 @@ try:
     st, txt = get("/upgrade?code=" + urllib.parse.quote(old_code))
     check("U2a 页面可打开", st == 200)
     check("U2b 显示客户名", "朋友小王" in txt)
-    check("U2c 显示原档位", "专业版" in txt)
+    check("U2c 显示原档位", "旗舰" in txt)
     check("U2d 有档位下拉", 'name="tier"' in txt)
     check("U2e 有台数下拉", 'name="max_devices"' in txt)
     check("U2f 原档位被预选", "value='2000' selected" in txt
@@ -172,7 +172,7 @@ try:
         check("U4b 联系方式沿用", new.get("contact") == "微信:xiaowang",
               new.get("contact"))
         check("U4c 渠道沿用", new.get("channel") == "朋友", new.get("channel"))
-        check("U4d 记录了原档位", new.get("old_tier_label") == "专业版（2000 条）",
+        check("U4d 记录了原档位", new.get("old_tier_label") == "旗舰（2000 条）",
               new.get("old_tier_label"))
         check("U4e 记录了来源", new.get("source") == "web-admin-upgrade",
               new.get("source"))
