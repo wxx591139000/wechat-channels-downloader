@@ -52,3 +52,7 @@ server/.admin_token
 server/data/
 licenses.jsonl
 .env
+
+# 设备指纹缓存（性能优化用）
+.devcache
+sphdl/.devcache

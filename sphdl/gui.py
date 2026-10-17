@@ -707,11 +707,39 @@ class SniffEngine:
 
 
 # ============================== 主界面 ==============================
+def _win32_parent(hwnd):
+    """取父窗口句柄（无则 0）。失败返回 0，不抛异常。"""
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetParent(int(hwnd)) or 0)
+    except Exception:
+        return 0
+
+
+def _win32_foreground():
+    """当前前台窗口句柄（失败返回 0）。"""
+    try:
+        import ctypes
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
 class App:
     POLL_MS = 300
     SAVE_MIN_INTERVAL = 3.0   # records.json 落盘最小间隔（秒，v2.0.17 节流）
 
     def __init__(self):
+        # ★ v2.0.19 性能：**第一件事**就启动后台采集设备指纹。
+        #   首次采集要调 PowerShell（1~2 秒），放在主线程会让启动卡住
+        #   （用户实测"启动卡顿 4 秒"）。这里让它在后台线程跑，
+        #   与界面构建并行，界面秒出；水印/横幅先显示版本号占位，
+        #   就绪后自动补上设备码。
+        try:
+            from . import telemetry as _tel0
+            _tel0.warm_up_async()
+        except Exception:
+            pass
         self.cfg = AppConfig()
         self.ui_q: "queue.Queue" = queue.Queue()
         self.log_q: "queue.Queue" = queue.Queue()
@@ -1513,9 +1541,15 @@ class App:
                 txt = "未授权 · 请点「🔑 授权管理」激活"
                 fg = "#ffd54f"
             # 附本机设备码（截图流传时可反查来源）
+            # ★ v2.0.19 性能：只读缓存，不触发采集（否则启动卡 1~2 秒）
             try:
                 from . import telemetry as _t
-                dev = _t.device_display()
+                comps = _t.cached_components()
+                dev = ""
+                if comps:
+                    import hashlib as _h
+                    dev = _t.device_display(
+                        _h.sha256("|".join(comps).encode()).hexdigest())
                 if dev:
                     txt += f"   ｜  设备 {dev}"
             except Exception:
@@ -1540,7 +1574,13 @@ class App:
 
         win = tk.Toplevel(self.root)
         win.overrideredirect(True)
-        win.attributes("-topmost", False)
+        # ★ v2.0.19 关键修复：必须保持 topmost，否则主窗口一激活就把水印压在
+        #   下面（用户"看不到水印"的直接原因）。overrideredirect 的 Toplevel
+        #   虽然无边框，但仍参与 Z 序竞争。
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
         # ★ 透明度策略（v2.0.19 三次调整，关键）：
         #   之前用窗口 -alpha 做半透明 → 整个窗口被整体淡化，
         #   文字边缘一起发虚，中文小字糊成一团（实测"看不清、变形严重"）。
@@ -1572,15 +1612,27 @@ class App:
         self._wm_key = KEY
         # 启动水印主循环（唯一 tick，60ms 一次，平滑飘动）
         self._wm_state = None
+        self._wm_visible = False      # 当前是否处于显示状态（topmost 需要显式管理）
+        self._wm_behind = False       # 主窗口是否在后台（缓存，每 400ms 刷新）
+        self._wm_fg_ts = 0            # 上次前台检查的时间戳（ms）
         self._wm_after_id = self.root.after(800, self._wm_tick)
 
     def _device_text_for_watermark(self) -> str:
-        """水印文字：优先"设备码"，取不到则用版本号。"""
+        """水印文字：优先"设备码"，取不到则用版本号。
+
+        ★ v2.0.19 性能：设备码由后台线程预热（telemetry.warm_up_async），
+        这里只读缓存 —— 如果后台还没采完，先用版本号占位，
+        由 _wm_tick 检测到就绪后自动补上（不阻塞、不卡启动）。
+        """
         try:
             from . import telemetry as _t
-            d = _t.device_display()
-            if d:
-                return d
+            comps = _t.cached_components()
+            if comps:
+                fp = __import__("hashlib").sha256(
+                    "|".join(comps).encode()).hexdigest()
+                d = _t.device_display(fp)
+                if d:
+                    return d
         except Exception:
             pass
         try:
@@ -1612,11 +1664,55 @@ class App:
         except Exception:
             return
 
-        # 主窗口最小化/不可见 → 跳过本次移动，但仍然续命（保持单循环）
+        # ★ v2.0.19：水印只在**主窗口可见且未被最小化**时显示。
+        #
+        #   历史教训（两次反复，记录清楚免得再改错）：
+        #   ① 最初 topmost=False → 被主窗口盖住，用户看不到水印。
+        #   ② 改 topmost=True → 切到后台后水印浮在桌面最上层，很突兀。
+        #   ③ 加"前台窗口判定" → 太严：窗口没被点击激活时也判定为后台，
+        #      结果水印一直不显示（实测 _wm_behind 恒为 True）。
+        #
+        #   最终方案：只用**可靠的**信号判断"不显示"——
+        #     · 主窗口最小化（state == iconic，或 Win32 IsIconic）
+        #     · 主窗口不可见（viewable == 0）
+        #   至于"被其他程序遮挡"这种情形，交给 Windows 的 Z 序自然处理：
+        #   水印是 topmost，会盖在自己的窗口上；别的程序是活动窗口时，
+        #   Windows 会把 topmost 窗口也一起压到后面（除非对方也 topmost）。
+        #   这样既不误隐藏，又不会孤零零浮在桌面（最小化时已隐藏）。
         try:
-            if self.root.state() == "iconic" or not self.root.winfo_viewable():
-                self._wm_after_id = self.root.after(500, self._wm_tick)
+            now_ms = int(time.time() * 1000)
+            if now_ms - getattr(self, "_wm_fg_ts", 0) >= 400:
+                self._wm_fg_ts = now_ms
+                hidden = False
+                try:
+                    if self.root.state() == "iconic":
+                        hidden = True
+                    elif not self.root.winfo_viewable():
+                        hidden = True
+                    else:
+                        import ctypes
+                        top_hwnd = self.root.winfo_id()
+                        for _ in range(8):
+                            p = _win32_parent(top_hwnd)
+                            if not p:
+                                break
+                            top_hwnd = p
+                        if ctypes.windll.user32.IsIconic(int(top_hwnd)):
+                            hidden = True
+                except Exception:
+                    hidden = False
+                self._wm_behind = hidden
+            behind = getattr(self, "_wm_behind", False)
+            if behind:
+                if self._wm_visible:
+                    win.withdraw()
+                    self._wm_visible = False
+                self._wm_after_id = self.root.after(200, self._wm_tick)
                 return
+            if not self._wm_visible and self._wm_state is not None:
+                win.deiconify()
+                win.attributes("-topmost", True)
+                self._wm_visible = True
         except Exception:
             pass
 
@@ -1624,6 +1720,26 @@ class App:
             self._wm_step()
         except Exception:
             pass                      # 任何异常都不让循环断掉
+
+        # ★ 设备码就绪后回填（v2.0.19）：启动时水印先用版本号占位，
+        #   后台采集完成后（约 1~2 秒）把文字换成设备码，只换一次。
+        try:
+            from . import telemetry as _t
+            if not getattr(self, "_wm_dev_filled", False) and _t.is_device_ready():
+                self._wm_dev_filled = True
+                dev = self._device_text_for_watermark()
+                cv = getattr(self, "_wm_cv", None)
+                if cv is not None:
+                    for it in cv.find_all():
+                        if cv.type(it) == "text":
+                            cv.itemconfigure(it, text=f"正版授权 {dev}")
+                # 横幅也刷新一下，补上"｜ 设备 xxxx"
+                try:
+                    self._refresh_watermark()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # ★ 唯一的续命点：整个循环只有这一处 after
         try:
@@ -1676,7 +1792,9 @@ class App:
             try:
                 win.geometry(f"{bw}x{bh}+{x}+{y}")
                 win.deiconify()          # 只在首次显示一次
+                win.attributes("-topmost", True)   # 确保浮在最上层
                 win.lift()
+                self._wm_visible = True
             except Exception:
                 pass
             return
@@ -1976,8 +2094,19 @@ class App:
         try:
             self._wm_anchor = listf
             self._init_overlay_watermark(listf)
-        except Exception:
+            # ★ v2.0.19 诊断：把创建结果打进日志，避免"静默失败"查不到原因
+            w = getattr(self, "_wm_win", None)
+            if w is not None:
+                self.push_log("info", "🔒 水印层已创建（列表区浮层，缓慢飘动）")
+            else:
+                self.push_log("warn", "⚠ 水印层未创建（窗口无浮层，"
+                                      "不影响其它功能）")
+        except Exception as _e:                             # noqa: BLE001
             self._wm_win = None
+            # ★ 关键：以前这里静默吞异常，导致"看不到水印"无法定位。
+            #   现在明确记日志（含异常类型），便于排查。
+            self.push_log("warn", f"⚠ 水印层创建失败：{type(_e).__name__}: "
+                                  f"{_e}（不影响软件正常使用）")
         self.tree.tag_configure("tag_done", foreground="#15803d")
         self.tree.tag_configure("tag_failed", foreground="#dc2626")
         self.tree.tag_configure("tag_downloading", foreground="#2563eb")

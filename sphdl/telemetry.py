@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 # 上报地址：默认生产地址。可用环境变量覆盖（便于本地测试）。
 DEFAULT_ENDPOINT = "https://license.zhuanlu.xyz/api/report"
@@ -84,37 +85,104 @@ def _first_line_after_header(out: str) -> str:
 
 
 def collect_raw() -> dict:
-    """采集原始硬件标识（三项 + 系统 GUID）。
+    """采集原始硬件标识（CPU / 主板 / GUID / 硬盘）。
 
-    ★ 本函数只在 telemetry 开启时被调用（见 report_activation）。
-    wmic 在 Win11 24H2+ 已移除 → **CIM 回退是必需项**（实测本机 wmic 不可用）。
+    ★ v2.0.19 性能重写（原实现启动卡 4 秒的根因）：
+      旧做法每项都「先试 wmic（已不可用，要等超时）→ 再回退 PowerShell」，
+      4 项 = 4 次超时 + 4 次 PowerShell 冷启动 ≈ 3.7 秒，且多处调用会叠加。
+
+      新做法：
+        ① **一条 PowerShell 命令**一次拿全 4 项（冷启动只付一次）
+        ② 结果**缓存到磁盘**（30 天内复用）→ 之后启动 0 延迟
+        ③ 缓存文件放 exe 同目录的 .devcache，不进 git
     """
+    # ---- ① 先读磁盘缓存（30 天内有效）----
+    cached = _load_dev_cache()
+    if cached:
+        return cached
+
+    # ---- ② 一条命令拿全（失败再逐项回退）----
     out = {"cpu": "", "board": "", "disk": "", "guid": ""}
-    # ① CPU ID
-    v = _first_line_after_header(_wmic(["cpu", "get", "ProcessorId"]))
-    if not v:
-        v = _powershell("(Get-CimInstance Win32_Processor).ProcessorId")
-    out["cpu"] = re.sub(r"\s+", "", v or "")
-    # ② 主板序列号
-    v = _first_line_after_header(_wmic(["baseboard", "get", "SerialNumber"]))
-    if not v or v.lower().startswith("to be filled"):
-        v = _powershell("(Get-CimInstance Win32_BaseBoard).SerialNumber")
-    out["board"] = re.sub(r"\s+", "", v or "")
-    # ③ 系统盘序列号
-    v = _first_line_after_header(_wmic(["diskdrive", "get", "SerialNumber"]))
-    if not v:
-        v = _powershell("(Get-CimInstance Win32_DiskDrive | "
-                        "Select-Object -First 1).SerialNumber")
-    out["disk"] = re.sub(r"\s+", "", v or "")[:40]
-    # ④ MachineGuid（系统级；重装系统才变）——整机换才全变的兜底
-    v = _powershell(
-        "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography')"
-        ".MachineGuid")
-    out["guid"] = re.sub(r"\s+", "", v or "")
+    one = (
+        "$c=(Get-CimInstance Win32_Processor).ProcessorId;"
+        "$b=(Get-CimInstance Win32_BaseBoard).SerialNumber;"
+        "$d=(Get-CimInstance Win32_DiskDrive|Select-Object -First 1).SerialNumber;"
+        "$g=(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid;"
+        "Write-Output ($c+'||'+$b+'||'+$d+'||'+$g)"
+    )
+    raw = _powershell(one, timeout=15)
+    parts = (raw or "").strip().split("||")
+    if len(parts) >= 4:
+        out["cpu"] = re.sub(r"\s+", "", parts[0] or "")
+        out["board"] = re.sub(r"\s+", "", parts[1] or "")
+        if out["board"].lower().startswith("to be filled"):
+            out["board"] = ""
+        out["disk"] = re.sub(r"\s+", "", parts[2] or "")[:40]
+        out["guid"] = re.sub(r"\s+", "", parts[3] or "")
+
+    # ③ 若一次拿全失败（老系统 / 权限受限），逐项回退保证能拿到
+    if not any(out.values()):
+        if not out["cpu"]:
+            out["cpu"] = re.sub(r"\s+", "", _first_line_after_header(
+                _wmic(["cpu", "get", "ProcessorId"])) or "")
+        if not out["guid"]:
+            out["guid"] = re.sub(r"\s+", "", _powershell(
+                "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography')"
+                ".MachineGuid") or "")
+
+    if any(out.values()):
+        _save_dev_cache(out)
     return out
 
 
-def device_components() -> list:
+def _dev_cache_path():
+    """设备指纹缓存文件（exe 同目录；写不了就退到用户目录）。"""
+    try:
+        from sphdl.config import BASE_DIR
+        return Path(BASE_DIR) / ".devcache"
+    except Exception:
+        try:
+            return Path.home() / ".sphdl_devcache"
+        except Exception:
+            return None
+
+
+def _load_dev_cache():
+    """读缓存（30 天有效）。任何异常都当作没有缓存。"""
+    try:
+        p = _dev_cache_path()
+        if not p or not p.exists():
+            return None
+        import json as _j
+        d = _j.loads(p.read_text(encoding="utf-8"))
+        if time.time() - float(d.get("ts") or 0) > 30 * 86400:
+            return None
+        raw = d.get("raw") or {}
+        if not isinstance(raw, dict) or not any(raw.values()):
+            return None
+        return {"cpu": raw.get("cpu", ""), "board": raw.get("board", ""),
+                "disk": raw.get("disk", ""), "guid": raw.get("guid", "")}
+    except Exception:
+        return None
+
+
+def _save_dev_cache(raw: dict):
+    """写缓存。失败静默（缓存只是性能优化，不影响功能）。"""
+    try:
+        p = _dev_cache_path()
+        if not p:
+            return
+        import json as _j
+        p.write_text(_j.dumps({"ts": time.time(), "raw": raw},
+                              ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_COMPS_CACHE = {"v": None}
+
+
+def device_components(force: bool = False) -> list:
     """把四项硬件标识分别哈希，返回 4 个独立指纹分量（v2.0.19）。
 
     ★ 为什么要分量而不是整串哈希：
@@ -125,9 +193,13 @@ def device_components() -> list:
       行业通行做法（JetBrains/Cryptlex/Keygen 等）：取 3~5 项，
       **容忍 N 项不匹配**，常见是"3 项里对上 2 项就算同一台机器"。
 
-    返回：4 个 16 位十六进制串（每项各自 SHA256 前 16 位），空项为空串。
-    顺序固定：cpu, board, guid, disk（disk 放最后，因为它最容易变）。
+    ★ 性能（v2.0.19）：**进程内只采集一次**，结果缓存在内存。
+      首次采集要调 PowerShell（约 1 秒，已由一条命令合并），
+      之后所有调用（水印 / 横幅 / 绑定校验 / 激活）都走缓存 → 0 延迟。
+      传 force=True 可强制重新采集（测试用）。
     """
+    if _COMPS_CACHE["v"] is not None and not force:
+        return list(_COMPS_CACHE["v"])
     r = collect_raw()
     out = []
     for key in ("cpu", "board", "guid", "disk"):
@@ -136,6 +208,7 @@ def device_components() -> list:
             out.append("")
         else:
             out.append(hashlib.sha256(v.encode("utf-8")).hexdigest()[:16])
+    _COMPS_CACHE["v"] = list(out)
     return out
 
 
@@ -146,7 +219,7 @@ def device_fingerprint() -> str:
     绑定校验请用 device_components() + match_components()（容许硬件变动）。
     本函数保留用于：上报去重、水印展示、台账记录（"这台机器当前长这样"）。
     """
-    comps = device_components()
+    comps = device_components()        # 走内存缓存，不重复采集
     raw = "|".join(comps)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -190,6 +263,42 @@ def bind_token(components=None) -> str:
         h = (comps[i] if i < len(comps) else "") or ""
         out.append(h[:2] if len(h) >= 2 else "00")
     return "".join(out)
+
+
+def cached_components():
+    """**只读缓存**的分量（不触发采集）。没就绪返回 None。
+
+    用于界面渲染路径（水印、横幅）—— 这些地方绝不允许阻塞，
+    否则启动就卡。采集由 warm_up_async() 在后台完成。
+    """
+    return _COMPS_CACHE["v"]
+
+
+def is_device_ready() -> bool:
+    """设备指纹是否已采集就绪（界面用来决定要不要重绘水印文字）。"""
+    return _COMPS_CACHE["v"] is not None
+
+
+def warm_up_async():
+    """后台线程预热设备指纹（v2.0.19 启动不卡）。
+
+    为什么要预热：首次采集要调 PowerShell（约 1~2 秒）。如果放在主线程，
+    界面会卡住这段时间（用户实测"启动卡顿 4 秒"）。
+    这里改成后台线程先采一次，界面立即显示，等真正需要时缓存已就绪。
+
+    调用时机：GUI 创建后立刻调用一次。失败静默（不影响功能）。
+    """
+    def _work():
+        try:
+            device_components()
+        except Exception:
+            pass
+
+    try:
+        t = threading.Thread(target=_work, name="sphdl-devwarm", daemon=True)
+        t.start()
+    except Exception:
+        pass
 
 
 def device_display(fingerprint: str = "") -> str:
