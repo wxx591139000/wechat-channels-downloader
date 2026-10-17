@@ -2,8 +2,82 @@
 
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
+## [2.1.7] - 2026-10-17
+
+### 未授权改为「可捕获、可预览，但不能下载」
+
+用户要求：「视频号下载默认行数改为 0，只有授权后才能下载」
+并澄清效果为：**未授权可以捕获、可以看列表，但不能下载**。
+
+**改动**
+
+| 项 | 值 |
+|---|---|
+| `config.DEFAULT_MAX_RECORDS` | 500 → **0** |
+| `config.UNLICENSED_CAPTURE_LIMIT` | 新增，**500**（安全上限） |
+| 下载门禁 | 新增 `_has_download_license()` + `_require_license_for_download()` |
+| `label_of(0)` | 显示「未授权（可捕获，不能下载）」 |
+
+**为什么 0 不是"什么都不抓"**
+
+`RecordStore.is_full()` 里 `max_records <= 0` 原本表示"永不满档"，所以默认 0
+= **不限制捕获**。这正是用户要的：客户能完整看到工具确实有用（列表一直在涨），
+但点下载会被拦住并引导去激活。
+
+**为什么还要 500 条安全上限**
+
+完全不限的话，客户可能抓几万条。实测排序性能：2 万条 1.83s / **5 万条 38s**
+（PITFALLS #7）→ 界面会卡死。所以未授权时按 `UNLICENSED_CAPTURE_LIMIT=500`
+封顶，达到后停止捕获并提示「已达试用上限」——**不是**"要你付费"的催单文案。
+
+**下载门禁放在哪（关键）**
+
+放在 `_submit_record()` —— **所有下载路径的唯一出口**
+（手动选中下载 / 全部待下载 / 自动下载 / 重新下载 / 重试失败）。
+放上层任何按钮里都可能被别的路径绕过。
+
+- 程序化路径用 `_has_download_license()`（静默，不弹窗，防自动下载刷屏）
+- 用户主动点击的入口用 `_require_license_for_download()`（弹窗引导去激活）
+
+**公众号码不算视频号授权**：拿公众号码不能下载视频号视频（测试 G7 覆盖）。
+
+### 修复：档位改名的第 7 处漏网
+
+`license.py::TIER_LABELS` 是**自己的**档位名表（与 `config.MAX_RECORDS_LABELS`
+重复，因为 license.py 要能被 tools/ 和 server/ 独立导入，不引入 gui 侧依赖）。
+v2.1.5 改名时漏掉了它 → `lic.label_of_tier(2000)` 仍返回「专业版（2000 条）」。
+
+**→ 改档位名必查清单从 6 处扩到 7 处**（新增 `sphdl/license.py::TIER_LABELS`）。
+
+### 修复：三处旧测试的过时期望
+
+| 测试 | 问题 |
+|---|---|
+| `verify_tier_resolve.py` | 断言「默认档必须 > 0」，现默认刻意改 0 |
+| `verify_tier_reload.py` | 断言「默认档 = 500」 |
+| `verify_max_records.py` | A7/C8 断言旧档位名；**C6a 把 `license_activated_at` 当 int 用**（v2.0.19 已改 dict） |
+
+### 测试
+
+新增 `tests/verify_download_gate.py`（12 项）：
+
+| 段 | 断言 |
+|---|---|
+| G1 | 默认档位 = 0 |
+| G2/G3 | ★0 档不限制捕获（能入库），is_full 按 500 封顶 |
+| G4/G5 | ★未授权下载被拦（`_submit_record` 拒收，状态不变） |
+| G6 | ★授权后能正常下载 |
+| G7 | ★公众号码不算视频号授权 |
+| G8 | `label_of(0)` 显示「未授权」不是「0 条」 |
+| G9 | 绑定版本（LOCKED）视为已授权 |
+
+回归：`test_sniff_smoke` 15、`test_offline` 11、`verify_tier_resolve` 34、
+`verify_tier_reload` 52、`verify_max_records` ALL PASS、
+`verify_batch_driver` 27、`verify_seen_release` 21 全过。
+
 ## [2.1.6] - 2026-10-17
 
+- v2.1.6 修满档后升档不恢复批量
 ### 修复：满档自动停批量后，升档不恢复 → 用户以为「授权把批量关了」
 
 用户报障原话：

@@ -395,13 +395,21 @@ class RecordStore:
         ★ v2.0.19：**只统计视频号记录**。公众号视频是独立产品（不分档），
           不占用视频号的档位名额，否则买了轻量的客户解析几十个公众号
           视频后，视频号就再也抓不进来了。
+
+        ★ v2.1.7：未授权（max_records <= 0）不再"永不满档"，改为按
+          `UNLICENSED_CAPTURE_LIMIT`（500 条）封顶。原因见 config.py 的说明：
+          完全不限会让客户抓几万条，排序 5 万条要 38 秒（PITFALLS #7），
+          界面会卡死。500 条足够看清工具确实有用，又不会拖慢。
         """
-        if self.max_records <= 0:
+        limit = self.max_records
+        if limit <= 0:
+            limit = config.UNLICENSED_CAPTURE_LIMIT
+        if limit <= 0:
             return False
         n = sum(1 for rid in self.order
                 if (getattr(self.items.get(rid), "platform", "视频号")
                     or "视频号") == "视频号")
-        return n >= self.max_records
+        return n >= limit
 
     def _trim_to_limit(self) -> list:
         """把超出档位的部分裁掉（只可能发生在**下调档位**时）。
@@ -2735,8 +2743,21 @@ class App:
         return out
 
     def _submit_record(self, rid):
-        """把一条记录提交到下载管线（waiting/failed → pending）。"""
+        """把一条记录提交到下载管线（waiting/failed → pending）。
+
+        ★ v2.1.7：这里是**所有下载路径的唯一出口**（手动选中/全部待下载/
+          自动下载/重新下载/重试失败），所以授权门禁放在这里最稳 ——
+          放上层任何一个按钮里都可能被别的路径绕过。
+          未授权 → 直接拒收（不弹窗，避免自动下载时弹窗刷屏；提示由
+          `_require_license_for_download()` 在用户主动点按钮时给）。
+        """
         rec = self.store.items[rid]
+        # ★ 未授权不允许下载（可捕获可预览，只是拿不到文件）
+        if not self._has_download_license():
+            self.push_log(
+                "warn",
+                f"🔒 未授权，已跳过下载：{rec.title[:30]}（需视频号授权码）")
+            return False
         # 「🖼 下载图片」关闭时的兜底拦截：图片不下载
         # （正常情况下图片记录已被移出列表，这里防残留/历史状态）
         if rec.is_image and not self.cfg.download_images:
@@ -2766,7 +2787,57 @@ class App:
         self._update_row(rid)
         return True
 
+    def _has_download_license(self) -> bool:
+        """纯判断：当前是否有视频号下载授权（不弹窗、不写日志）。
+
+        ★ 与 `_require_license_for_download()` 的分工：
+          · 本函数 —— 给**程序化路径**用（自动下载、统一出口 _submit_record），
+            静默返回 True/False，绝不弹窗（否则自动下载会弹窗刷屏）
+          · `_require_license_for_download()` —— 给**用户主动点击**的入口用，
+            未授权时弹窗引导去激活
+        """
+        # 绑定版本（LOCKED_MAX_RECORDS 写死）→ 视为已授权
+        if self.cfg.locked_max_records is not None:
+            return True
+        try:
+            info = self._license_info(lic.PRODUCT_VIDEO)
+            if info and not self._license_expired():
+                # 公众号产品码不算视频号授权
+                return bool(lic.has_feature(info, lic.PRODUCT_VIDEO))
+        except Exception:
+            pass
+        return False
+
+    def _require_license_for_download(self) -> bool:
+        """下载前的授权门禁（v2.1.7）。
+
+        ★ 业务规则（用户要求）：
+          未授权时可以**捕获、可以看列表**（让客户看到效果），
+          但**不能下载** —— 点下载时提示需要授权。
+          这样比"未授权就什么都抓不到"体验好：客户能先看到工具真的有用。
+
+        返回 True = 放行下载；False = 已弹提示，调用方应直接 return。
+        """
+        if self._has_download_license():
+            return True
+        # ❌ 未授权
+        self.push_log(
+            "warn", "🔒 未授权：可以捕获和预览列表，但下载需要视频号授权码")
+        if messagebox.askyesno(
+                "需要授权才能下载",
+                "你还没有激活视频号下载授权。\n\n"
+                "现在可以：\n"
+                "  ✓ 捕获视频、查看列表（先确认工具确实好用）\n"
+                "  ✗ 下载视频文件（需要授权码）\n\n"
+                "授权码请向发布方购买。\n\n"
+                "现在就打开「🔑 授权管理」粘贴授权码吗？",
+                parent=self.root):
+            self._on_license_input()
+        return False
+
     def _download_selected(self):
+        if not self._require_license_for_download():
+            return
         rids = self._selected_rids()
         if not rids:
             messagebox.showinfo("提示", "请先在列表里选中要下载的视频"
@@ -2822,6 +2893,8 @@ class App:
                                "（只有 排队中/下载中/解密中 可以停止）")
 
     def _download_all_waiting(self):
+        if not self._require_license_for_download():
+            return
         rids = [r.id for r in self.store.by_status("waiting")]
         if not rids:
             messagebox.showinfo("提示", "没有待下载的视频")
@@ -3374,13 +3447,22 @@ class App:
         if self._limit_warned:
             return
         self._limit_warned = True
-        self.push_log(
-            "warn",
-            f"⚠️ 列表已满（{self._tier_label_of()}，共 {self.store.max_records} 条）："
-            "已停止加载后续视频（不会顶掉已有记录）。\n"
-            "如需继续加载：点「🔑 授权管理」升级档位；或删除部分记录后继续拉取。\n"
-            "（满档期间未加载的视频不会被记成「已捕获」，"
-            "升级档位或删记录后重新播放/拉取即可加载）")
+        # ★ v2.1.7：未授权时是"试用上限"语义，不是"档位满"
+        if self.store.max_records <= 0:
+            self.push_log(
+                "warn",
+                f"⚠️ 已达试用上限（未授权，最多 {config.UNLICENSED_CAPTURE_LIMIT} 条）："
+                "已停止加载后续视频（不会顶掉已有记录）。\n"
+                "💡 试用期内可以**捕获、查看列表**，但**下载需要授权码**。\n"
+                "如需完整使用：点「🔑 授权管理」粘贴授权码后即可下载、并解除条数限制。")
+        else:
+            self.push_log(
+                "warn",
+                f"⚠️ 列表已满（{self._tier_label_of()}，共 {self.store.max_records} 条）："
+                "已停止加载后续视频（不会顶掉已有记录）。\n"
+                "如需继续加载：点「🔑 授权管理」升级档位；或删除部分记录后继续拉取。\n"
+                "（满档期间未加载的视频不会被记成「已捕获」，"
+                "升级档位或删记录后重新播放/拉取即可加载）")
         if self.addon.batch_mode:
             self.push_log("warn",
                           "⚡ 批量拉取已自动停止（列表满，继续滚动也不会再加载）\n"

@@ -91,7 +91,7 @@ try:
           app._resolve_tier() == DEFAULT, str(app._resolve_tier()))
     check("T1b store.max_records = 默认档",
           app.store.max_records == DEFAULT, str(app.store.max_records))
-    check("T1c 默认档 > 0（不能是 0）", DEFAULT > 0, str(DEFAULT))
+    check("T1c ★默认档 = 0（v2.1.7 未授权，可捕获不能下载）", DEFAULT == 0, str(DEFAULT))
 
     # ---------- T2 ----------
     print("\n" + "=" * 74)
@@ -116,12 +116,12 @@ try:
     ok = app._activate_license(CODE_MP)
     pump(app, 200)
     check("T3a 公众号码激活成功", ok is True)
-    check("T3b ★store.max_records 不是 0", app.store.max_records != 0,
-          str(app.store.max_records))
+    check("T3b ★公众号码不让上限变负数/异常（回落到默认档）",
+          app.store.max_records == DEFAULT, str(app.store.max_records))
     check("T3c ★回落到默认档",
           app.store.max_records == DEFAULT, str(app.store.max_records))
-    check("T3d _resolve_tier 也不是 0", app._resolve_tier() != 0,
-          str(app._resolve_tier()))
+    check("T3d _resolve_tier 与 store 一致（都是默认档）",
+          app._resolve_tier() == DEFAULT, str(app._resolve_tier()))
     check("T3e 公众号功能已解锁",
           lic.is_mp_product(app._license_info()) is True)
 
@@ -168,7 +168,8 @@ try:
     pump(app, 150)
     check("T6a 清除后回默认档", app.store.max_records == DEFAULT,
           str(app.store.max_records))
-    check("T6b 清除后不是 0", app.store.max_records != 0)
+    check("T6b 清除后回落到默认档 0（未授权）", app.store.max_records == 0,
+          str(app.store.max_records))
 
     # ---------- T7 ----------
     print("\n" + "=" * 74)
@@ -182,15 +183,17 @@ try:
           app.store.max_records == DEFAULT, str(app.store.max_records))
     app.store.items.clear()
     app.store.order.clear()
+    # ★ v2.1.7：默认档 0 = 未授权，捕获上限由 UNLICENSED_CAPTURE_LIMIT 决定
+    cap = DEFAULT if DEFAULT > 0 else C.UNLICENSED_CAPTURE_LIMIT
     added = 0
-    for i in range(DEFAULT + 5):
+    for i in range(cap + 5):
         rec = Record(id=f"z{i}", title=f"v{i}", url=f"http://x/{i}",
                      decode_key="", size=1, source="测试",
                      created=f"2026-10-17 11:{i//60:02d}:{i%60:02d}",
                      platform="视频号", video_id=f"zv{i}")
         if app.store.add(rec):
             added += 1
-    check(f"T7a ★恰好加到 {DEFAULT} 条（默认档上限）", added == DEFAULT,
+    check(f"T7a ★恰好加到 {cap} 条（未授权捕获上限）", added == cap,
           f"实际 {added}")
     check("T7b 达到上限后 is_full = True", app.store.is_full() is True)
 

@@ -124,7 +124,7 @@ def main():
         print("=" * 74)
         check("数据隔离：起始列表为空", len(app.store.order) == 0,
               f"n={len(app.store.order)}")
-        check("档位为轻量版 500", app.store.max_records == 500,
+        check("默认档为 0（v2.1.7 未授权）", app.store.max_records == 0,
               f"max={app.store.max_records}")
         check("4 档为确定数值 (500/1000/2000/20000)",
               tuple(config.MAX_RECORDS_TIERS) == (500, 1000, 2000, 20000),
@@ -224,7 +224,7 @@ def main():
         app._activate_license(lic.make_code(1000))
         cleared = app._clear_license()
         check("E4 清除授权：返回 True", cleared)
-        check("E4b 清除后回落默认档 500", app.store.max_records == 500,
+        check("E4b 清除后回落默认档 0（未授权）", app.store.max_records == 0,
               f"max={app.store.max_records}")
         check("E4c 授权码已清空", not app.cfg.license_code,
               f"code={app.cfg.license_code!r}")

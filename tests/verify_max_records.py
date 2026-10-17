@@ -136,11 +136,11 @@ def part_a():
     check("A6 启动裁剪：600 条 + 500 档 → 保留 500、裁掉 100",
           len(st4.order) == 500 and st4.trimmed_on_load == 100,
           f"trimmed_on_load={st4.trimmed_on_load}")
-    check("A7 档位文案（轻量版/标准版/专业版/旗舰版）",
-          config.label_of(20000) == "旗舰版（2 万条）"
-          and config.label_of(1000) == "标准版（1000 条）"
-          and lic.label_of_tier(2000) == "专业版（2000 条）"
-          and config.name_of(500) == "轻量版",
+    check("A7 档位文案（轻量/标准/旗舰/至尊）",
+          config.label_of(20000) == "至尊（2 万条）"
+          and config.label_of(1000) == "标准（1000 条）"
+          and lic.label_of_tier(2000) == "旗舰（2000 条）"
+          and config.name_of(500) == "轻量",
           f"labels={[config.label_of(t) for t in (500, 1000, 2000, 20000)]}")
 
 
@@ -326,9 +326,15 @@ def part_c():
 
     # C6 授权持久化 + 重启生效
     cfg = json.loads(g.CONFIG_FILE.read_text(encoding="utf-8"))
-    check("C6a 授权码写入 config.json", bool(cfg.get("license_code"))
-          and cfg.get("license_activated_at", 0) > 0,
-          f"code={str(cfg.get('license_code'))[:20]}…")
+    # ★ v2.0.19 起授权按产品线分槽存 license_codes={产品:码}，
+    #   license_activated_at 也随之变成 dict → 不能用 >0 比较
+    _codes = cfg.get("license_codes") or {}
+    _ats = cfg.get("license_activated_at") or {}
+    check("C6a 授权码写入 config.json（分槽存储）",
+          bool(_codes.get("1") or cfg.get("license_code"))
+          and (isinstance(_ats, dict) and bool(_ats.get("1"))
+               or isinstance(_ats, (int, float)) and _ats > 0),
+          f"codes={list(_codes)[:3]} ats={type(_ats).__name__}")
     app2 = g.App()
     app2.root.withdraw()
     check("C6b 重启后档位仍为授权档（500）", app2.store.max_records == 500,
@@ -364,8 +370,8 @@ def part_c():
                        text=True, encoding="utf-8", errors="replace", timeout=90)
     out = r.stdout or ""
     line = next((l for l in out.splitlines() if l.startswith("LOCKED")), "")
-    check("C8 预置锁档版本：档位写死 1000、隐藏授权按钮、标题含「·标准版（1000 条）」",
-          "LOCKED 1000 False" in line and "·标准版（1000 条）" in line
+    check("C8 预置锁档版本：档位写死 1000、隐藏授权按钮、标题含「·标准（1000 条）」",
+          "LOCKED 1000 False" in line and "·标准（1000 条）" in line
           and "版本预置" in out,
           line or (r.stderr or "")[-200:])
 

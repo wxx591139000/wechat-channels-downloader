@@ -34,8 +34,13 @@ TIER_TO_CODE = {500: 1, 1000: 2, 2000: 3, 20000: 4}
 CODE_TO_TIER = {v: k for k, v in TIER_TO_CODE.items()}
 
 # 档位展示名（与 config.MAX_RECORDS_LABELS 一致，单一事实源在 config）
-TIER_LABELS = {500: "轻量版（500 条）", 1000: "标准版（1000 条）",
-               2000: "专业版（2000 条）", 20000: "旗舰版（2 万条）"}
+# ★ v2.1.5 档位改名：轻量 / 标准 / 旗舰 / 至尊
+# ⚠️ 这里是 license.py 自己的档位名表，**与 config.MAX_RECORDS_LABELS 重复**。
+#   改档位名时两处都要改（改档位名必查 7 处清单的第 7 处，见项目归档记录）。
+#   之所以不 import config：license.py 要能在 tools/ 和 server/ 独立导入，
+#   不想引入 gui 侧的模块依赖。
+TIER_LABELS = {500: "轻量（500 条）", 1000: "标准（1000 条）",
+               2000: "旗舰（2000 条）", 20000: "至尊（2 万条）"}
 
 CODE_PREFIX = "SPHDL"
 ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"      # 去掉 I L O U
