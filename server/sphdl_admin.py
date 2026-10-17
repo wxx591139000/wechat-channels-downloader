@@ -625,10 +625,20 @@ class H(BaseHTTPRequestHandler):
             f"{lbl}</option>" for t, lbl in TIER_LABEL.items())
         if prod == PRODUCT_MP:
             opts = "<option value='0' selected>公众号视频版（不分档）</option>"
+        # ★ 台数下拉必须**准确预选客户原来的台数**，否则升级会静默放宽限制。
+        #
+        #   事故（2026-10-17）：dan 原本是 ver=4「限 1 台」，升级 20000 后变成
+        #   ver=2「不限台数」—— 防护反而变松。修好预选 + 兜底：
+        #   如果老记录读不到台数，**宁可沿用 1 台**，也不要默认"不限"。
+        cur_md_n = int(cur_md) if cur_md else None
+        md_choices = ((1, "1 台（默认·限单机）"), (2, "2 台"), (3, "3 台"),
+                      (5, "5 台"), (10, "10 台"), (0, "不限台数"))
+        # 老记录若台数为空，按 1 台预选（安全侧），而不是"不限"
+        if cur_md_n is None:
+            cur_md_n = 1
         md_opts = "".join(
-            f"<option value='{v}'{' selected' if (cur_md == (int(v) if v else None) or (not v and not cur_md)) else ''}>{t}</option>"
-            for v, t in (("", "不限台数"), ("1", "1 台"), ("2", "2 台"),
-                         ("3", "3 台"), ("5", "5 台"), ("10", "10 台")))
+            f"<option value='{v}'{' selected' if v == cur_md_n else ''}>{t}</option>"
+            for v, t in md_choices)
 
         # 作废状态横幅 + 作废/恢复按钮
         if st == "voided":
@@ -772,8 +782,16 @@ class H(BaseHTTPRequestHandler):
             if prod == PRODUCT_MP:
                 tier = 0
             md_raw = (form.get("max_devices") or "").strip()
-            md = int(md_raw) if md_raw else None
             dev = (old.get("device") or "").strip()   # 绑定版沿用原绑定
+            # ★ 台数兜底（2026-10-17 修）：前端没传时**沿用旧码的台数**，
+            #   绝不静默变成"不限"。事故：dan 限 1 台升级后变不限台数。
+            if md_raw == "":
+                md = old.get("max_devices")
+                md = int(md) if md else None
+            else:
+                md = int(md_raw)
+                if md == 0:
+                    md = None                        # 0 = 用户显式选了"不限"
             new_code = make_code(tier, product=prod,
                                  device=dev if dev else "",
                                  max_devices=None if dev else md)
