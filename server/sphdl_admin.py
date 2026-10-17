@@ -371,6 +371,13 @@ class H(BaseHTTPRequestHandler):
         # ★ v2.1.4：改档位提交
         if u.path == "/upgrade":
             return self._do_upgrade(form)
+        # ★ v2.1.5：改名 / 作废 / 恢复
+        if u.path == "/edit_customer":
+            return self._do_edit_customer(form)
+        if u.path == "/void":
+            return self._do_void(form, voided=True)
+        if u.path == "/restore":
+            return self._do_void(form, voided=False)
         self._send(404, "not found")
 
     # ---------- 发码页 ----------
@@ -405,18 +412,18 @@ class H(BaseHTTPRequestHandler):
 <option>闲鱼</option><option>微信</option><option>朋友</option><option>其他</option>
 </select>
 <label>成交价</label><input name="price" inputmode="decimal" placeholder="199">
-<label>允许激活的电脑台数（★ 用于控制转卖）</label>
+<label>允许激活的电脑台数（★ 默认 1 台，防转卖）</label>
 <select name="max_devices">
-<option value="">不限台数（默认）</option>
-<option value="1">1 台</option>
+<option value="1" selected>1 台（默认·限单机）</option>
+<option value="">不限台数</option>
 <option value="2">2 台</option>
 <option value="3">3 台</option>
 <option value="5">5 台</option>
 <option value="10">10 台</option>
 </select>
 <p class="meta" style="margin-top:4px">
-选台数后：客户在第 N+1 台电脑激活时会失败（需联网校验）。
-断网时放行，但会记录下来。</p>
+默认限 1 台：客户换电脑会激活失败，需要你手动放宽。<br>
+想卖「家里几台都能用」就选 2~3 台；老客户可改用「查客户 → 改档位」放宽。</p>
 <label>设备码 / 绑定串（选填 → 死绑单机，与台数二选一）</label>
 <input name="device" placeholder="163145d5 或 1594-8EBB-7A1F-B22F" autocapitalize="characters">
 <button>生成授权码</button>
@@ -466,15 +473,24 @@ class H(BaseHTTPRequestHandler):
     # ---------- 查客户 ----------
     def _page_customers(self, q):
         kw = (q.get("q", [""])[0] or "").strip()
-        _code = (q.get("code", [""])[0] or "").strip()
-        rows = ledger_all()
+        # ★ v2.1.5：先归一化台账 —— 把编辑事件合进原记录、算出作废状态，
+        #   否则改了名之后列表还显示旧名、作废了也看不出来。
+        rows = self._merged_rows()
         if kw:
+            # ★ v2.1.5：只搜「合并后的当前值」，不搜历史事件里的旧值。
+            #   否则客户改名后用旧名还能搜到（_merged_rows 已把编辑合并进
+            #   行本身，事件行不在此列表里，所以直接搜当前字段即可）。
             k = kw.lower()
-            rows = [r for r in rows if k in json.dumps(r, ensure_ascii=False).lower()]
+            rows = [r for r in rows
+                    if k in json.dumps(
+                        {kk: vv for kk, vv in r.items() if not kk.startswith("_")},
+                        ensure_ascii=False).lower()]
         rows = sorted(rows, key=lambda r: r.get("issued", ""), reverse=True)
         items = []
         for r in rows[:200]:
             tags = []
+            if r.get("_voided"):
+                tags.append("<span class='tag red'>🚫 已作废</span>")
             if r.get("device"):
                 tags.append("<span class='tag green'>绑定版</span>")
             if r.get("max_devices"):
@@ -483,8 +499,6 @@ class H(BaseHTTPRequestHandler):
                 tags.append("<span class='tag'>公众号</span>")
             if r.get("renewed_from"):
                 tags.append("<span class='tag green'>已升级</span>")
-            # ★ v2.1.4：每个客户后缀「改档位」入口（升级/降级/续期）
-            #   按用户要求：不用重新填客户信息，直接在查客户处改档
             ec = html.escape(r.get("code", ""))
             items.append(f"""<div class="item">
 <b>{html.escape(r.get('customer') or '（未填昵称）')}</b>
@@ -497,7 +511,7 @@ class H(BaseHTTPRequestHandler):
 <div style="margin-top:8px">
 <a href="/upgrade?code={ec}" style="display:inline-block;padding:6px 14px;
    background:#1e3a5f;color:#fff;border-radius:8px;text-decoration:none;
-   font-size:13px">⬆ 改档位 / 续期</a>
+   font-size:13px">⚙ 管理（改档/改名/作废）</a>
 </div></div>""")
         body = f"""
 <div class="card"><h3>查客户（共 {len(rows)} 条）</h3>
@@ -505,21 +519,94 @@ class H(BaseHTTPRequestHandler):
 <input name="q" value="{html.escape(kw)}" placeholder="昵称 / 联系方式 / 授权码 / 部分匹配">
 <button>搜索</button></form>
 <p class="meta" style="margin-top:8px">
-已有客户要升级/降级/续期：点记录下方的「⬆ 改档位」，不用重填信息。</p></div>
+点「⚙ 管理」可以：改档位、改客户名、作废/恢复授权码。</p></div>
 <div class="card">{''.join(items) or '<p class="meta">没有记录</p>'}</div>"""
         return self._send(200, page("查客户", body, NAV.format("", "on", "")))
 
+    def _merged_rows(self):
+        """把台账归一化成一"行"一客户（v2.1.5）。
+
+        台账里有四类记录：
+          · 原始发码记录（有 code、无 event）
+          · renewed_from（升级产生的新码，也算一条正常记录）
+          · customer_edit / voided / restored / superseded（事件，不是客户行）
+        本函数返回"每个授权码一行"，并把最新编辑与作废状态合并进去。
+        """
+        all_rows = ledger_all()
+        # ① 收集每个码的最新编辑 / 作废状态
+        edits, status = {}, {}
+        for r in all_rows:
+            c = (r.get("code") or "").strip().upper()
+            if not c:
+                continue
+            ev = r.get("event")
+            if ev == "customer_edit":
+                edits[c] = r
+            elif ev == "voided":
+                status[c] = True
+            elif ev == "restored":
+                status[c] = False
+        # ② 收集客户行（原始记录 + 升级产生的新码记录）
+        out = []
+        for r in all_rows:
+            ev = r.get("event")
+            if ev is not None:
+                continue                       # 事件行不算客户
+            if not r.get("code"):
+                continue
+            row = dict(r)
+            c = (row.get("code") or "").strip().upper()
+            e = edits.get(c)
+            if e:
+                for k in ("customer", "contact", "channel"):
+                    if e.get(k) is not None:
+                        row[k] = e.get(k)
+            row["_voided"] = bool(status.get(c))
+            out.append(row)
+        return out
+
     # ---------- 改档位（升级/降级/续期，v2.1.4） ----------
     def _find_row(self, code):
-        """按授权码找台账原文（返回 dict 或 None）。"""
+        """按授权码找台账原文，并**应用后续的客户信息编辑事件**（v2.1.5）。
+
+        台账是 append-only：客户改名不覆盖原行，而是追加一条
+        customer_edit 事件。这里把最新一次编辑合并到返回的记录上，
+        这样界面和升级流程看到的都是最新客户信息。
+        """
         code = (code or "").strip()
+        if not code:
+            return None
+        target = code.upper()
+        base = None
+        latest_edit = None
         for r in ledger_all():
-            if (r.get("code") or "").strip().upper() == code.upper():
-                return r
-        return None
+            if (r.get("code") or "").strip().upper() != target:
+                continue
+            ev = r.get("event")
+            if ev == "customer_edit":
+                latest_edit = r            # 后出现的覆盖前面的
+            elif ev is None and base is None:
+                base = dict(r)             # 原始发码记录
+        if base is None:
+            return None
+        if latest_edit:
+            for k in ("customer", "contact", "channel"):
+                if latest_edit.get(k) is not None:
+                    base[k] = latest_edit.get(k)
+            base["_edited_at"] = latest_edit.get("issued")
+        return base
 
     def _page_upgrade(self, q):
-        """改档位页面：带出原客户信息，只需选新档位。"""
+        """改档位 / 改客户名 / 作废 / 恢复（v2.1.5）。
+
+        用户要求：
+          · 客户名称可编辑
+          · 改档位处支持作废授权码
+          · 作废后还能恢复
+
+        ⚠️ 作废只是**台账标记**，不改变码本身 —— 已经激活的软件照常能用。
+           界面上必须写清楚，避免误以为"作废=拦住"。
+        """
         code = (q.get("code", [""])[0] or "").strip()
         old = self._find_row(code)
         if not old:
@@ -531,6 +618,8 @@ class H(BaseHTTPRequestHandler):
         prod = int(old.get("product") or PRODUCT_VIDEO)
         cur_tier = int(old.get("tier") or 0)
         cur_md = old.get("max_devices")
+        cur_name = old.get("customer") or ""
+        st = self._status_of(code)          # active / voided
         opts = "".join(
             f"<option value='{t}'{' selected' if (prod == PRODUCT_VIDEO and t == cur_tier) else ''}>"
             f"{lbl}</option>" for t, lbl in TIER_LABEL.items())
@@ -541,19 +630,56 @@ class H(BaseHTTPRequestHandler):
             for v, t in (("", "不限台数"), ("1", "1 台"), ("2", "2 台"),
                          ("3", "3 台"), ("5", "5 台"), ("10", "10 台")))
 
+        # 作废状态横幅 + 作废/恢复按钮
+        if st == "voided":
+            vb = ("<div class='err' style='margin-bottom:12px'>"
+                  "🚫 <b>此授权码已作废</b>（仅后台标记）<br>"
+                  "<span style='font-size:13px'>注意：已经激活的软件仍然可以正常使用，"
+                  "作废只用于台账记录，不会让客户端失效。</span></div>")
+            act_btn = (f"<form method='post' action='/restore' style='margin-top:10px'>"
+                       f"<input type='hidden' name='code' value='{html.escape(code)}'>"
+                       f"<button style='background:#15803d'>♻ 恢复此授权码</button>"
+                       f"</form>")
+        else:
+            vb = ("<div class='ok' style='margin-bottom:12px'>✅ <b>正常</b>"
+                  "（未作废）</div>")
+            act_btn = (f"<form method='post' action='/void' style='margin-top:10px' "
+                       f"onsubmit=\"return confirm('确认作废这个授权码？\\n\\n"
+                       f"作废只是后台标记，已经激活的软件仍然能用。\\n"
+                       f"如需真正拦住，需要额外开发联网校验。')\">"
+                       f"<input type='hidden' name='code' value='{html.escape(code)}'>"
+                       f"<button style='background:#b91c1c'>🚫 作废此授权码</button>"
+                       f"</form>")
+
         body = f"""
-<div class="card"><h3>改档位 · {html.escape(old.get('customer') or '未填昵称')}</h3>
+<div class="card"><h3>客户 · {html.escape(cur_name or '未填昵称')}</h3>
+{vb}
 <div class="ok" style="margin-bottom:12px">
 原档位：<b>{html.escape(old.get('tier_label',''))}</b>　
 原价格：¥{html.escape(str(old.get('price','')))}　
 台数：{('不限' if not cur_md else str(cur_md)+' 台')}<br>
 <span class="mono" style="font-size:12px">{html.escape(code)}</span>
 </div>
+
+<!-- ★ 客户名称编辑（v2.1.5） -->
+<form method="post" action="/edit_customer">
+<input type="hidden" name="code" value="{html.escape(code)}">
+<label>客户名称（可直接修改）</label>
+<input name="customer" value="{html.escape(cur_name)}" placeholder="客户昵称">
+<label>联系方式</label>
+<input name="contact" value="{html.escape(old.get('contact',''))}">
+<label>渠道</label>
+<input name="channel" value="{html.escape(old.get('channel',''))}">
+<button class="gray" style="background:#4b5563">保存客户信息</button>
+</form>
+</div>
+
+<div class="card"><h3>改档位 / 续期</h3>
 <form method="post" action="/upgrade">
 <input type="hidden" name="code" value="{html.escape(code)}">
 <label>新档位</label>
 <select name="tier">{opts}</select>
-<label>允许台数</label>
+<label>允许台数（默认沿用客户原来的设置）</label>
 <select name="max_devices">{md_opts}</select>
 <label>本次收款（升级收费 / 降级可填 0）</label>
 <input name="price" inputmode="decimal" placeholder="如 100">
@@ -562,12 +688,77 @@ class H(BaseHTTPRequestHandler):
 <button>生成新授权码</button>
 </form>
 <p class="meta" style="margin-top:10px">
-生成新码后：把新码发给客户，他在「🔑 授权管理」粘贴即可，
-<b>不用重装软件</b>。旧码会被标记为「已升级」，台账保留完整历史。<br>
-客户信息（昵称/联系方式/渠道）自动沿用，不用重填。</p>
+生成新码后发给客户，粘贴即可生效，<b>不用重装</b>。
+客户信息与台数自动沿用。旧码标记「已升级」，历史保留。</p>
 </div>
-<div class="card"><a href="/customers"><button class="gray">返回</button></a></div>"""
-        return self._send(200, page("改档位", body, NAV.format("", "on", "")))
+
+<div class="card"><h3>作废 / 恢复</h3>
+<p class="meta" style="margin-bottom:8px">
+作废仅在本台账标记状态，<b>不会让客户的软件失效</b>（软件离线工作）。
+用于登记"这个码已退款/已弃用"，方便你日后查账。</p>
+{act_btn}
+</div>
+
+<div class="card"><a href="/customers"><button class="gray">返回查客户</button></a></div>"""
+        return self._send(200, page("客户管理", body, NAV.format("", "on", "")))
+
+    # ---------- 作废状态（台账事件驱动） ----------
+    def _status_of(self, code: str) -> str:
+        """查某码当前状态：active / voided。
+
+        ★ 为什么用台账事件而不是改原记录：
+          台账是 append-only（只追加不改写），历史不可篡改。
+          作废/恢复各追加一条事件，取该码**最后一条状态事件**为准。
+        """
+        code_u = (code or "").strip().upper()
+        st = "active"
+        for r in ledger_all():
+            if (r.get("code") or "").strip().upper() != code_u:
+                continue
+            ev = r.get("event")
+            if ev == "voided":
+                st = "voided"
+            elif ev == "restored":
+                st = "active"
+        return st
+
+    def _do_void(self, form, voided=True):
+        """作废 / 恢复（追加事件，不改原记录）。"""
+        code = (form.get("code") or "").strip()
+        if not self._find_row(code):
+            return self._redirect("/customers")
+        try:
+            ledger_add({
+                "event": "voided" if voided else "restored",
+                "code": code,
+                "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception:
+            pass
+        self._redirect("/upgrade?code=" + code.replace("-", "%2D"))
+
+    def _do_edit_customer(self, form):
+        """改客户名称/联系方式/渠道（v2.1.5）。
+
+        ★ 台账 append-only → 不改原行，追加一条 customer_edit 事件，
+          里面写明新值；查询时以最新一条 customer_edit 为准。
+        """
+        code = (form.get("code") or "").strip()
+        old = self._find_row(code)
+        if not old:
+            return self._redirect("/customers")
+        try:
+            ledger_add({
+                "event": "customer_edit",
+                "code": code,
+                "customer": form.get("customer", "").strip(),
+                "contact": form.get("contact", "").strip(),
+                "channel": form.get("channel", "").strip(),
+                "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception:
+            pass
+        self._redirect("/upgrade?code=" + code.replace("-", "%2D"))
 
     def _do_upgrade(self, form):
         """处理改档位：沿用客户信息，生成新码，标记旧码。"""
