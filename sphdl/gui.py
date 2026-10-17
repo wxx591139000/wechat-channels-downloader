@@ -421,6 +421,12 @@ class SniffEngine:
         while self._running and time.time() < deadline:
             if self._port_open(port):
                 self.app.push_log("ok", f"代理已监听 127.0.0.1:{port}，开始嗅探。请打开微信视频号播放视频")
+                # ★ v2.0.19：记录嗅探生效时刻，供「零流量」诊断计时
+                try:
+                    self.app._sniff_started_ts = time.time()
+                    self.app._no_traffic_warned = False
+                except Exception:
+                    pass
                 return True
             now = time.time()
             if now - last_note >= 10:
@@ -610,6 +616,9 @@ class App:
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
         self._last_hb_log = 0.0
+        # 「零流量」诊断（v2.0.19）：嗅探启动时间戳 + 是否已提示过
+        self._sniff_started_ts = 0.0
+        self._no_traffic_warned = False
         # 列表容量档位（v2.0.17）：淘汰提示只打一次；落盘节流时间戳
         self._limit_warned = False
         self._rejected_count = 0       # 满档后拒收（未加载）的新视频数
@@ -846,6 +855,23 @@ class App:
         ttk.Label(pad, text=source, foreground="#374151").grid(
             row=1, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
+        # ---- 功能授权（v2.0.19）：视频号 / 公众号文章视频 ----
+        # 公众号视频是**附加模块**，默认关闭，需专门授权码开启。
+        _has_vc = lic.has_feature(info, lic.FLAG_VIDEO_CHANNEL) or info is None
+        _has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
+        feat_row = ttk.Frame(pad)
+        feat_row.grid(row=1, column=2, columnspan=2, sticky="w",
+                      padx=(12, 0), pady=(0, 2))
+        ttk.Label(feat_row, text="功能：", foreground="#6b7280",
+                  font=("Microsoft YaHei UI", 8)).pack(side="left")
+        ttk.Label(feat_row, text="视频号✓",
+                  foreground="#0f766e" if _has_vc else "#9ca3af",
+                  font=("Microsoft YaHei UI", 8)).pack(side="left")
+        ttk.Label(feat_row, text="公众号视频" + ("✓" if _has_mp else "✗"),
+                  foreground="#0f766e" if _has_mp else "#b91c1c",
+                  font=("Microsoft YaHei UI", 8, "bold")
+                  ).pack(side="left", padx=(6, 0))
+
         # 当前授权码（完整显示，可框选复制；未授权时提示）
         ttk.Label(pad, text="当前授权码：").grid(row=2, column=0, sticky="e",
                                                  pady=(0, 8))
@@ -972,8 +998,19 @@ class App:
         self.cfg.save()
         self.push_log("ok", f"🔑 授权成功：档位 {config.label_of(info['tier'])}，"
                             + ("永久有效" if not info["days"]
-                               else f"{info['days']} 天（自首次激活）"))
+                               else f"{info['days']} 天（自首次激活）")
+                            + f"｜功能：{'、'.join(info.get('features') or [])}")
         self._apply_tier(info["tier"], reason="授权码解锁")
+        # ★ 激活上报（防盗版追溯，作者侧）。
+        # 总开关 sphdl/config.py 的 TELEMETRY_ENABLED 关闭时为空操作：
+        # 不采集指纹、不发请求、无日志。开启时后台线程发一次，超时 3 秒、
+        # 失败静默 —— 不影响界面、不影响客户使用（见 sphdl/telemetry.py）。
+        try:
+            from . import telemetry as _tel
+            _tel.report_activation(info["code"], version=__import__(
+                "sphdl").__version__)
+        except Exception:
+            pass
         return True
 
     # ---------------- 跨线程安全工具 ----------------
@@ -2413,6 +2450,81 @@ class App:
                  f"{hook_txt}   |   列表: 共 {total} 条 / 上限 {limit}"
                  f" · 待下载 {waiting} · 完成 {done} · 失败 {failed}{batch_txt}")
 
+    def _diagnose_no_traffic(self, now, a):
+        """「零流量」主动诊断（v2.0.19）。
+
+        触发条件：嗅探已启动 ≥60s，但**既无流活动、也无钩子数据、也无捕获**。
+        含义：流量根本没经过代理（而不是"注入了但没抓到"）。
+
+        为什么要分情况：这三种原因的解法完全不同，笼统说"抓不到"客户仍不会修。
+          A. 微信在启动嗅探前已打开 → 微信进程启动时读过一次代理配置，
+             之后不再读 → **必须完全退出微信再重开**
+          B. 抓的不是视频号（如公众号文章） → 本工具只抓视频号
+          C. 系统代理被锁/被改（企业版组策略、第三方代理软件）→ 需联系 IT
+
+        只提示一次（_no_traffic_warned），避免每 60s 刷屏；一旦有流量就复位，
+        下次再出现零流量可再次提示。
+        """
+        started = getattr(self, "_sniff_started_ts", 0) or 0
+        if not started or now - started < 60:
+            return
+        has_traffic = bool(a.last_stream_ts or a.last_bridge_ts or a.capture_count)
+        if has_traffic:
+            self._no_traffic_warned = False
+            return
+        if getattr(self, "_no_traffic_warned", False):
+            return
+        self._no_traffic_warned = True
+
+        # 补充判定：系统代理是否真的指向我们（读注册表，失败不影响提示）
+        proxy_ok, proxy_now = self._check_system_proxy()
+        lines = [
+            f"⚠️ 已运行 {int(now - started)} 秒，但**没有任何流量经过代理**"
+            f"（页面注入 0 次 / 流活动 无 / 捕获 0 个）。",
+            "这不是证书问题，而是微信的请求没走代理。按顺序检查：",
+            "",
+            "① ★最常见：微信是在「启动嗅探」之前就打开的",
+            "   → 请【完全退出微信】（托盘图标右键→退出，不是最小化）",
+            "   → 再点「启动嗅探」，等看到「代理已监听」",
+            "   → 然后重新打开微信、进视频号播放",
+            "",
+            "② 你打开的是「公众号文章」吗？",
+            "   本工具只抓【视频号】（微信→发现→视频号）；",
+            "   公众号文章里的视频抓不到（那是另一套域名/加密）。",
+            "",
+            "③ 公司电脑 / Win10 企业版：系统代理可能被 IT 组策略锁定",
+            "   → 请看上面「系统代理」状态；显示异常请联系 IT 放开。",
+            "   → 装了 Clash/VPN 等代理软件也会抢走系统代理，先退出它们。",
+        ]
+        if not proxy_ok:
+            lines.append("")
+            lines.append(f"★ 检测到系统代理当前为：{proxy_now or '(空)'}")
+            lines.append("   应为 127.0.0.1:8899。若不对：点「停止嗅探」再"
+                         "「启动嗅探」重设；仍不对多为安全软件/组策略拦截。")
+        self.push_log("warn", "\n".join(lines))
+
+    def _check_system_proxy(self):
+        """读 Windows 系统代理设置，返回 (是否指向本机嗅探端口, 当前值)。
+
+        只用于诊断提示，任何失败都返回 (True, '') —— 不因读不到就报警。
+        """
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+            try:
+                enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            finally:
+                winreg.CloseKey(key)
+            want = f"127.0.0.1:{config.PROXY_PORT}"
+            cur = str(server or "")
+            ok = bool(enable) and (want in cur.replace(" ", ""))
+            return ok, cur if enable else "(未启用)"
+        except Exception:
+            return True, ""
+
     def _hook_watchdog(self):
         """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
         任何钩子数据（心跳/数据）→ 页面大概率已重载/被回收、钩子丢失，
@@ -2440,6 +2552,11 @@ class App:
                 "务必先关闭再打开。")
         if not streaming or bridge_age < 90:
             self._hook_warned = False
+        # ★ v2.0.19「零流量」主动诊断：启动嗅探 60s 后仍无任何流量经过代理。
+        # 依据 2026-10-17 真实日志（用户 4 次重试、页面注入 0 次 / 流活动 无）：
+        # 客户只会看到"软件没反应"，却不知道是流量压根没走代理。
+        # 这里直接给出可操作的原因清单，减少客服往返。
+        self._diagnose_no_traffic(now, a)
         # 周期性心跳日志（60s 一条）：引擎/钩子健康状态可追溯
         if now - self._last_hb_log >= 60:
             self._last_hb_log = now

@@ -116,9 +116,26 @@ def cmd_gen(args):
     if args.note:
         log(f"# 客户/备注: {args.note}")
     label = lic.label_of_tier(tier)
+    # 功能位（v2.0.19）：不传 --feature 时保持原有行为（生成 ver=1 老码）
+    flags = 0
+    if getattr(args, "feature", None):
+        for f in args.feature:
+            k = f.strip().lower()
+            if k in ("mp", "mpvideo", "公众号", "公众号视频", "article"):
+                flags |= lic.FLAG_MP_ARTICLE_VIDEO
+            elif k in ("vc", "channel", "视频号"):
+                flags |= lic.FLAG_VIDEO_CHANNEL
+            elif k in ("all", "全部"):
+                flags |= lic.FLAG_ALL
+            else:
+                log(f"❌ 未知功能: {f}（可选 vc/视频号、mp/公众号、all）")
+                return 1
+        # ver=2 码一律含基础功能（视频号）
+        flags |= lic.FLAG_VIDEO_CHANNEL
+
     codes = []
     for _ in range(max(1, args.count)):
-        code = lic.make_code(tier, days=args.days)
+        code = lic.make_code(tier, days=args.days, flags=flags)
         codes.append(code)
         log(code)
     # 台账登记（作者侧追溯，见 tools/ledger.py）
@@ -129,13 +146,17 @@ def cmd_gen(args):
             L.append(code, tier, label, days=args.days,
                      customer=args.customer, contact=args.contact,
                      device=args.device, price=args.price,
-                     note=args.note, channel=args.channel)
+                     note=args.note, channel=args.channel,
+                     features=flags)
         p = L.ledger_path()
         log(f"📒 已登记台账 {len(codes)} 条 → {p}")
         if not args.customer and not args.note:
             log("   ⚠️ 未填 --customer/--note：建议补上，否则出事查不到是谁")
-    log(f"（档位: {label}｜有效期: "
-        f"{'永久' if not args.days else str(args.days) + ' 天自首次激活'}）")
+    feat_txt = ("、".join(lbl for bit, lbl in lic.FEATURE_LABELS.items()
+                          if flags & bit) or "视频号下载")
+    log(f"（档位: {label}｜功能: {feat_txt}｜有效期: "
+        f"{'永久' if not args.days else str(args.days) + ' 天自首次激活'}"
+        f"｜码型: {'ver=2' if flags else 'ver=1'}）")
     return 0
 
 
@@ -238,6 +259,9 @@ def main():
     p.add_argument("--device", default="", help="设备码（ver=2 绑定版用，暂未启用）")
     p.add_argument("--no-ledger", action="store_true",
                    help="不登记台账（默认登记；仅测试时用）")
+    p.add_argument("--feature", action="append", metavar="F",
+                   help="功能位（可多次）：vc=视频号 / mp=公众号文章视频 / "
+                        "all=两者。★不传则生成 ver=1 老码（仅视频号）")
     p.set_defaults(func=cmd_gen)
 
     p = sub.add_parser("ledger", help="查台账（追溯谁泄露了码）")

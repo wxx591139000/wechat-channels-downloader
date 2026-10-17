@@ -1,0 +1,30 @@
+[Unit]
+Description=sphdl License Telemetry (微信视频号下载器 激活上报)
+Documentation=https://github.com/wxx591139000/wechat-channels-downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sphdl-license
+# 管理令牌从文件读取，不写在 unit 里（避免 systemctl show 泄露）
+EnvironmentFile=/opt/sphdl-license/env
+ExecStart=/usr/bin/python3 /opt/sphdl-license/license_server.py --host 127.0.0.1 --port 3010
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/sphdl-license/data/server.log
+StandardError=append:/opt/sphdl-license/data/server.log
+
+# ---- 资源限制：绝不影响同机其他服务 ----
+MemoryMax=128M
+CPUQuota=25%
+# 隐私/安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/sphdl-license/data
+
+[Install]
+WantedBy=multi-user.target

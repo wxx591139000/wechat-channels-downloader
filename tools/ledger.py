@@ -40,7 +40,7 @@ def ledger_path() -> Path:
 def append(code: str, tier: int, tier_label: str, days: int = 0,
            customer: str = "", contact: str = "", device: str = "",
            price: str = "", note: str = "", channel: str = "",
-           path: Path = None) -> bool:
+           features: int = 0, path: Path = None) -> bool:
     """追加一条发码记录。返回是否写入成功。
 
     失败**不抛异常**（不能因为台账写不了就发不出码），但会打印告警，
@@ -58,6 +58,7 @@ def append(code: str, tier: int, tier_label: str, days: int = 0,
         "price": price,
         "note": note,
         "channel": channel,                 # 如「闲鱼」「微信」
+        "features": features,               # 功能位（0=ver1仅视频号）
         "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     try:

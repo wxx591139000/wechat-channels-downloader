@@ -45,6 +45,32 @@ _VERSION = 1
 _MSG_PREFIX = b"SPHDLv1"
 _OBF_MASK = b"sphdl-lic-v1"      # 与 tools/license_tool.py 保持一致
 
+# ---- ver=2 码型（v2.0.19 新增：带「功能位」，用于公众号视频等附加模块）----
+# 设计约束：**绝不能破坏已发出的 ver=1 码** → 两套码型并存，靠首字节 ver 分流。
+#
+#   ver=1（现有，继续有效）: 5B 载荷 + 10B MAC = 15B → 35 字符
+#      载荷: ver(1) | tier(1) | days//8(1) | rand(2)          ← 已占满，无空位
+#   ver=2（新）: 6B 载荷 + 10B MAC = 16B → 36 字符
+#      载荷: ver(1) | tier(1) | days//8(1) | flags(1) | rand(2)
+#      flags 位定义（bit0 起）:
+#          bit0 = 视频号下载（现有功能；ver=2 码一律置 1）
+#          bit1 = 公众号文章视频下载（★默认关闭，需专门发码开启）
+#          bit2~7 预留
+#   MAC 的消息前缀按 ver 区分（SPHDLv1 / SPHDLv2），防跨版本签名互窜。
+_VERSION2 = 2
+_V2_PAYLOAD_LEN = 6
+_V2_MSG_PREFIX = b"SPHDLv2"
+
+# 功能位（feature flags）
+FLAG_VIDEO_CHANNEL = 1 << 0        # 视频号（基础功能）
+FLAG_MP_ARTICLE_VIDEO = 1 << 1     # 公众号文章视频（附加模块，默认关）
+FLAG_ALL = FLAG_VIDEO_CHANNEL | FLAG_MP_ARTICLE_VIDEO
+
+FEATURE_LABELS = {
+    FLAG_VIDEO_CHANNEL: "视频号下载",
+    FLAG_MP_ARTICLE_VIDEO: "公众号文章视频下载",
+}
+
 
 def label_of_tier(tier: int) -> str:
     """档位展示名（轻量版 / 标准版 / 专业版 / 旗舰版）。"""
@@ -105,11 +131,13 @@ def b32decode(text: str) -> Optional[bytes]:
     return bytes(out)
 
 
-def _mac(payload: bytes) -> bytes:
+def _mac(payload: bytes, ver: int = 1) -> bytes:
+    """计算 MAC。**按 ver 用不同消息前缀**，防跨版本签名互窜。"""
     secret = get_secret()
     if not secret:
         return b"\x00" * _MAC_LEN
-    return hmac.new(secret, _MSG_PREFIX + payload, hashlib.sha256).digest()[:_MAC_LEN]
+    prefix = _V2_MSG_PREFIX if ver == _VERSION2 else _MSG_PREFIX
+    return hmac.new(secret, prefix + payload, hashlib.sha256).digest()[:_MAC_LEN]
 
 
 def _group(code: str) -> str:
@@ -118,11 +146,19 @@ def _group(code: str) -> str:
 
 
 # ---------------------------------------------------------------- 生成（作者侧）
-def make_code(tier: int, days: int = 0, rand: bytes = b"") -> str:
+def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0) -> str:
     """生成授权码（**仅作者侧使用**，依赖内置密钥；客户拿不到密钥）。
 
-    tier: 0/500/1000/2000；days: 有效天数（0=永久，按 8 天粒度取整）；
+    tier: 500/1000/2000/20000；days: 有效天数（0=永久，按 8 天粒度取整）；
     rand: 2 字节唯一性盐（默认用系统随机）。
+    flags: 功能位（0 = 生成 ver=1 老码；>0 = 生成 ver=2 新码）
+
+        flags=0                      → ver=1 码（35 字符，只有视频号基础功能）
+        flags=FLAG_VIDEO_CHANNEL     → ver=2 码（36 字符，视频号）
+        flags=FLAG_ALL               → ver=2 码（视频号 + 公众号文章视频）
+
+    ★ 只有显式传 flags 才生成 ver=2 码，**默认行为与 v2.0.18 完全一致**，
+      保证已发出的 ver=1 码和现有发码流程不受影响。
     """
     if tier not in TIER_TO_CODE:
         raise ValueError(f"不支持的档位: {tier}（可选 {sorted(TIER_TO_CODE)}）")
@@ -132,8 +168,16 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"") -> str:
     if len(rand) < 2:
         rand = os.urandom(2)
     days_step = min(255, max(0, int(days) // 8))     # 粒度 8 天，最多 2040 天
-    payload = bytes([_VERSION, TIER_TO_CODE[tier], days_step]) + rand[:2]
-    blob = payload + _mac(payload)
+
+    fl = int(flags) & 0xFF
+    if fl == 0:
+        # ---- ver=1（老码型，完全不变）----
+        payload = bytes([_VERSION, TIER_TO_CODE[tier], days_step]) + rand[:2]
+        blob = payload + _mac(payload, ver=_VERSION)
+    else:
+        # ---- ver=2（新码型，带功能位）----
+        payload = bytes([_VERSION2, TIER_TO_CODE[tier], days_step, fl]) + rand[:2]
+        blob = payload + _mac(payload, ver=_VERSION2)
     return f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"
 
 
@@ -141,8 +185,14 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"") -> str:
 def verify_code(code: str) -> Optional[dict]:
     """校验授权码。返回 dict 或 None（格式错/签名错/档位非法）。
 
-    返回: {"tier": 1000, "days": 0, "code": 规范化后的码, "ok": True}
-      days = 0 → 永久；>0 → 自首次激活起算的有效天数（由调用方记录激活时间）
+    返回: {"tier": 1000, "days": 0, "flags": 1, "features": [...],
+           "ver": 1, "code": "规范化后的码", "ok": True}
+      days  = 0 → 永久；>0 → 自首次激活起算的有效天数（由调用方记录激活时间）
+      flags = 功能位（ver=1 老码恒为 FLAG_VIDEO_CHANNEL，即只有视频号）
+      ver   = 码型版本（1 = 老码 / 2 = 带功能位的新码）
+
+    ★ 双码型分流：靠 blob[0] 判定，两套载荷长度与 MAC 前缀都不同，
+      互不干扰 —— 已发出的 ver=1 码在 v2.0.19 里继续有效。
     """
     if not code:
         return None
@@ -150,20 +200,48 @@ def verify_code(code: str) -> Optional[dict]:
     if t.upper().startswith(CODE_PREFIX):
         t = t[len(CODE_PREFIX) + 1:]
     blob = b32decode(t)
-    if not blob or len(blob) < _PAYLOAD_LEN + _MAC_LEN:
+    if not blob or len(blob) < 2:
         return None
-    payload, mac = blob[:_PAYLOAD_LEN], blob[_PAYLOAD_LEN:_PAYLOAD_LEN + _MAC_LEN]
-    if not hmac.compare_digest(mac, _mac(payload)):
-        return None
-    if payload[0] != _VERSION:
-        return None
-    tier_code = payload[1]
+
+    ver = blob[0]
+
+    if ver == _VERSION:
+        # ---- ver=1（老码，5B 载荷 + 10B MAC）----
+        if len(blob) < _PAYLOAD_LEN + _MAC_LEN:
+            return None
+        payload = blob[:_PAYLOAD_LEN]
+        mac = blob[_PAYLOAD_LEN:_PAYLOAD_LEN + _MAC_LEN]
+        if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION)):
+            return None
+        tier_code, days_step = payload[1], payload[2]
+        flags = FLAG_VIDEO_CHANNEL          # 老码 = 只有视频号基础功能
+    elif ver == _VERSION2:
+        # ---- ver=2（新码，6B 载荷 + 10B MAC，含功能位）----
+        if len(blob) < _V2_PAYLOAD_LEN + _MAC_LEN:
+            return None
+        payload = blob[:_V2_PAYLOAD_LEN]
+        mac = blob[_V2_PAYLOAD_LEN:_V2_PAYLOAD_LEN + _MAC_LEN]
+        if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION2)):
+            return None
+        tier_code, days_step, flags = payload[1], payload[2], payload[3]
+    else:
+        return None                          # 未知码型
+
     if tier_code not in CODE_TO_TIER:
         return None
     tier = CODE_TO_TIER[tier_code]
-    days = payload[2] * 8
-    return {"tier": tier, "days": days, "ok": True,
+    days = days_step * 8
+    feats = [lbl for bit, lbl in FEATURE_LABELS.items() if flags & bit]
+    return {"tier": tier, "days": days, "ok": True, "ver": ver,
+            "flags": flags, "features": feats,
             "code": f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"}
+
+
+def has_feature(info: Optional[dict], flag: int) -> bool:
+    """判断某授权是否含指定功能位（None / 无效授权一律 False）。"""
+    if not info:
+        return False
+    return bool(int(info.get("flags") or 0) & int(flag))
 
 
 def license_expired(days: int, activated_at: float) -> bool:
