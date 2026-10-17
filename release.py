@@ -181,15 +181,23 @@ def ensure_changelog_section(v: tuple, note: str = ""):
     CHANGELOG.write_text("\n".join(lines), encoding="utf-8")
 
 
-def build_frozen(v: tuple, force: bool, edition_sfx: str = ""):
-    out_dir = DIST / f"v{v[0]}.{v[1]}.{v[2]}" / f"{APP_DIR_NAME}{edition_sfx}"
+def build_frozen(v: tuple, force: bool, edition_sfx: str = "",
+                 dist_suffix: str = ""):
+    """构建冻结目录。
+
+    dist_suffix: 输出到 dist/v<版本><suffix>/，用于同一个版本号需要多次
+    构建时避免与上一次产物互相覆盖/争抢（Windows 上旧目录里的文件常被
+    杀软或残留句柄锁住，删不掉时会卡住整个构建）。
+    """
+    ver_dir = DIST / f"v{v[0]}.{v[1]}.{v[2]}{dist_suffix}"
+    out_dir = ver_dir / f"{APP_DIR_NAME}{edition_sfx}"
     if out_dir.exists() and not force:
         sys.exit(f"❌ {out_dir} 已存在（保留旧版本）。确认要覆盖请加 --force")
     log(f"📦 PyInstaller 构建 → {out_dir}")
     if WORK.exists():
         shutil.rmtree(WORK)
     run([sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm",
-         "--distpath", str(DIST / f"v{v[0]}.{v[1]}.{v[2]}"),
+         "--distpath", str(ver_dir),
          "--workpath", str(WORK)])
     return out_dir
 
@@ -249,8 +257,10 @@ def pii_scan(out_dir: Path):
     log("  ✅ PII 扫描通过")
 
 
-def make_share_zip(v: tuple, out_dir: Path, force: bool, edition_sfx: str = ""):
-    zip_path = DIST / (f"{ZIP_PREFIX}{v[0]}.{v[1]}.{v[2]}{edition_sfx}{ZIP_SUFFIX}")
+def make_share_zip(v: tuple, out_dir: Path, force: bool, edition_sfx: str = "",
+                   dist_suffix: str = ""):
+    zip_path = DIST / (f"{ZIP_PREFIX}{v[0]}.{v[1]}.{v[2]}{dist_suffix}"
+                       f"{edition_sfx}{ZIP_SUFFIX}")
     if zip_path.exists() and not force:
         sys.exit(f"❌ {zip_path} 已存在（保留旧版本）。确认要覆盖请加 --force")
     log(f"🗜️  分享版 zip → {zip_path}")
@@ -356,12 +366,14 @@ def build_one_edition(v: tuple, force: bool, locked, args,
     try:
         if not args.no_license:
             inject_license_key()
-        out_dir = build_frozen(v, force, sfx)
+        out_dir = build_frozen(v, force, sfx,
+                               dist_suffix=getattr(args, "dist_suffix", "") or "")
         verify_frozen(out_dir)
         verify_license_in_frozen(out_dir, expect=not args.no_license)
         stage_usage_instructions(out_dir, v)
         pii_scan(out_dir)
-        zip_path = make_share_zip(v, out_dir, force, sfx)
+        zip_path = make_share_zip(v, out_dir, force, sfx,
+                                  dist_suffix=getattr(args, "dist_suffix", "") or "")
     finally:
         restore_edition(original)
         cleanup_license_key()
@@ -395,6 +407,11 @@ def main():
     ap.add_argument("--patch", action="store_true")
     ap.add_argument("--no-bump", action="store_true")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--dist-suffix", default="",
+                    help="输出目录/包名后缀，如 '-b2' → dist/v2.0.19-b2/ 与 "
+                         "微信视频号下载器-v2.0.19-b2-win64-portable.zip。\n"
+                         "用于同版本号重复构建时避开被锁住的旧目录"
+                         "（Windows 上杀软/残留句柄常锁住 dist 里的文件）")
     ap.add_argument("--no-commit", action="store_true")
     ap.add_argument("--note", default="")
     ap.add_argument("--max-records", default=None, choices=sorted(EDITION_CLI),

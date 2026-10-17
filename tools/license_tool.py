@@ -106,36 +106,44 @@ def _same() -> bool:
 
 
 def cmd_gen(args):
-    tier = TIERS.get(str(args.tier).lower())
-    if tier is None:
-        log(f"❌ 未知档位: {args.tier}（可选 500/1000/2000/20000）")
-        return 1
+    # 先解析产品线（v2.0.19：视频号 4 档 / 公众号 1 个不分档）
+    flags = 0
+    for f in (getattr(args, "feature", None) or []):
+        k = f.strip().lower()
+        if k in ("mp", "mpvideo", "公众号", "公众号视频", "article"):
+            flags = lic.PRODUCT_MP_ARTICLE
+        elif k in ("vc", "channel", "视频号"):
+            flags = flags or lic.PRODUCT_VIDEO
+        elif k in ("all", "全部"):
+            log("❌ v2.0.19 起不再有「视频号+公众号」组合码：两类产品分开卖，"
+                "请分别用 --feature vc / --feature mp 发两个码")
+            return 1
+        else:
+            log(f"❌ 未知功能: {f}（可选 vc/视频号、mp/公众号）")
+            return 1
+
+    is_mp = (flags == lic.PRODUCT_MP_ARTICLE)
+
+    if is_mp:
+        # 公众号产品不分档：档位参数可以是 0 / mp / 任意值，统一按 0 处理
+        tier = 0
+        label = "公众号视频版（不分档）"
+    else:
+        tier = TIERS.get(str(args.tier).lower())
+        if tier is None:
+            log(f"❌ 未知档位: {args.tier}（可选 500/1000/2000/20000）")
+            return 1
+        label = lic.label_of_tier(tier)
+
     if not lic.license_available():
         log("❌ 未找到校验密钥，先生成: python tools/license_tool.py init")
         return 1
     if args.note:
         log(f"# 客户/备注: {args.note}")
-    label = lic.label_of_tier(tier)
-    # 功能位（v2.0.19）：不传 --feature 时保持原有行为（生成 ver=1 老码）
-    flags = 0
-    if getattr(args, "feature", None):
-        for f in args.feature:
-            k = f.strip().lower()
-            if k in ("mp", "mpvideo", "公众号", "公众号视频", "article"):
-                flags |= lic.FLAG_MP_ARTICLE_VIDEO
-            elif k in ("vc", "channel", "视频号"):
-                flags |= lic.FLAG_VIDEO_CHANNEL
-            elif k in ("all", "全部"):
-                flags |= lic.FLAG_ALL
-            else:
-                log(f"❌ 未知功能: {f}（可选 vc/视频号、mp/公众号、all）")
-                return 1
-        # ver=2 码一律含基础功能（视频号）
-        flags |= lic.FLAG_VIDEO_CHANNEL
 
     codes = []
     for _ in range(max(1, args.count)):
-        code = lic.make_code(tier, days=args.days, flags=flags)
+        code = lic.make_code(tier, days=args.days, product=flags)
         codes.append(code)
         log(code)
     # 台账登记（作者侧追溯，见 tools/ledger.py）
