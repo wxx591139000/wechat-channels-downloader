@@ -2430,14 +2430,45 @@ class App:
             messagebox.showerror("端口无效", "请输入 1-65535 的端口号")
             return
         auto = bool(self.auto_var.get())
-        # CA 证书检查
+        # ★ CA 证书检查（2026-10-17 修死循环）
+        #
+        #   原逻辑：CA 未装 → 弹窗问"要装吗" → 用户点"是" → 拉起向导 + return
+        #   → **嗅探没启动** → mitmproxy 不生成 CA → 向导找不到证书文件
+        #   → 装不上 → 回来再点启动 → 又是未装 → 死循环。
+        #   客户实测就卡在这里（看到空白命令行 + "未安装"）。
+        #
+        #   新逻辑：**先让嗅探启动**（它会在几秒内生成 CA），再提示去装。
+        #   这样证书文件必然存在，向导一定能成功。
         if self.ca_state == "missing":
-            if messagebox.askyesno("CA 证书未安装",
-                                   "检测到未安装 mitmproxy CA 证书。\n"
-                                   "不安装则 HTTPS 流量无法解密，嗅探大概率失败。\n\n"
-                                   "现在打开证书安装向导吗？"):
-                self._launch_cert_wizard()
-                return
+            if not self._ca_file_exists():
+                # 证书还没生成 → 必须先启动嗅探
+                self.push_log(
+                    "info", "ℹ 首次使用：先启动嗅探生成证书，再点【安装/检测】安装")
+                try:
+                    messagebox.showinfo(
+                        "首次使用：顺序很重要",
+                        "第一次使用需要装一个证书，但证书要等嗅探启动后才会生成。\n\n"
+                        "所以顺序是：\n"
+                        "  1️⃣ 现在点【确定】→ 嗅探会自动启动\n"
+                        "  2️⃣ 等 3~5 秒（证书在这时生成）\n"
+                        "  3️⃣ 点【安装/检测】→ 按提示点【是】\n"
+                        "  4️⃣ 装好后就能正常抓视频了\n\n"
+                        "（放心：这一步只是生成本机证书，不影响其它网站。）",
+                        parent=self.root)
+                except Exception:
+                    pass
+            else:
+                # 证书文件已存在但没装 → 可以现在就装（也可以先启动，都行）
+                if messagebox.askyesno(
+                        "CA 证书未安装",
+                        "检测到 mitmproxy CA 证书还没安装。\n"
+                        "不安装则 HTTPS 流量无法解密，嗅探大概率失败。\n\n"
+                        "现在就安装吗？\n"
+                        "（点「否」则先启动嗅探，稍后再点【安装/检测】）",
+                        parent=self.root):
+                    self._launch_cert_wizard()
+                    # ★ 注意：这里**不再 return** —— 用户装完回来可以直接用，
+                    #   但当前这次点击也让他继续启动，避免"装完还要再点一次"。
         self.btn_engine.config(state="disabled", text="启动中…")
         self.cfg.port, self.cfg.auto_proxy = port, auto
         self.cfg.save()
@@ -2485,7 +2516,49 @@ class App:
         self.ca_label.config(text=txt, foreground=color)
         self._update_status_bar()
 
+    def _ca_file_exists(self) -> bool:
+        """mitmproxy 的 CA 证书文件是否已生成。
+
+        ★ 为什么需要先查这个（2026-10-17 客户实测踩坑）：
+          mitmproxy 的 CA 是**第一次启动嗅探时**才生成到
+          %USERPROFILE%\\.mitmproxy\\ 的。如果用户在启动嗅探前就点
+          「安装/检测」，脚本找不到证书文件 → 弹出一个空白/报错的命令行，
+          用户完全不知道为什么（只会看到"未安装"）。
+          所以在拉起向导前先判断，没生成就直接给出**可操作的指引**。
+        """
+        try:
+            base = Path.home() / ".mitmproxy"
+            for nm in ("mitmproxy-ca-cert.pem", "mitmproxy-ca-cert.cer"):
+                if (base / nm).exists():
+                    return True
+        except Exception:
+            pass
+        try:
+            return (BASE_DIR / "ca.pem").exists()
+        except Exception:
+            return False
+
     def _on_cert_btn(self):
+        # 先检查证书文件是否已生成 —— 没有就别拉起必然失败的向导
+        if not self._ca_file_exists():
+            self.push_log(
+                "warn", "⚠ 还没有 CA 证书文件 —— 请先点【▶ 启动嗅探】并等 3~5 秒，"
+                        "证书会自动生成，然后回来点【安装/检测】")
+            try:
+                messagebox.showinfo(
+                    "请先启动嗅探，再装证书",
+                    "还没有生成 CA 证书文件。\n\n"
+                    "这是正常现象：证书要等软件**第一次启动嗅探**时才会自动生成。\n\n"
+                    "请按这个顺序操作：\n"
+                    "  1️⃣ 点【▶ 启动嗅探】（就在这个按钮上面）\n"
+                    "  2️⃣ 等 3~5 秒（此时会自动生成证书）\n"
+                    "  3️⃣ 再回来点【安装/检测】\n\n"
+                    "本机证书目录：\n"
+                    f"{Path.home() / '.mitmproxy'}",
+                    parent=self.root)
+            except Exception:
+                pass
+            return                       # ★ 不拉导向导
         threading.Thread(target=self._check_ca, daemon=True).start()
         self._launch_cert_wizard()
 
@@ -2503,7 +2576,9 @@ class App:
         except Exception as e:
             self.push_log("error", f"无法启动证书安装向导: {e}")
             return
-        self.push_log("info", "已打开证书安装向导：按向导 5 步完成安装后，回来点『安装/检测』确认")
+        self.push_log(
+            "info", "已打开证书安装向导（3 步）：按窗口提示操作，"
+                    "遇到 Windows 安全警告点【是】；完成后回来点【安装/检测】确认")
 
     # ---------------- 下载目录 ----------------
     def _choose_dir(self):
