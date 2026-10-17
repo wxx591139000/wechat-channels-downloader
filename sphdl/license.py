@@ -45,31 +45,45 @@ _VERSION = 1
 _MSG_PREFIX = b"SPHDLv1"
 _OBF_MASK = b"sphdl-lic-v1"      # 与 tools/license_tool.py 保持一致
 
-# ---- ver=2 码型（v2.0.19 新增：带「功能位」，用于公众号视频等附加模块）----
+# ---- ver=2 码型（v2.0.19：带「产品线」，视频号 / 公众号 分开卖）----
 # 设计约束：**绝不能破坏已发出的 ver=1 码** → 两套码型并存，靠首字节 ver 分流。
+#
+#   产品线模型（v2.0.19 定稿，共 5 个独立产品）：
+#     · 视频号 4 档：轻量版500 / 标准版1000 / 专业版2000 / 旗舰版20000
+#     · 公众号视频 1 个：不分档（解析+下载，无列表上限概念）
+#   一个码只解锁**一条产品线**，互不叠加 —— 客户买哪个发哪个，
+#   视频号码不能下公众号，公众号码也不能抓视频号。
 #
 #   ver=1（现有，继续有效）: 5B 载荷 + 10B MAC = 15B → 35 字符
 #      载荷: ver(1) | tier(1) | days//8(1) | rand(2)          ← 已占满，无空位
-#   ver=2（新）: 6B 载荷 + 10B MAC = 16B → 36 字符
-#      载荷: ver(1) | tier(1) | days//8(1) | flags(1) | rand(2)
-#      flags 位定义（bit0 起）:
-#          bit0 = 视频号下载（现有功能；ver=2 码一律置 1）
-#          bit1 = 公众号文章视频下载（★默认关闭，需专门发码开启）
-#          bit2~7 预留
+#      ★ 语义：只有视频号（基础产品），flags 隐含 = PRODUCT_VIDEO
+#   ver=2（新）: 6B 载荷 + 10B MAC = 16B → 38 字符
+#      载荷: ver(1) | tier(1) | days//8(1) | product(1) | rand(2)
+#      product 取值见 PRODUCT_* 常量
 #   MAC 的消息前缀按 ver 区分（SPHDLv1 / SPHDLv2），防跨版本签名互窜。
 _VERSION2 = 2
 _V2_PAYLOAD_LEN = 6
 _V2_MSG_PREFIX = b"SPHDLv2"
 
-# 功能位（feature flags）
-FLAG_VIDEO_CHANNEL = 1 << 0        # 视频号（基础功能）
-FLAG_MP_ARTICLE_VIDEO = 1 << 1     # 公众号文章视频（附加模块，默认关）
-FLAG_ALL = FLAG_VIDEO_CHANNEL | FLAG_MP_ARTICLE_VIDEO
+# 产品线（v2.0.19：视频号 4 档 + 公众号 1 个，共 5 个独立产品）
+PRODUCT_VIDEO = 1          # 视频号下载（基础产品，4 档位）
+PRODUCT_MP_ARTICLE = 2     # 公众号文章视频下载（不分档）
 
-FEATURE_LABELS = {
-    FLAG_VIDEO_CHANNEL: "视频号下载",
-    FLAG_MP_ARTICLE_VIDEO: "公众号文章视频下载",
+PRODUCT_LABELS = {
+    PRODUCT_VIDEO: "视频号下载",
+    PRODUCT_MP_ARTICLE: "公众号文章视频下载",
 }
+
+# 兼容旧代码：把「产品」映射成「功能位」（内部判定仍用位掩码，便于扩展）
+FLAG_VIDEO_CHANNEL = PRODUCT_VIDEO            # 1
+FLAG_MP_ARTICLE_VIDEO = PRODUCT_MP_ARTICLE    # 2
+FLAG_ALL = 3
+
+FEATURE_LABELS = PRODUCT_LABELS
+
+# 公众号产品没有「列表上限」概念，用它表示"不分档"的 tier 值。
+# 仅用于码内校验合法性，不参与 max_records 计算。
+TIER_MP_ANY = 0
 
 
 def label_of_tier(tier: int) -> str:
@@ -146,22 +160,37 @@ def _group(code: str) -> str:
 
 
 # ---------------------------------------------------------------- 生成（作者侧）
-def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0) -> str:
+def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
+              product: int = 0) -> str:
     """生成授权码（**仅作者侧使用**，依赖内置密钥；客户拿不到密钥）。
 
-    tier: 500/1000/2000/20000；days: 有效天数（0=永久，按 8 天粒度取整）；
-    rand: 2 字节唯一性盐（默认用系统随机）。
-    flags: 功能位（0 = 生成 ver=1 老码；>0 = 生成 ver=2 新码）
+    tier: 视频号档位 500/1000/2000/20000；公众号产品传 0（不分档）
+    days: 有效天数（0=永久，按 8 天粒度取整）
+    rand: 2 字节唯一性盐（默认用系统随机）
+    flags / product: 指定产品线
 
-        flags=0                      → ver=1 码（35 字符，只有视频号基础功能）
-        flags=FLAG_VIDEO_CHANNEL     → ver=2 码（36 字符，视频号）
-        flags=FLAG_ALL               → ver=2 码（视频号 + 公众号文章视频）
+        flags=0, product=0                     → ver=1 码（35字符，视频号）
+        product=PRODUCT_VIDEO, tier=档位        → ver=2 码（38字符，视频号）
+        product=PRODUCT_MP_ARTICLE, tier=0      → ver=2 码（38字符，公众号）
 
-    ★ 只有显式传 flags 才生成 ver=2 码，**默认行为与 v2.0.18 完全一致**，
-      保证已发出的 ver=1 码和现有发码流程不受影响。
+    ★ v2.0.19：**一个码只解锁一条产品线**（不再有 all 组合码）。
+      flags 参数保留仅为向后兼容，等价于 product。
     """
-    if tier not in TIER_TO_CODE:
-        raise ValueError(f"不支持的档位: {tier}（可选 {sorted(TIER_TO_CODE)}）")
+    prod = int(product or flags or 0)
+
+    # 产品合法性 + 档位归一
+    if prod in (0, PRODUCT_VIDEO):
+        if tier not in TIER_TO_CODE:
+            raise ValueError(f"不支持的档位: {tier}（可选 {sorted(TIER_TO_CODE)}）")
+        prod = PRODUCT_VIDEO
+        tier_code = TIER_TO_CODE[tier]
+    elif prod == PRODUCT_MP_ARTICLE:
+        # 公众号产品不分档：tier 固定为 0，忽略调用方传入的档位
+        tier = 0
+        tier_code = 0
+    else:
+        raise ValueError(f"不支持的产品线: {prod}（可选 1=视频号 / 2=公众号）")
+
     if not get_secret():
         raise RuntimeError("未注入授权密钥（sphdl/_lic_key.py 缺失）→ 无法生成授权码")
     import os
@@ -169,14 +198,13 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0) -> st
         rand = os.urandom(2)
     days_step = min(255, max(0, int(days) // 8))     # 粒度 8 天，最多 2040 天
 
-    fl = int(flags) & 0xFF
-    if fl == 0:
-        # ---- ver=1（老码型，完全不变）----
-        payload = bytes([_VERSION, TIER_TO_CODE[tier], days_step]) + rand[:2]
+    if prod == PRODUCT_VIDEO and flags in (0,) and product in (0,):
+        # ---- ver=1（老码型，完全不变；语义=视频号）----
+        payload = bytes([_VERSION, tier_code, days_step]) + rand[:2]
         blob = payload + _mac(payload, ver=_VERSION)
     else:
-        # ---- ver=2（新码型，带功能位）----
-        payload = bytes([_VERSION2, TIER_TO_CODE[tier], days_step, fl]) + rand[:2]
+        # ---- ver=2（新码型，含产品线）----
+        payload = bytes([_VERSION2, tier_code, days_step, prod]) + rand[:2]
         blob = payload + _mac(payload, ver=_VERSION2)
     return f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"
 
@@ -214,34 +242,62 @@ def verify_code(code: str) -> Optional[dict]:
         if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION)):
             return None
         tier_code, days_step = payload[1], payload[2]
-        flags = FLAG_VIDEO_CHANNEL          # 老码 = 只有视频号基础功能
+        product = PRODUCT_VIDEO             # ★老码语义 = 视频号
     elif ver == _VERSION2:
-        # ---- ver=2（新码，6B 载荷 + 10B MAC，含功能位）----
+        # ---- ver=2（新码，6B 载荷 + 10B MAC，含产品线）----
         if len(blob) < _V2_PAYLOAD_LEN + _MAC_LEN:
             return None
         payload = blob[:_V2_PAYLOAD_LEN]
         mac = blob[_V2_PAYLOAD_LEN:_V2_PAYLOAD_LEN + _MAC_LEN]
         if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION2)):
             return None
-        tier_code, days_step, flags = payload[1], payload[2], payload[3]
+        tier_code, days_step, product = payload[1], payload[2], payload[3]
+        if product not in PRODUCT_LABELS:
+            return None
     else:
         return None                          # 未知码型
 
-    if tier_code not in CODE_TO_TIER:
-        return None
-    tier = CODE_TO_TIER[tier_code]
+    # 档位合法性：视频号必须是 4 档之一；公众号固定 0
+    if product == PRODUCT_VIDEO:
+        if tier_code not in CODE_TO_TIER:
+            return None
+        tier = CODE_TO_TIER[tier_code]
+    else:
+        if tier_code != 0:
+            return None                      # 公众号码带了档位 → 非法
+        tier = 0
+
     days = days_step * 8
-    feats = [lbl for bit, lbl in FEATURE_LABELS.items() if flags & bit]
     return {"tier": tier, "days": days, "ok": True, "ver": ver,
-            "flags": flags, "features": feats,
+            "product": product,
+            "flags": product,                # 兼容旧字段名
+            "features": [PRODUCT_LABELS[product]],
             "code": f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"}
 
 
 def has_feature(info: Optional[dict], flag: int) -> bool:
-    """判断某授权是否含指定功能位（None / 无效授权一律 False）。"""
+    """判断该授权是否属于某产品线（None / 无效授权一律 False）。
+
+    ★ v2.0.19：**一条产品线互斥** —— 视频号码不含公众号，反之亦然。
+    """
     if not info:
         return False
-    return bool(int(info.get("flags") or 0) & int(flag))
+    return int(info.get("product") or info.get("flags") or 0) == int(flag)
+
+
+def is_mp_product(info: Optional[dict]) -> bool:
+    """是否公众号产品（不分档）。"""
+    return has_feature(info, PRODUCT_MP_ARTICLE)
+
+
+def label_of_product(info: Optional[dict]) -> str:
+    """产品展示名（给界面用）。"""
+    if not info:
+        return "未授权"
+    p = int(info.get("product") or 0)
+    if p == PRODUCT_MP_ARTICLE:
+        return "公众号视频版（不分档）"
+    return label_of_tier(info.get("tier") or 0)
 
 
 def license_expired(days: int, activated_at: float) -> bool:

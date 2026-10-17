@@ -73,10 +73,12 @@ try:
     import importlib
     importlib.reload(lic)
 
-    CODE_BASIC = lic.make_code(20000, flags=0)                  # ver=1
-    CODE_FULL = lic.make_code(20000, flags=lic.FLAG_ALL)        # ver=2 all
-    print(f"测试码 基础版: {CODE_BASIC}")
-    print(f"测试码 完整版: {CODE_FULL}")
+    CODE_BASIC = lic.make_code(20000, flags=0)                        # ver=1 视频号
+    CODE_V2 = lic.make_code(20000, product=lic.PRODUCT_VIDEO)         # ver=2 视频号
+    CODE_MP = lic.make_code(0, product=lic.PRODUCT_MP_ARTICLE)        # ver=2 公众号
+    print(f"测试码 视频号ver1: {CODE_BASIC}")
+    print(f"测试码 视频号ver2: {CODE_V2}")
+    print(f"测试码 公众号:     {CODE_MP}")
 
     app = make_app(tmpdir)
     pump(app, 400)
@@ -128,18 +130,33 @@ try:
 
     # ---------- G4/G5 完整版码 → 解锁 ----------
     print("\n" + "=" * 74)
-    print("G4/G5 完整版码（ver=2 all）→ 解锁 + 实时刷新")
+    print("G4/G5 公众号码（ver=2 product=2）→ 解锁 + 实时刷新")
     print("=" * 74)
-    ok = app._activate_license(CODE_FULL)
+    ok = app._activate_license(CODE_MP)
     pump(app, 300)
-    check("G4a 完整版码激活成功", ok is True)
+    check("G4a 公众号码激活成功", ok is True)
     check("G4b ★换码后按钮立即解锁（无需重启）",
           "🔒" not in app.btn_mp.cget("text"), app.btn_mp.cget("text"))
     check("G4c _refresh_mp_button 返回 True",
           app._refresh_mp_button() is True)
     info = app._license_info()
     check("G4d 授权信息含公众号功能",
-          lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO), str(info.get("features")))
+          lic.has_feature(info, lic.PRODUCT_MP_ARTICLE), str(info.get("features")))
+
+    # ---------- G4b2 视频号 ver=2 码也不解锁公众号（产品互斥） ----------
+    print("\n" + "=" * 74)
+    print("G4b2 ★产品互斥：视频号 ver=2 码不解锁公众号")
+    print("=" * 74)
+    app._activate_license(CODE_V2)
+    pump(app, 300)
+    check("G4b2a 视频号 ver=2 码激活成功", True)
+    check("G4b2b ★公众号按钮仍带 🔒（互斥生效）",
+          "🔒" in app.btn_mp.cget("text"), app.btn_mp.cget("text"))
+    check("G4b2c 档位为 20000", app.store.max_records == 20000,
+          str(app.store.max_records))
+    # 换回公众号码继续后面的测试
+    app._activate_license(CODE_MP)
+    pump(app, 300)
 
     # ---------- G7 解析窗口能打开 ----------
     print("\n" + "=" * 74)

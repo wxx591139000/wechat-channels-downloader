@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import tkinter as tk
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -251,6 +252,9 @@ class Record:
     video_id: str = ""   # 稳定视频标识（md5sum），用于跨会话去重
     renditions: list = field(default_factory=list)  # [{url,size,width,height,bitrate,label}]
     quality_note: str = ""  # 清晰度说明（spec 档位阶梯，仅展示用）
+    # v2.0.19：来源平台，用于统一清单里区分/筛选
+    #   "视频号"（默认，嗅探捕获） / "公众号"（文章解析）
+    platform: str = "视频号"
 
 
 class RecordStore:
@@ -282,8 +286,11 @@ class RecordStore:
                 kw = {k: d.get(k, "") for k in
                       ("id", "title", "url", "decode_key", "size",
                        "source", "created", "status", "file", "error",
-                       "progress", "is_image", "video_id", "quality_note")}
+                       "progress", "is_image", "video_id", "quality_note",
+                       "platform")}
                 kw["renditions"] = d.get("renditions") or []
+                if not kw.get("platform"):
+                    kw["platform"] = "视频号"   # 老数据默认视频号
                 r = Record(**kw)
                 # 上次退出时正在处理中的，标记为失败；
                 # "waiting"（还没开始下载）保持不变，重启后仍可点选下载
@@ -302,28 +309,56 @@ class RecordStore:
         """列表是否已达档位上限。
 
         v2.0.17 定稿：4 档全部为确定数值（无「不限量」概念），
-        max_records 恒为正数，达到即满。"""
-        return self.max_records > 0 and len(self.order) >= self.max_records
+        max_records 恒为正数，达到即满。
+
+        ★ v2.0.19：**只统计视频号记录**。公众号视频是独立产品（不分档），
+          不占用视频号的档位名额，否则买了轻量版的客户解析几十个公众号
+          视频后，视频号就再也抓不进来了。
+        """
+        if self.max_records <= 0:
+            return False
+        n = sum(1 for rid in self.order
+                if (getattr(self.items.get(rid), "platform", "视频号")
+                    or "视频号") == "视频号")
+        return n >= self.max_records
 
     def _trim_to_limit(self) -> list:
         """把超出档位的部分裁掉（只可能发生在**下调档位**时）。
 
         返回被裁掉的 **Record 对象** 列表——返回对象而非 id，是因为记录已从
         items 删除、取不回 video_id，而 GUI 必须用它清去重索引（v2.0.17）。
+
+        ★ v2.0.19：**只统计/裁剪视频号记录**。公众号视频是独立产品（不分档），
+          既不占用档位名额，也不该在下调档位时被误删。
         """
         removed = []
         if self.max_records > 0:
-            while len(self.order) > self.max_records:
-                old = self.order.pop()
-                rec = self.items.pop(old, None)
-                if rec is not None:
-                    removed.append(rec)
+            def _is_video(rid):
+                r = self.items.get(rid)
+                return r is not None and (getattr(r, "platform", "视频号")
+                                          or "视频号") == "视频号"
+            while sum(1 for x in self.order if _is_video(x)) > self.max_records:
+                # 从最旧的一端找第一条视频号记录裁掉
+                for rid in reversed(self.order):
+                    if _is_video(rid):
+                        self.order.remove(rid)
+                        rec = self.items.pop(rid, None)
+                        if rec is not None:
+                            removed.append(rec)
+                        break
+                else:
+                    break
         return removed
 
     def add(self, rec: Record) -> bool:
         """新记录入列表头。**已满则拒收**（v2.0.17：满档 = 不再加载后续视频，
-        不顶掉已有记录），返回是否入库成功。"""
-        if self.is_full():
+        不顶掉已有记录），返回是否入库成功。
+
+        ★ v2.0.19：满档只对**视频号**生效。公众号视频是独立产品（不分档），
+          即使视频号已满也必须能入库 —— 否则客户买了公众号版却加不进去。
+        """
+        is_video = (getattr(rec, "platform", "视频号") or "视频号") == "视频号"
+        if is_video and self.is_full():
             return False
         self.items[rec.id] = rec
         self.order.insert(0, rec.id)
@@ -1333,11 +1368,16 @@ class App:
         btns1 = ttk.Frame(listf)   # 下载操作
         btns1.pack(side="bottom", fill="x", pady=(6, 2))
 
-        cols = ("status", "title", "size", "source", "time", "file")
+        # v2.0.19：新增「来源」列（platform）用于区分 视频号/公众号。
+        # 列宽按实际内容调过：状态列要容下「下载中 100%」，文件列要容下
+        # 常见中文文件名（原来太窄会被窗口右边缘截断）。
+        cols = ("status", "title", "platform", "size", "source", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
-        heads = {"status": ("状态", 110), "title": ("标题", 250), "size": ("大小", 80),
-                 "source": ("来源", 150), "time": ("时间", 90), "file": ("文件", 190)}
+        heads = {"status": ("状态", 120), "title": ("标题", 215),
+                 "platform": ("来源", 92), "size": ("大小", 82),
+                 "source": ("捕获方式", 115), "time": ("时间", 85),
+                 "file": ("文件", 215)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
             self.tree.heading(c, text=heads[c][0],
@@ -1357,6 +1397,8 @@ class App:
         self.tree.tag_configure("tag_stopped", foreground="#9ca3af")
         self.tree.bind("<Double-1>", self._on_tree_dclick)
         self.tree.bind("<Control-a>", lambda e: self._select_all())
+        # v2.0.19：鼠标移到「来源」列表头时提示「双击可筛选」（见 _on_tree_motion）
+        self.tree.bind("<Motion>", self._on_tree_motion)
 
         # ---- 工具栏 A：下载操作 ----
         self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=10,
@@ -2106,7 +2148,21 @@ class App:
         self._dirty = True
         self.push_log("info", f"已清空 {len(failed)} 条失败记录")
 
-    def _on_tree_dclick(self, _evt):
+    def _on_tree_dclick(self, evt):
+        # ★ v2.0.19：双击「来源」列的单元格 → 按该来源筛选清单
+        #   （不只作用于被双击的那一行，而是筛出该类全部记录，便于批量操作）
+        try:
+            col = self.tree.identify_column(evt.x)
+            row = self.tree.identify_row(evt.y)
+            if row and col == "#3":          # 第 3 列 = platform（来源）
+                vals = self.tree.item(row, "values")
+                plat_cell = str(vals[2]) if len(vals) > 2 else ""
+                plat = "公众号" if "公众号" in plat_cell else "视频号"
+                self._filter_by_platform(plat)
+                return
+        except Exception:
+            pass
+
         rid = self._selected_rid()
         if not rid:
             return
@@ -2126,6 +2182,72 @@ class App:
             else:
                 messagebox.showinfo("已停止", "该视频已被手动停止。"
                                       "\n点『重试失败』或『下载选中』可重新下载")
+
+    def _on_tree_motion(self, evt):
+        """鼠标移到「来源」列时，把光标变手型并给一行提示（v2.0.19）。
+
+        目的是让用户**发现**"双击来源列可以筛选"这个操作 —— 光靠
+        status_bar 的一句文字很多人看不到。这里在鼠标进入该列时
+        直接把提示打到状态栏（频率限制，避免抖动）。
+        """
+        try:
+            col = self.tree.identify_column(evt.x)
+            region = self.tree.identify_region(evt.x, evt.y)
+        except Exception:
+            return
+        if col != "#3":
+            return
+        now = time.time()
+        if now - getattr(self, "_plat_hint_at", 0) < 3:
+            return
+        self._plat_hint_at = now
+        cur = getattr(self, "_platform_filter", "")
+        if cur:
+            msg = (f"💡 当前已筛选「{cur}」。双击任意「来源」单元格可切换/取消筛选")
+        else:
+            msg = "💡 双击「来源」列的任意单元格，可按 视频号 / 公众号 筛选清单"
+        try:
+            self.push_log("info", msg)
+        except Exception:
+            pass
+
+    def _filter_by_platform(self, plat: str):
+        """按来源筛选清单（v2.0.19）。
+
+        plat: "视频号" / "公众号" / ""（空 = 取消筛选，显示全部）
+        筛选只是**视图过滤**，不删除任何记录；下载/删除等操作仍作用于
+        当前可见行（选中行必然可见）。
+        """
+        self._platform_filter = plat or ""
+        self._render_filtered_tree()
+        if self._platform_filter:
+            n = sum(1 for r in self.store.items.values()
+                    if (r.platform or "视频号") == self._platform_filter)
+            self.push_log(
+                "info",
+                f"🔍 已筛选来源＝{self._platform_filter}（{n} 条）。"
+                "再双击「来源」列的任意行，或点状态栏「显示全部」可取消筛选。")
+        else:
+            self.push_log("info", "🔍 已取消来源筛选，显示全部记录")
+        self._update_status_bar()
+
+    def _render_filtered_tree(self):
+        """按当前 platform 筛选重绘清单（仅重绘可见行）。"""
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        self._row_of.clear()
+        flt = getattr(self, "_platform_filter", "")
+        for rid in self.store.order:
+            r = self.store.items.get(rid)
+            if r is None:
+                continue
+            if flt and (r.platform or "视频号") != flt:
+                continue
+            iid = self.tree.insert(
+                "", "end", values=self._row_values(r),
+                tags=(STATUS_TAG.get(r.status, "tag_pending"),))
+            self._row_of[r.id] = iid
+        self._apply_sort()
 
     # ---------------- 日志 ----------------
     def _append_log(self, level, msg):
@@ -2172,9 +2294,23 @@ class App:
         title = r.title or "(无标题)"
         if r.is_image:
             title = "🖼 " + title  # 图片帖（不是视频），避免误以为是视频
-        return (st, title,
+        # v2.0.19：platform 列区分来源（视频号 / 公众号）
+        #   前面加图标，一眼分辨；双击该单元格可按来源筛选（见 _on_tree_dclick）
+        plat = r.platform or "视频号"
+        plat_cell = ("📄 公众号" if plat == "公众号" else "🎬 视频号")
+        # 文件名过长时中间省略（保留扩展名），避免右侧被硬切掉一半看不出是什么
+        fname = ""
+        if r.file:
+            fname = Path(r.file).name
+            if len(fname) > 22:
+                stem, dot, ext = fname.rpartition(".")
+                if dot and len(ext) <= 5:
+                    fname = stem[:14] + "…" + ext
+                else:
+                    fname = fname[:20] + "…"
+        return (st, title, plat_cell,
                 format_size(r.size) if r.size else "-",
-                r.source, r.created[5:], Path(r.file).name if r.file else "")
+                r.source, r.created[5:], fname)
 
     def _update_row(self, rid):
         r = self.store.items.get(rid)
@@ -2324,6 +2460,8 @@ class App:
             return (r.created, r.id)
         if col == "title":
             return ((r.title or "").casefold(), r.created, r.id)
+        if col == "platform":
+            return ((r.platform or "视频号"), r.created, r.id)
         if col == "source":
             return ((r.source or "").casefold(), r.created, r.id)
         if col == "file":
@@ -2485,10 +2623,18 @@ class App:
             batch_txt = (f"   |   ⚡批量: "
                          f"{'拉取中' if self.addon._batch_active else '待重进页面'}"
                          f"(+{self.addon.batch_count})")
+        # v2.0.19：状态栏显示当前来源筛选状态（有筛选时给出条目数与取消入口）
+        flt = getattr(self, "_platform_filter", "")
+        filter_txt = ""
+        if flt:
+            shown = sum(1 for r in self.store.items.values()
+                        if (r.platform or "视频号") == flt)
+            filter_txt = f"   |   🔍来源={flt}（{shown}/{total} 条）· 双击来源列可取消"
         self.status_bar.config(
             text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
                  f"{hook_txt}   |   列表: 共 {total} 条 / 上限 {limit}"
-                 f" · 待下载 {waiting} · 完成 {done} · 失败 {failed}{batch_txt}")
+                 f" · 待下载 {waiting} · 完成 {done} · 失败 {failed}"
+                 f"{batch_txt}{filter_txt}")
 
     def _diagnose_no_traffic(self, now, a):
         """「零流量」主动诊断（v2.0.19）。
@@ -2565,127 +2711,125 @@ class App:
         except Exception:
             return True, ""
 
+
     def _refresh_mp_button(self):
-        """刷新「📄 公众号视频」按钮外观（v2.0.19）。
+        """刷新「📄 公众号视频」按钮外观。
 
-        授权了 → 正常可点；未授权 → 显示 🔒 但**仍可点**（点了给解锁引导，
+        授权了 → 正常；未授权 → 显示 🔒 但**仍可点**（点了给解锁引导，
         比禁用更利于客户理解与成交）。
-
-        ⚠️ 安全性：本方法可能在 UI 尚未构建完成时被调用（如启动期
-        _activate_license 恢复授权），因此对 btn_mp 做存在性保护。
         """
         if getattr(self, "btn_mp", None) is None:
             return False
         try:
             info = self._license_info()
-            has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
+            has_mp = lic.has_feature(info, lic.PRODUCT_MP_ARTICLE)
         except Exception:
             has_mp = False
         try:
-            if has_mp:
-                self.btn_mp.config(text="📄 公众号视频", state="normal")
-            else:
-                self.btn_mp.config(text="📄 公众号视频 🔒", state="normal")
+            self.btn_mp.config(
+                text="📄 公众号视频" if has_mp else "📄 公众号视频 🔒",
+                state="normal")
         except Exception:
             pass
         return has_mp
 
     def _on_mp_article(self):
-        """「📄 公众号视频」入口（v2.0.19）。
-
-        未授权 → 说明这是附加功能 + 引导去授权管理；
-        已授权 → 打开解析窗口（粘贴链接 → 列视频 → 选清晰度下载）。
-        """
+        """「📄 公众号视频」入口：未授权给引导，已授权开清单窗口。"""
         if not self._refresh_mp_button():
             if messagebox.askyesno(
                     "公众号视频（未授权）",
-                    "「公众号文章视频下载」是独立附加功能，当前授权码未包含。\n\n"
-                    "说明：\n"
-                    "  · 视频号：微信「发现 → 视频号」里的视频（现有功能已支持）\n"
-                    "  · 公众号：公众号文章正文里插入的视频（本功能）\n"
-                    "  两者是不同入口、不同处理方式。\n\n"
-                    "如需开通，请联系发布方获取含此功能的授权码，\n"
-                    "拿到后在「🔑 授权管理」里粘贴激活即可（立即生效）。\n\n"
-                    "要去「🔑 授权管理」看看当前授权吗？"):
+                    "「公众号文章视频下载」是**独立产品**，与视频号分开销售。\n\n"
+                    "区别：\n"
+                    "  · 视频号：微信「发现 → 视频号」里的视频（嗅探捕获）\n"
+                    "  · 公众号：公众号文章正文里的视频（粘贴链接解析）\n"
+                    "  两者是不同入口，授权码也分开：视频号码不能下公众号，\n"
+                    "  公众号码也不能抓视频号。\n\n"
+                    "如需使用本功能，请联系发布方购买「公众号视频版」授权码，\n"
+                    "拿到后在「🔑 授权管理」粘贴激活即可（立即生效）。\n\n"
+                    "要去「🔑 授权管理」查看当前授权吗？"):
                 self._on_license_input()
             return
         self._open_mp_window()
 
     def _open_mp_window(self):
-        """公众号视频解析/下载窗口。"""
+        """公众号文章解析窗口（v2.0.19）。
+
+        ★ 设计变更（用户要求）：**不再有独立清单**。
+          解析出来的视频统一进入主清单（与视频号共用一张表），
+          靠「来源」列区分（🎬 视频号 / 📄 公众号）；双击来源列可筛选。
+          本窗口只负责"粘链接 → 解析 → 加入主清单"。
+        """
         from sphdl import mp_article as mpmod
 
         win = tk.Toplevel(self.root)
         win.title("公众号文章视频下载")
         win.transient(self.root)
-        win.geometry("760x520")
+        win.geometry("820x440")
+        win.minsize(700, 400)
 
-        pad = ttk.Frame(win, padding=12)
+        pad = ttk.Frame(win, padding=14)
         pad.pack(fill="both", expand=True)
 
-        ttk.Label(pad, text="公众号文章链接：",
-                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
-        ttk.Label(pad, text="把公众号文章链接粘到下面（形如 https://mp.weixin.qq.com/s/xxxxx），"
-                            "点「解析」列出文章内全部视频。",
-                  foreground="#6b7280", wraplength=720,
-                  justify="left").pack(anchor="w", pady=(2, 6))
+        ttk.Label(pad, text="① 粘贴公众号文章链接",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+        ttk.Label(pad,
+                  text="在微信里打开文章 → 右上角「…」→ 复制链接 → 粘到下面。\n"
+                       "解析出的视频会直接加入主清单（列表里「来源」列显示 📄 公众号），"
+                       "和视频号视频一起管理、排序、下载。",
+                  foreground="#6b7280", wraplength=760,
+                  justify="left").pack(anchor="w", pady=(2, 8))
 
         row = ttk.Frame(pad)
         row.pack(fill="x")
         url_var = tk.StringVar()
         ent = ttk.Entry(row, textvariable=url_var)
         ent.pack(side="left", fill="x", expand=True)
-        btn_parse = ttk.Button(row, text="解析", width=8,
-                               command=lambda: _do_parse())
-        btn_parse.pack(side="left", padx=(6, 0))
         btn_paste = ttk.Button(row, text="📋 粘贴", width=9,
                                command=lambda: _do_paste())
         btn_paste.pack(side="left", padx=(6, 0))
-        self._tt(btn_paste, "从剪贴板粘贴链接（先从微信里复制文章链接）")
+        self._tt(btn_paste, "从剪贴板粘贴链接（先在微信里复制文章链接）")
+        btn_parse = ttk.Button(row, text="解析并加入清单", width=15,
+                               command=lambda: _do_parse())
+        btn_parse.pack(side="left", padx=(6, 0))
+        self._tt(btn_parse,
+                 "抓取文章页、解析出里面所有视频，并加入主清单。\n"
+                 "同一文章重复解析不会重复添加（按视频标识去重）。\n"
+                 "大文章可能需要 10-30 秒。")
 
-        # ---- 结果列表 ----
+        # ---- 解析结果预览（只读）----
+        ttk.Label(pad, text="② 解析结果",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w",
+                                                                pady=(12, 4))
         cols = ("idx", "vid", "quality")
-        tv = ttk.Treeview(pad, columns=cols, show="headings", height=12)
+        tv = ttk.Treeview(pad, columns=cols, show="headings", height=9)
         tv.heading("idx", text="序号")
         tv.heading("vid", text="视频标识")
         tv.heading("quality", text="可用清晰度")
-        tv.column("idx", width=50, anchor="center")
-        tv.column("vid", width=420, anchor="w")
-        tv.column("quality", width=200, anchor="w")
-        tv.pack(fill="both", expand=True, pady=(10, 6))
-        # 空表占位提示（v2.0.19）：未解析时表格大片空白显得像"坏了"，
-        # 给一行引导文字说明下一步该做什么。
-        tv.insert("", "end", values=("—", "① 粘贴公众号文章链接 → ② 点「解析」", "③ 选清晰度下载"),
+        tv.column("idx", width=55, anchor="center")
+        tv.column("vid", width=460, anchor="w")
+        tv.column("quality", width=220, anchor="w")
+        tv.pack(fill="both", expand=True, pady=(0, 6))
+        tv.insert("", "end",
+                  values=("—", "还没有解析，先粘贴链接并点「解析并加入清单」", "—"),
                   tags=("hint",))
         tv.tag_configure("hint", foreground="#9ca3af")
 
-        # ---- 清晰度选择 ----
-        qrow = ttk.Frame(pad)
-        qrow.pack(fill="x", pady=(0, 6))
-        ttk.Label(qrow, text="下载清晰度：").pack(side="left")
-        q_var = tk.StringVar(value="最高")
-        q_combo = ttk.Combobox(qrow, textvariable=q_var, width=14,
-                               state="readonly", values=["最高"])
-        q_combo.pack(side="left", padx=(4, 12))
-        self._tt(q_combo, "同一视频微信提供多档清晰度，默认选最高。\n"
-                          "解析后这里会列出该视频可用的档位。")
-
-        btn_dl = ttk.Button(qrow, text="⬇ 下载选中", width=12,
-                            command=lambda: _do_download())
-        btn_dl.pack(side="left")
-        self._tt(btn_dl, "下载列表里选中的视频（可多选，按住 Ctrl 点选）")
-
-        status = ttk.Label(pad, text="等待解析…", foreground="#6b7280")
-        status.pack(anchor="w")
-
-        state = {"videos": [], "article_title": ""}
+        # ---- 底部状态 + 跳转按钮 ----
+        bot = ttk.Frame(pad)
+        bot.pack(fill="x")
+        status = ttk.Label(bot, text="等待解析…", foreground="#6b7280")
+        status.pack(side="left")
+        btn_view = ttk.Button(bot, text="在主清单中查看 ▼", width=16,
+                              command=lambda: _goto_main("公众号"))
+        btn_view.pack(side="right")
+        self._tt(btn_view, "关闭本窗口，回到主清单并筛选出所有「公众号」来源的视频")
 
         def _do_paste():
             try:
                 s = self.root.clipboard_get()
-                if s.strip():
+                if s and s.strip():
                     url_var.set(s.strip())
-                    status.config(text="已粘贴链接，点「解析」开始")
+                    status.config(text="已粘贴链接，点「解析并加入清单」")
             except Exception:
                 status.config(text="剪贴板里没有文本")
 
@@ -2695,12 +2839,11 @@ class App:
                 status.config(text="请先粘贴公众号文章链接")
                 return
             if not mpmod.is_mp_article_url(u):
-                status.config(text="× 这不是公众号文章链接（应形如 "
+                status.config(text="✗ 这不是公众号文章链接（应形如 "
                                     "https://mp.weixin.qq.com/s/xxxxx）")
                 return
-            status.config(text="正在抓取文章页…（大文章可能需 10-30 秒）")
+            status.config(text="正在抓取文章页并加入清单…（大文章可能需 10-30 秒）")
             btn_parse.config(state="disabled")
-            win.update_idletasks()
 
             def _work():
                 try:
@@ -2709,131 +2852,99 @@ class App:
                     vids = mpmod.parse_article(h)
                 except Exception as e:                   # noqa: BLE001
                     self.push_event(("mp_parse_done", None, None,
-                                     f"× 解析失败：{type(e).__name__}: {e}"))
+                                     f"✗ 解析失败：{type(e).__name__}: {e}", u))
                     return
-                self.push_event(("mp_parse_done", vids, title, ""))
+                self.push_event(("mp_parse_done", vids, title, "", u))
 
             import threading
             threading.Thread(target=_work, daemon=True).start()
 
-        def _on_parse_done(vids, title, err):
+        def _on_parse_done(vids, title, err, article_url=""):
             btn_parse.config(state="normal")
             if err:
                 status.config(text=err)
                 return
+            if not vids:
+                status.config(text="✗ 没解析到视频。可能原因：文章里没有视频、"
+                                   "需要登录/付费、或链接已失效。")
+                return
+            # 清空预览表
             for i in tv.get_children():
                 tv.delete(i)
-            state["videos"] = vids
-            state["article_title"] = title or ""
+            added = 0
+            multi = len(vids) > 1
             for i, v in enumerate(vids, 1):
-                qs = "、".join(lbl for _f, _u, lbl in v.renditions) or "未知"
-                tv.insert("", "end", values=(i, v.vid, qs))
-            if not vids:
-                status.config(text="× 没解析到视频。可能原因：文章里没有视频、"
-                                   "文章需要登录/付费、或链接已失效。")
-                return
-            # 更新清晰度下拉：取第一个视频的档位
-            labels = [lbl for _f, _u, lbl in vids[0].renditions]
-            q_combo.config(values=["最高"] + labels)
-            q_var.set("最高")
-            status.config(text=f"✅ 解析到 {len(vids)} 个视频"
-                               f"（文章：{title[:30]}）")
+                qmap = {lbl: u2 for _f, u2, lbl in v.renditions}
+                labels = [lbl for _f, _u, lbl in v.renditions]
+                best = labels[-1] if labels else ""
+                tv.insert("", "end", values=(
+                    i, v.vid, "、".join(labels) or "未知"))
+                # ★ 写入主清单（platform=公众号）
+                rec = Record(
+                    id=f"mp{int(time.time()*1000)%10**9}{i}{uuid.uuid4().hex[:4]}",
+                    title=(title or "公众号视频") + (f" #{i}" if multi else ""),
+                    url=v.url, decode_key="", size=0,
+                    source="公众号解析", created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="waiting", platform="公众号",
+                    video_id=v.vid,
+                    renditions=[{"url": u2, "label": lbl, "size": 0}
+                                for _f, u2, lbl in v.renditions],
+                    quality_note=("、".join(labels) or ""))
+                # ★ v2.0.19：公众号视频不占用视频号的档位名额 —— 这一点已在
+                #   RecordStore.is_full() / _trim_to_limit() 里统一处理
+                #   （只统计 platform=="视频号" 的记录），此处直接入库即可。
+                if self.store.add(rec):
+                    self._add_row(rec)
+                    added += 1
+            # 若当前在筛选视图，重绘以保持一致
+            if getattr(self, "_platform_filter", ""):
+                self._render_filtered_tree()
+            self._dirty = True
+            self._force_save()
+            self._update_status_bar()
+            status.config(text=f"✅ 解析到 {len(vids)} 个视频，"
+                               f"新加入主清单 {added} 条"
+                               + ("（已在清单里的自动跳过）" if added < len(vids)
+                                  else ""))
+            self.push_log("ok", f"📄 公众号：{title[:30]} → 加入 {added} 个视频"
+                                f"（来源标记为「公众号」）")
 
-        def _do_download():
-            sel = tv.selection()
-            if not sel:
-                status.config(text="请先在列表里选中要下载的视频")
-                return
-            if not state["videos"]:
-                return
-            want_label = q_var.get()
-            tasks = []
-            for iid in sel:
-                idx = int(tv.item(iid, "values")[0]) - 1
-                if not (0 <= idx < len(state["videos"])):
-                    continue
-                v = state["videos"][idx]
-                url = v.url
-                if want_label != "最高":
-                    for _f, u2, lbl in v.renditions:
-                        if lbl == want_label:
-                            url = u2
-                            break
-                tasks.append((v, url))
-            if not tasks:
-                return
-            base = mpmod.safe_filename(state["article_title"])
-            outdir = Path(self.cfg.download_dir)
+        def _goto_main(plat):
             try:
-                outdir.mkdir(parents=True, exist_ok=True)
+                win.destroy()
             except Exception:
                 pass
-            status.config(text=f"开始下载 {len(tasks)} 个视频…")
-            self.push_log("ok", f"📄 公众号视频：开始下载 {len(tasks)} 个"
-                                f"（文章：{state['article_title'][:40]}）")
+            self._filter_by_platform(plat)
+            try:
+                self.root.deiconify()
+                self.root.lift()
+            except Exception:
+                pass
 
-            import threading
-            import urllib.request
-
-            def _dl_one(n, v, url):
-                name = f"{base}_{n:02d}.mp4" if len(tasks) > 1 else f"{base}.mp4"
-                dst = outdir / name
-                self.push_log("info", f"📄 [{n}/{len(tasks)}] 下载中：{name}")
-                try:
-                    req = urllib.request.Request(
-                        url, headers=dict(mpmod.DOWNLOAD_HEADERS))
-                    with urllib.request.urlopen(req, timeout=60) as r, \
-                            open(dst, "wb") as f:
-                        total = int(r.headers.get("Content-Length") or 0)
-                        got = 0
-                        while True:
-                            chunk = r.read(65536)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                            got += len(chunk)
-                    mb = got / 1024 / 1024
-                    self.push_log("ok", f"✅ 已保存：{dst.name}（{mb:.1f} MB）")
-                    return True, name, mb
-                except Exception as e:                   # noqa: BLE001
-                    self.push_log("error",
-                                  f"❌ 下载失败 {name}：{type(e).__name__}: {e}")
-                    return False, name, 0
-
-            def _work():
-                okn = 0
-                for n, (v, url) in enumerate(tasks, 1):
-                    ok, _nm, _mb = _dl_one(n, v, url)
-                    okn += 1 if ok else 0
-                self.push_event(("mp_dl_done", okn, len(tasks),
-                                 str(outdir)))
-
-            threading.Thread(target=_work, daemon=True).start()
-
-        # ---- 注册事件处理 ----
         def _handle(item):
             kind = item[0] if item else ""
             if kind == "mp_parse_done":
-                _on_parse_done(item[1], item[2], item[3])
-                return True
-            if kind == "mp_dl_done":
-                okn, tot, d = item[1], item[2], item[3]
-                status.config(text=f"下载完成：{okn}/{tot} 成功，文件在 {d}")
-                self.push_log("ok" if okn == tot else "warn",
-                              f"📄 公众号视频下载结束：{okn}/{tot} 成功 → {d}")
-                if okn:
-                    try:
-                        messagebox.showinfo(
-                            "下载完成",
-                            f"成功 {okn}/{tot} 个。\n\n文件位置：\n{d}")
-                    except Exception:
-                        pass
+                _on_parse_done(item[1], item[2], item[3],
+                               item[4] if len(item) > 4 else "")
                 return True
             return False
 
         self._mp_event_handler = _handle
+
+        def _on_close():
+            try:
+                self._mp_event_handler = None
+            except Exception:
+                pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
         ent.focus_set()
-        self.push_log("ok", "📄 已打开公众号视频窗口：粘贴文章链接 → 解析 → 选清晰度下载")
+        self.push_log("ok", "📄 公众号窗口已打开：粘贴文章链接 → 解析 → "
+                            "视频会进入主清单（来源列标为「公众号」）")
 
     def _hook_watchdog(self):
         """钩子存活看门狗：视频正在播放（206 流经过代理）但长时间收不到
