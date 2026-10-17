@@ -139,6 +139,60 @@ def run_selftest_license(args):
     raise SystemExit(1 if bad else 0)
 
 
+def run_selftest_mp(args):
+    """公众号视频模块自检（v2.0.19）：验证打包产物里解析逻辑可用。
+
+    默认离线（只测解析逻辑，不联网）；加 --online 则用真实文章端到端验证。
+    这个入口既能验证自己的构建，也能让客户自查"功能是否可用"。
+    """
+    from sphdl import mp_article as mp
+
+    bad = 0
+    for name, ok, detail in mp.selftest():
+        print(f"{'[PASS]' if ok else '[FAIL]'} {name} {detail}")
+        bad += 0 if ok else 1
+
+    if getattr(args, "online", False):
+        url = ("https://mp.weixin.qq.com/s/BAvjuF4k6BLWlyCHTY58xA")
+        print(f"\n联网验证：{url}")
+        try:
+            h = mp.fetch_article(url)
+            vs = mp.parse_article(h)
+            print(f"  文章标题: {mp.article_title(h)}")
+            print(f"  解析到 {len(vs)} 个视频")
+            for i, v in enumerate(vs, 1):
+                print(f"    {i}. {v.vid}  清晰度 {len(v.renditions)} 档")
+            ok = len(vs) > 0
+            print(f"{'[PASS]' if ok else '[FAIL]'} 联网解析")
+            bad += 0 if ok else 1
+        except Exception as e:                          # noqa: BLE001
+            print(f"[FAIL] 联网验证异常: {type(e).__name__}: {e}")
+            bad += 1
+    else:
+        print("\n（离线自检；加 --online 可联网验证真实文章）")
+
+    print("公众号视频自检:", "ALL PASS" if not bad else f"{bad} 项失败")
+    raise SystemExit(1 if bad else 0)
+
+
+def run_selftest_telemetry(args):
+    """激活上报自检（v2.0.19）：确认总开关状态与设备指纹采集。
+
+    ⚠️ 不发起网络请求，只验证本地逻辑；客户可用它确认"程序是否会上报"。
+    """
+    from sphdl import config as _cfg
+    from sphdl import telemetry as tel
+
+    print("总开关 TELEMETRY_ENABLED =", _cfg.TELEMETRY_ENABLED,
+          "（False = 完全不采集、不上报）")
+    bad = 0
+    for name, ok, detail in tel.selftest():
+        print(f"{'[PASS]' if ok else '[FAIL]'} {name} {detail}")
+        bad += 0 if ok else 1
+    print("埋点自检:", "ALL PASS" if not bad else f"{bad} 项失败")
+    raise SystemExit(1 if bad else 0)
+
+
 def run_selftest_threaded(args):
     """线程自检：完全复刻 GUI 的引擎启动路径（后台线程 + 独立事件循环），
     验证冻结环境下后台线程启动引擎不死亡（2026-08-26「启动嗅探失败」
@@ -316,6 +370,12 @@ def main():
                          "死亡后退出（2026-08-26 启动嗅探失败事故的回归测试）")
     ap.add_argument("--selftest-license", action="store_true",
                     help="授权自检：验证授权密钥已注入 + 4 档往返校验后退出")
+    ap.add_argument("--selftest-mp", action="store_true",
+                    help="公众号视频自检：验证文章解析逻辑后退出")
+    ap.add_argument("--online", action="store_true",
+                    help="配合 --selftest-mp：联网用真实文章端到端验证")
+    ap.add_argument("--selftest-telemetry", action="store_true",
+                    help="埋点自检：显示总开关状态 + 设备指纹采集（不发网络请求）")
     ap.add_argument("-v", "--verbose", action="store_true", help="调试输出")
     args = ap.parse_args()
 
@@ -359,6 +419,10 @@ def main():
     banner()
     if args.selftest:
         run_selftest(args)
+    elif args.selftest_mp:
+        run_selftest_mp(args)
+    elif args.selftest_telemetry:
+        run_selftest_telemetry(args)
     elif args.selftest_threaded:
         run_selftest_threaded(args)
     elif args.selftest_license:
