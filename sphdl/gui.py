@@ -2420,6 +2420,7 @@ class App:
     def _toggle_engine(self):
         if self.engine.running:
             self.btn_engine.config(state="disabled")
+            self._start_pending = False   # 用户主动停止 → 不算启动失败，别弹窗
             threading.Thread(target=self._stop_engine_job, daemon=True).start()
             return
         # ★ v2.1.1：点下去立刻给反馈（原先"点了没反应"，用户以为按钮坏了）
@@ -2431,6 +2432,7 @@ class App:
             self.root.update_idletasks()
         except Exception:
             pass
+        self._start_pending = True    # 标记：这次是用户发起的启动，失败要弹窗
         # 解析端口
         try:
             port = int(self.port_var.get())
@@ -2510,6 +2512,31 @@ class App:
         self.ca_label  # noqa
         self.eng_label.config(text=f"状态: {'运行中 (127.0.0.1:%d)' % self.engine.port if running else '已停止'}",
                               foreground="#15803d" if running else "#6b7280")
+        # ★ v2.1.2：**启动失败必须弹窗**（客户实测"点了没反应"）
+        #   以前失败只写日志，用户不看日志区就完全不知道发生了什么。
+        #   用 _start_pending 标记"这次是我发起的启动"，只有这种才弹。
+        if not running and getattr(self, "_start_pending", False):
+            self._start_pending = False
+            try:
+                messagebox.showerror(
+                    "启动嗅探失败",
+                    "嗅探引擎没能启动起来。\n\n"
+                    "常见原因和处理办法：\n\n"
+                    "① 端口被占用（最常见）\n"
+                    "   把端口改成 8898 或 9999 再试\n\n"
+                    "② 杀毒软件拦截\n"
+                    "   把本程序加入白名单，或临时关闭杀软后重试\n\n"
+                    "③ 残留进程\n"
+                    "   任务管理器里结束所有「微信视频号下载器」进程再重试\n\n"
+                    "④ 首次解压被杀软扫描拖慢\n"
+                    "   直接再点一次【启动嗅探】即可\n\n"
+                    "如果都不行，请运行压缩包里的「诊断-双击我.bat」，\n"
+                    "把弹出的窗口截图发给发布方。",
+                    parent=self.root)
+            except Exception:
+                pass
+        elif running:
+            self._start_pending = False
 
     # ---------------- CA 证书 ----------------
     def _check_ca(self):

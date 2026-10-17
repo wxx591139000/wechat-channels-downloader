@@ -65,7 +65,8 @@ ZIP_PREFIX = f"{APP_DIR_NAME}-v"
 ZIP_SUFFIX = "-win64-portable.zip"
 
 # 分享 zip 白名单：只打包这些内容（其余一律不带，防本机数据泄漏）
-ZIP_INCLUDE = {"微信视频号下载器.exe", "_internal", "install-cert.bat", "使用说明.txt"}
+ZIP_INCLUDE = {"微信视频号下载器.exe", "_internal", "install-cert.bat",
+               "使用说明.txt", "诊断-双击我.bat"}
 
 # 列表容量锁档（v2.0.17）：档位 → 产物名后缀；键与 sphdl.config.MAX_RECORDS_TIERS 一致
 EDITION_SUFFIX = {500: "轻量版", 1000: "标准版", 2000: "专业版", 20000: "旗舰版"}
