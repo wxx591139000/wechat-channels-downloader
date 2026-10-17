@@ -340,6 +340,9 @@ class H(BaseHTTPRequestHandler):
             return self._page_new(q)
         if p == "/customers":
             return self._page_customers(q)
+        # ★ v2.1.4：改档位（升级/降级/续期）
+        if p == "/upgrade":
+            return self._page_upgrade(q)
         if p == "/suspect":
             return self._page_suspect()
         self._send(404, page("404", "<div class='card'>页面不存在</div>"))
@@ -365,6 +368,9 @@ class H(BaseHTTPRequestHandler):
             return self._need_login()
         if u.path == "/gen":
             return self._do_gen(form)
+        # ★ v2.1.4：改档位提交
+        if u.path == "/upgrade":
+            return self._do_upgrade(form)
         self._send(404, "not found")
 
     # ---------- 发码页 ----------
@@ -460,6 +466,7 @@ class H(BaseHTTPRequestHandler):
     # ---------- 查客户 ----------
     def _page_customers(self, q):
         kw = (q.get("q", [""])[0] or "").strip()
+        _code = (q.get("code", [""])[0] or "").strip()
         rows = ledger_all()
         if kw:
             k = kw.lower()
@@ -470,23 +477,161 @@ class H(BaseHTTPRequestHandler):
             tags = []
             if r.get("device"):
                 tags.append("<span class='tag green'>绑定版</span>")
+            if r.get("max_devices"):
+                tags.append(f"<span class='tag'>{r['max_devices']} 台</span>")
             if r.get("product") == PRODUCT_MP:
                 tags.append("<span class='tag'>公众号</span>")
+            if r.get("renewed_from"):
+                tags.append("<span class='tag green'>已升级</span>")
+            # ★ v2.1.4：每个客户后缀「改档位」入口（升级/降级/续期）
+            #   按用户要求：不用重新填客户信息，直接在查客户处改档
+            ec = html.escape(r.get("code", ""))
             items.append(f"""<div class="item">
 <b>{html.escape(r.get('customer') or '（未填昵称）')}</b>
 <span class="meta">　{r.get('tier_label','')}</span><br>
 <span class="meta">{html.escape(r.get('contact',''))}　
 {html.escape(r.get('channel',''))}　¥{html.escape(str(r.get('price','')))}　
 {r.get('issued','')}</span><br>
-<span class="mono">{html.escape(r.get('code',''))}</span>
-{''.join(tags)}</div>""")
+<span class="mono">{ec}</span>
+{''.join(tags)}
+<div style="margin-top:8px">
+<a href="/upgrade?code={ec}" style="display:inline-block;padding:6px 14px;
+   background:#1e3a5f;color:#fff;border-radius:8px;text-decoration:none;
+   font-size:13px">⬆ 改档位 / 续期</a>
+</div></div>""")
         body = f"""
 <div class="card"><h3>查客户（共 {len(rows)} 条）</h3>
 <form method="get" action="/customers">
 <input name="q" value="{html.escape(kw)}" placeholder="昵称 / 联系方式 / 授权码 / 部分匹配">
-<button>搜索</button></form></div>
+<button>搜索</button></form>
+<p class="meta" style="margin-top:8px">
+已有客户要升级/降级/续期：点记录下方的「⬆ 改档位」，不用重填信息。</p></div>
 <div class="card">{''.join(items) or '<p class="meta">没有记录</p>'}</div>"""
         return self._send(200, page("查客户", body, NAV.format("", "on", "")))
+
+    # ---------- 改档位（升级/降级/续期，v2.1.4） ----------
+    def _find_row(self, code):
+        """按授权码找台账原文（返回 dict 或 None）。"""
+        code = (code or "").strip()
+        for r in ledger_all():
+            if (r.get("code") or "").strip().upper() == code.upper():
+                return r
+        return None
+
+    def _page_upgrade(self, q):
+        """改档位页面：带出原客户信息，只需选新档位。"""
+        code = (q.get("code", [""])[0] or "").strip()
+        old = self._find_row(code)
+        if not old:
+            return self._send(200, page("改档位", f"<div class='card'>"
+                f"<div class='err'>找不到这个授权码：{html.escape(code)}</div>"
+                f"<a href='/customers'><button class='gray'>返回查客户</button></a>"
+                f"</div>", NAV.format("", "on", "")))
+
+        prod = int(old.get("product") or PRODUCT_VIDEO)
+        cur_tier = int(old.get("tier") or 0)
+        cur_md = old.get("max_devices")
+        opts = "".join(
+            f"<option value='{t}'{' selected' if (prod == PRODUCT_VIDEO and t == cur_tier) else ''}>"
+            f"{lbl}</option>" for t, lbl in TIER_LABEL.items())
+        if prod == PRODUCT_MP:
+            opts = "<option value='0' selected>公众号视频版（不分档）</option>"
+        md_opts = "".join(
+            f"<option value='{v}'{' selected' if (cur_md == (int(v) if v else None) or (not v and not cur_md)) else ''}>{t}</option>"
+            for v, t in (("", "不限台数"), ("1", "1 台"), ("2", "2 台"),
+                         ("3", "3 台"), ("5", "5 台"), ("10", "10 台")))
+
+        body = f"""
+<div class="card"><h3>改档位 · {html.escape(old.get('customer') or '未填昵称')}</h3>
+<div class="ok" style="margin-bottom:12px">
+原档位：<b>{html.escape(old.get('tier_label',''))}</b>　
+原价格：¥{html.escape(str(old.get('price','')))}　
+台数：{('不限' if not cur_md else str(cur_md)+' 台')}<br>
+<span class="mono" style="font-size:12px">{html.escape(code)}</span>
+</div>
+<form method="post" action="/upgrade">
+<input type="hidden" name="code" value="{html.escape(code)}">
+<label>新档位</label>
+<select name="tier">{opts}</select>
+<label>允许台数</label>
+<select name="max_devices">{md_opts}</select>
+<label>本次收款（升级收费 / 降级可填 0）</label>
+<input name="price" inputmode="decimal" placeholder="如 100">
+<label>备注（可选）</label>
+<input name="note" placeholder="如 补差价升级">
+<button>生成新授权码</button>
+</form>
+<p class="meta" style="margin-top:10px">
+生成新码后：把新码发给客户，他在「🔑 授权管理」粘贴即可，
+<b>不用重装软件</b>。旧码会被标记为「已升级」，台账保留完整历史。<br>
+客户信息（昵称/联系方式/渠道）自动沿用，不用重填。</p>
+</div>
+<div class="card"><a href="/customers"><button class="gray">返回</button></a></div>"""
+        return self._send(200, page("改档位", body, NAV.format("", "on", "")))
+
+    def _do_upgrade(self, form):
+        """处理改档位：沿用客户信息，生成新码，标记旧码。"""
+        old_code = (form.get("code") or "").strip()
+        old = self._find_row(old_code)
+        if not old:
+            return self._redirect("/customers")
+        try:
+            prod = int(old.get("product") or PRODUCT_VIDEO)
+            tier = int(form.get("tier") or 0)
+            if prod == PRODUCT_MP:
+                tier = 0
+            md_raw = (form.get("max_devices") or "").strip()
+            md = int(md_raw) if md_raw else None
+            dev = (old.get("device") or "").strip()   # 绑定版沿用原绑定
+            new_code = make_code(tier, product=prod,
+                                 device=dev if dev else "",
+                                 max_devices=None if dev else md)
+        except Exception as e:                              # noqa: BLE001
+            return self._send(200, page("改档位", f"<div class='card'>"
+                f"<div class='err'>生成失败：{html.escape(str(e))}</div>"
+                f"<a href='/customers'><button class='gray'>返回</button></a>"
+                f"</div>", NAV.format("", "on", "")))
+
+        rec = {
+            "code": new_code,
+            "tier": tier,
+            "tier_label": (TIER_LABEL.get(tier, "公众号视频版（不分档）")
+                           if prod == PRODUCT_VIDEO
+                           else "公众号视频版（不分档）"),
+            "product": prod,
+            "days": 0,
+            "customer": old.get("customer", ""),      # ★ 沿用
+            "contact": old.get("contact", ""),        # ★ 沿用
+            "channel": old.get("channel", ""),        # ★ 沿用
+            "price": form.get("price", "").strip(),
+            "device": dev,
+            "max_devices": md if not dev else None,
+            "note": form.get("note", "").strip(),
+            "features": prod,
+            "source": "web-admin-upgrade",
+            "renewed_from": old_code,                 # ★ 指向旧码，形成历史链
+            "old_tier_label": old.get("tier_label", ""),
+            "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        ledger_add(rec)
+        # 旧码标记为已升级（保留记录，不删；台账本来就是 append-only）
+        try:
+            self._mark_superseded(old_code, new_code)
+        except Exception:
+            pass
+        self._redirect("/?code=" + new_code.replace("-", "%2D"))
+
+    def _mark_superseded(self, old_code: str, new_code: str):
+        """在台账里给旧码补一条 superseded_by 记录（append-only，不改旧行）。"""
+        try:
+            ledger_add({
+                "event": "superseded",
+                "code": old_code,
+                "superseded_by": new_code,
+                "issued": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception:
+            pass
 
     # ---------- 转卖追踪 ----------
     def _page_suspect(self):
