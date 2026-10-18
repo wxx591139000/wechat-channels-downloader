@@ -211,8 +211,55 @@ class AppConfig:
         self._load()
 
     def _load(self):
+        # ★ v2.1.8：配置自动备份 + 损坏恢复（客户实测「重启后授权丢失」）
+        #
+        #   真实原因不是授权失效，而是 config.json 出问题后**静默回默认档**：
+        #     · 写入中途断电/磁盘满 → JSON 截断
+        #     · 杀软/清理工具误删 config.json
+        #   客户看到的就是"授权没了"，而且程序一个字都不提示。
+        #
+        #   策略：每次成功加载后存一份 config.json.bak；
+        #        加载失败 → 尝试从 .bak 恢复 → 恢复不了才回默认，并记下原因
+        #        供界面显示（客户不会以为是自己码坏了）。
+        self._config_load_error = ""
+        data = None
         try:
-            d = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # 首次运行 or 文件被删 —— 若有备份，说明是"曾经用过"
+            bak = CONFIG_FILE.with_suffix(".json.bak")
+            if bak.exists():
+                try:
+                    data = json.loads(bak.read_text(encoding="utf-8"))
+                    self._config_load_error = (
+                        f"配置文件 config.json 丢失，已从备份 config.json.bak 恢复"
+                        f"（含授权码）。原文件可能被杀毒软件或清理工具删除。")
+                except Exception:
+                    self._config_load_error = (
+                        "配置文件 config.json 丢失，备份也无法读取，授权需要重新激活。")
+        except Exception as e:                      # noqa: BLE001
+            # JSON 损坏（断电/磁盘满/写入中断）
+            bak = CONFIG_FILE.with_suffix(".json.bak")
+            if bak.exists():
+                try:
+                    data = json.loads(bak.read_text(encoding="utf-8"))
+                    self._config_load_error = (
+                        f"配置文件损坏（{type(e).__name__}），已从备份恢复（含授权码）。"
+                        f"损坏原因通常是写入时断电或磁盘满。")
+                except Exception:
+                    self._config_load_error = (
+                        f"配置文件损坏（{type(e).__name__}），备份也无法读取，"
+                        f"授权需要重新激活。")
+            else:
+                self._config_load_error = (
+                    f"配置文件损坏（{type(e).__name__}），且没有备份，"
+                    f"授权需要重新激活。")
+
+        if data is None:
+            return                                  # 没配置可读 → 用出厂默认
+
+        try:
+            d = data
             self.port = int(d.get("port", self.port))
             self.download_dir = d.get("download_dir", self.download_dir)
             self.auto_proxy = bool(d.get("auto_proxy", True))
@@ -311,6 +358,13 @@ class AppConfig:
                  "license_activated_at_legacy":
                      self.license_activated_at_legacy},
                 ensure_ascii=False, indent=2), encoding="utf-8")
+            # ★ v2.1.8：写成功后同步一份备份（供 _load 损坏时恢复）
+            #   用 copy 而不是再序列化一遍，保证 .bak 与主文件字节一致。
+            try:
+                import shutil as _sh
+                _sh.copy2(CONFIG_FILE, CONFIG_FILE.with_suffix(".json.bak"))
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -836,6 +890,25 @@ class App:
 
         # 档位显示/状态栏首次刷新（此时 self.addon 已就绪）
         self._refresh_limit_display()
+
+        # ★ v2.1.8：配置文件读取异常必须在界面上讲明白
+        #   否则客户看到"授权没了"只会以为是自己码坏了 / 软件坏了，
+        #   实际是 config.json 丢失或损坏（已从 .bak 恢复或需重新激活）。
+        _cerr = getattr(self.cfg, "_config_load_error", "")
+        if _cerr:
+            try:
+                self.push_log("warn", "⚠ " + _cerr)
+                # 延迟一点弹窗，等主窗口画完再弹（否则弹窗可能跑到主窗后面）
+                self.root.after(600, lambda m=_cerr: messagebox.showwarning(
+                    "配置文件异常",
+                    m + "\n\n"
+                    "当前配置路径：\n"
+                    f"{CONFIG_FILE}\n\n"
+                    "如果授权需要重新激活，请点「🔑 授权管理」粘贴你原来"
+                    "的授权码（同一个码可以重复激活，不会失效）。",
+                    parent=self.root))
+            except Exception:
+                pass
 
         threading.Thread(target=self._check_ca, daemon=True).start()
 
