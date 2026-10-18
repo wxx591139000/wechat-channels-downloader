@@ -15,10 +15,11 @@ __pycache__/
 .venv/
 
 # PyInstaller：中间产物不入库，便携版 zip 只留本地 dist（不入库）
-#   ⚠️ 2026-10-16 修正：原第 29 行 `!dist/*-win64-portable.zip` 是通配例外，
-#   会导致 `git add -A` 把 dist 下所有版本 zip（单文件 30MB+）全部入库
-#   （本次事故：误提交 17 个 zip / 约 540MB，已 force-push 修正）。
-#   现改为：dist 全忽略；仅历史已入库的 v1.2 保留跟踪，不再放行其他 zip。
+#   ⚠️ 2026-10-16 事故：曾有通配例外 `!dist/*-win64-portable.zip`，
+#   导致 `git add -A` 把 dist 下 17 个版本 zip（约 540MB）全部入库。
+#   ⚠️ 2026-10-18 二次清理：历史里还留着 v1.0/v1.1/v1.2 三个旧包
+#   （各 30MB，仓库 545MB），用 git filter-repo 彻底移除，现 636KB。
+#   ★ 现在 dist/ **全部忽略、无任何例外**，绝不要再加 `!dist/...` 规则。
 build/
 build_tmp_release/
 build_v11/
@@ -30,7 +31,6 @@ dist_v12/
 dist/v11-stage/
 dist/v12-stage/
 dist/*
-!dist/微信视频号下载器-v1.2-win64-portable.zip
 
 # 测试临时文件
 tests/_smoke/
