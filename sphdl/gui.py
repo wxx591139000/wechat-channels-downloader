@@ -3428,6 +3428,9 @@ class App:
         for rid in list(self.store.order):
             self._remove_row(rid)
         self._dirty = True
+        # ★ v2.2.2：清空全部记录时重置抓取序号，否则客户继续抓会从
+        #   "上次的总数+1" 开始（如 101），客户以为软件坏了。
+        self._reset_seq_on_clear()
         # ★ 清空 addon.seen（v2.0.18）：删全部记录后重新打开视频号必须能重新捕获。
         # 用 clear_seen 而非逐个 release —— seen 里可能残留列表已无的 key
         # （如候选缓存过的、满档被拒后残留的），逐个释放清不掉，会导致
@@ -3453,6 +3456,9 @@ class App:
         for r in done:
             self._remove_row(r.id)
         self._dirty = True
+        # ★ v2.2.2：如果清完列表变空，序号也重置（否则下次抓从 101 开始）
+        if not self.store.order:
+            self._reset_seq_on_clear()
         self.push_log("info", f"已清空 {len(done)} 条已完成记录")
 
     def _clear_failed(self):
@@ -3467,6 +3473,9 @@ class App:
         for r in failed:
             self._remove_row(r.id)
         self._dirty = True
+        # ★ v2.2.2：如果清完列表变空，序号也重置
+        if not self.store.order:
+            self._reset_seq_on_clear()
         self.push_log("info", f"已清空 {len(failed)} 条失败记录")
 
     def _col_index(self, name: str) -> int:
@@ -3670,6 +3679,21 @@ class App:
             self.tree.item(iid, values=self._row_values(r),
                            tags=(STATUS_TAG.get(r.status, "tag_pending"),))
             self._apply_sort()
+
+    def _reset_seq_on_clear(self):
+        """清空全部记录时重置抓取序号计数器（v2.2.2）。
+
+        ★ 为什么（客户会困惑）：
+          如果只清 store 不重置计数器，客户「删除全部记录」后继续抓，
+          序号会从 101 开始（因为计数器还停在 100）——
+          客户看到"为什么不是从 1 开始？是不是软件坏了？"
+
+        ★ 为什么删部分记录**不**重置：
+          列表里还有老记录，重置会让新记录序号与现存重复，
+          排序时就分不清先抓后抓了。删除部分只留空档（如 1,3,5），
+          序号列会重编成 1,2,3，客户看不到空档。
+        """
+        self._seq_counter = 0
 
     def _remove_row(self, rid):
         # 同步清理 url 映射（可能有多条：切换清晰度后旧/新 url 都映射本记录）。
