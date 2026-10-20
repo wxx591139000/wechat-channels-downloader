@@ -202,13 +202,43 @@ class MpdDownloader:
                     time.sleep(2)
         finally:
             self._resp = None
-            if not os.path.exists(self.save_path) and os.path.exists(tmp):
-                # 失败/停止时清理临时文件，避免残留
+            # ★ v2.2.0：失败/中断时**保留 .tmp**，不再删除。
+            #
+            # 为什么改（客户实测反馈 2026-10-20）：
+            #   客户「停止嗅探」时，mitmproxy 进程退出会把正在走的连接 RST 掉
+            #   → requests 抛 ConnectionError → 进续传分支。
+            #   如果续传用尽（8 次）就返回 False，而旧代码在 finally 里
+            #   **无条件删掉 .tmp** → 已下载的几百 MB 全丢，只能从头再下。
+            #   客户看到的就是"下载停了、进度没了"。
+            #
+            # 保留 .tmp 的好处：
+            #   · 下次点「重试失败」/「重新下载」时能用 Range 从断点续
+            #   · 代理断开这种临时故障，续传基本都能成功
+            # 代价：失败任务会留下 .tmp 占磁盘。
+            #   → 由 _cleanup_stale_tmp() 在启动时清理超过 7 天的残留，
+            #     并在「删除记录/删除文件+记录」时一并删掉对应 .tmp。
+            if (not os.path.exists(self.save_path) and os.path.exists(tmp)
+                    and self._keep_tmp()):
+                logger.info(f"已保留断点文件以便续传: {os.path.basename(tmp)}"
+                            f"（{format_size(pos)}）")
+            elif os.path.exists(tmp):
                 try:
                     os.remove(tmp)
                 except Exception:
                     pass
         return False
+
+    def _keep_tmp(self) -> bool:
+        """失败时是否保留 .tmp。
+
+        ★ 用户主动「停止下载」→ 不保留（用户明确不要了，别占磁盘）
+        ★ 网络/代理等原因失败 → 保留（下次可续传）
+        """
+        # _cancelled() 为真 = 用户主动停；否则视为意外中断
+        try:
+            return not self._cancelled()
+        except Exception:
+            return True
 
     def _finalize(self, tmp: str, pos: int) -> bool:
         """下载完成：校验大小（若已知）→ 原子改名。"""

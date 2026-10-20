@@ -830,6 +830,9 @@ class App:
         self._rejected_count = 0       # 满档后拒收（未加载）的新视频数
         # ★ v2.1.6：批量拉取是否因「满档」被自动停掉（决定升档后要不要自动恢复）
         self._batch_stopped_by_full = False
+        # ★ v2.2.0：点「停止嗅探」时选了「等下载完再停」
+        self._pending_stop_after_downloads = False
+        self._stop_timer_armed = False
         self._pending_slots = 0        # 已投递未处理的捕获占位数（并发防穿透）
         self._full_event_pending = False   # 满档事件是否已投递（防刷屏）
         self._last_save = 0.0
@@ -890,6 +893,14 @@ class App:
 
         # 档位显示/状态栏首次刷新（此时 self.addon 已就绪）
         self._refresh_limit_display()
+
+        # ★ v2.2.0：清理过期的断点文件（.tmp）
+        #   保留 .tmp 能续传，但失败任务多了会占磁盘 →
+        #   启动时清掉 7 天以上的残留（正在用的不受影响，改不了 mtime）
+        try:
+            threading.Thread(target=self._cleanup_stale_tmp, daemon=True).start()
+        except Exception:
+            pass
 
         # ★ v2.1.8：配置文件读取异常必须在界面上讲明白
         #   否则客户看到"授权没了"只会以为是自己码坏了 / 软件坏了，
@@ -2245,7 +2256,8 @@ class App:
             text=("💡 多选技巧　点一行＝选中一个　│　"
                   "按住 Ctrl 再点＝逐个加选　│　"
                   "按住 Shift 再点＝连续选一段　│　"
-                  "Ctrl+A＝全选"),
+                  "Ctrl+A＝全选　│　"
+                  "「反选」＝选中的变不选、没选的变选中"),
             bg="#dce9fa", fg="#0d2d5c",
             font=_hint_font,
             anchor="w", justify="left", padx=12, pady=8)
@@ -2258,10 +2270,16 @@ class App:
         # v2.0.19：新增「来源」列（platform）用于区分 视频号/公众号。
         # 列宽按实际内容调过：状态列要容下「下载中 100%」，文件列要容下
         # 常见中文文件名（原来太窄会被窗口右边缘截断）。
-        cols = ("status", "title", "platform", "size", "source", "time", "file")
+        # ★ v2.2.0：新增「序号」列（客户需求）
+        #   用途：有些客户想"只下前 20 个"，有连续序号才好按数选。
+        #   ★ 序号是**当前显示顺序**的编号（1,2,3...），
+        #     排序/筛选变化后要重新编号 —— 见 _renumber_rows()。
+        #     不做固定 id：客户要的是"第几个"，不是"哪一条"。
+        cols = ("no", "status", "title", "platform", "size", "source", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
-        heads = {"status": ("状态", 120), "title": ("标题", 215),
+        heads = {"no": ("序号", 52),
+                 "status": ("状态", 120), "title": ("标题", 215),
                  "platform": ("来源", 92), "size": ("大小", 82),
                  "source": ("捕获方式", 115), "time": ("时间", 85),
                  "file": ("文件", 215)}
@@ -2603,8 +2621,125 @@ class App:
             parts.append("🎯 自然捕获" if self.cfg.natural_capture else "整页捕获")
         self.mode_label.config(text=" | ".join(parts))
 
+    def _cleanup_stale_tmp(self):
+        """启动时清理超期断点文件（v2.2.0）。
+
+        ★ 背景：为了让"停止嗅探/网络中断"后能续传，失败时保留 .tmp。
+          但客户可能有一堆失败任务，.tmp 会占磁盘。
+          规则：只删 **7 天以上未修改** 的 .tmp。
+          （正在使用的不可能 7 天没动过，安全）
+        """
+        try:
+            d = Path(self.cfg.download_dir)
+            if not d.exists():
+                return
+            cutoff = time.time() - 7 * 86400
+            removed = 0
+            freed = 0
+            for f in d.glob("*.tmp"):
+                try:
+                    st = f.stat()
+                    if st.st_mtime < cutoff:
+                        freed += st.st_size
+                        f.unlink()
+                        removed += 1
+                except Exception:
+                    continue
+            if removed:
+                self.push_log(
+                    "info",
+                    f"🧹 已清理 {removed} 个过期断点文件"
+                    f"（{freed / 1024 / 1024:.1f} MB，超过 7 天未使用）")
+        except Exception:
+            pass
+
+    def _check_pending_stop(self):
+        """等待下载完成后停止嗅探（v2.2.0）。
+
+        用户点「停止嗅探」时选了【是】→ 设 _pending_stop_after_downloads，
+        这里每 800ms 查一次；没有下载任务了就真正停。
+
+        ★ 为什么需要这个：
+          下载流量经 mitmproxy（requests 走系统代理），
+          停嗅探会断掉下载网络。客户往往"清单抓够了想收工"，
+          但这时可能还有视频在下 —— 直接停会把下载全废掉。
+        """
+        if not getattr(self, "_pending_stop_after_downloads", False):
+            return
+        if not getattr(self, "_stop_timer_armed", False):
+            self._stop_timer_armed = True
+
+        def _tick():
+            self._stop_timer_armed = False
+            if not getattr(self, "_pending_stop_after_downloads", False):
+                return
+            busy = [r for r in self.store.items.values()
+                    if r.status in ("downloading", "decrypting", "pending")]
+            if busy:
+                # 还有任务 → 800ms 后再查（不阻塞 UI）
+                self.root.after(800, self._check_pending_stop)
+                return
+            # 队列空了 → 真正停止
+            self._pending_stop_after_downloads = False
+            self.push_log("ok", "✅ 下载任务已全部结束，正在停止嗅探…")
+            try:
+                self.btn_engine.config(state="normal", text="■  停止嗅探")
+            except Exception:
+                pass
+            self._start_pending = False
+            self.btn_engine.config(state="disabled")
+            threading.Thread(target=self._stop_engine_job,
+                             daemon=True).start()
+
+        self.root.after(800, _tick)
+
     def _toggle_engine(self):
         if self.engine.running:
+            # ★ v2.2.0：停止嗅探前先检查有没有下载任务（客户实测反馈）
+            #
+            #   根因：下载器用 requests（trust_env=True）→ **走系统代理**，
+            #   也就是所有下载流量都经 mitmproxy 转发。
+            #   「停止嗅探」= mitmproxy 退出 + 系统代理恢复，
+            #   → 正在进行的下载连接被 RST → 失败。
+            #   （旧版还会删掉 .tmp，导致已下载部分全丢，客户体验"下载停了"）
+            #
+            #   三种处理，按任务状态给不同选项：
+            #     有「下载中」 → 问「一起停 / 等它下完再停 / 取消」
+            #     只有「排队中」→ 问「取消排队一起停 / 取消」
+            #     没有任务   → 直接停
+            busy = [r for r in self.store.items.values()
+                    if r.status in ("downloading", "decrypting")]
+            queued = [r for r in self.store.items.values()
+                      if r.status == "pending"]
+
+            if busy:
+                n_dl = len(busy)
+                n_q = len(queued)
+                msg = (f"现在还有 {n_dl} 个视频正在下载"
+                       + (f"、{n_q} 个在排队" if n_q else "") + "。\n\n"
+                       "停止嗅探会断开下载用的网络通道，"
+                       "正在下载的会中断。\n\n"
+                       "【是】= 先等它们下完，自动停止嗅探\n"
+                       "【否】= 立刻停止（已下载的部分会保留，之后可续传）\n"
+                       "【取消】= 不停嗅探")
+                ans = messagebox.askyesnocancel("还有下载任务", msg,
+                                                parent=self.root)
+                if ans is None:
+                    return                       # 取消 → 什么都不做
+                if ans:
+                    # 是 → 挂起停止，等队列空了再停
+                    self._pending_stop_after_downloads = True
+                    self.btn_engine.config(state="disabled",
+                                           text="等待下载完成后停止…")
+                    self.push_log("info",
+                                  f"⏳ 将在 {n_dl} 个下载任务完成后自动停止嗅探")
+                    self._check_pending_stop()
+                    return
+                # 否 → 立刻停（.tmp 已由 downloader 保留，可续传）
+                self.push_log("warn",
+                              "⚠ 立即停止嗅探：正在下载的任务会中断，"
+                              "已下载的部分已保留，之后点「重试失败」可续传")
+
             self.btn_engine.config(state="disabled")
             self._start_pending = False   # 用户主动停止 → 不算启动失败，别弹窗
             threading.Thread(target=self._stop_engine_job, daemon=True).start()
@@ -3292,15 +3427,35 @@ class App:
         self._dirty = True
         self.push_log("info", f"已清空 {len(failed)} 条失败记录")
 
+    def _col_index(self, name: str) -> int:
+        """取列在 Treeview values 里的索引（0-based）。找不到返回 -1。
+
+        ★ 为什么不硬编码数字（v2.2.0 教训）：
+          v2.2.0 加了「序号」列后，原来「来源」列从第 3 列变成第 4 列，
+          但代码里写死了 `col == "#3"` 和 `vals[2]` →
+          **双击来源列筛选直接失效**（而且不报错，静默失效）。
+          改为按列名查，以后再加列不会重犯。
+        """
+        try:
+            return list(self.tree["columns"]).index(name)
+        except Exception:
+            return -1
+
     def _on_tree_dclick(self, evt):
         # ★ v2.0.19：双击「来源」列的单元格 → 按该来源筛选清单
         #   （不只作用于被双击的那一行，而是筛出该类全部记录，便于批量操作）
         try:
-            col = self.tree.identify_column(evt.x)
+            col_id = self.tree.identify_column(evt.x)
             row = self.tree.identify_row(evt.y)
-            if row and col == "#3":          # 第 3 列 = platform（来源）
+            pi = self._col_index("platform")
+            # identify_column 返回 #1 起的序号 → 换算成 0-based 索引
+            try:
+                col_0based = int(col_id.lstrip("#")) - 1
+            except Exception:
+                col_0based = -1
+            if row and pi >= 0 and col_0based == pi:
                 vals = self.tree.item(row, "values")
-                plat_cell = str(vals[2]) if len(vals) > 2 else ""
+                plat_cell = str(vals[pi]) if len(vals) > pi else ""
                 plat = "公众号" if "公众号" in plat_cell else "视频号"
                 self._filter_by_platform(plat)
                 return
@@ -3335,11 +3490,17 @@ class App:
         直接把提示打到状态栏（频率限制，避免抖动）。
         """
         try:
-            col = self.tree.identify_column(evt.x)
+            col_id = self.tree.identify_column(evt.x)
             region = self.tree.identify_region(evt.x, evt.y)
         except Exception:
             return
-        if col != "#3":
+        # ★ v2.2.0：按列名判断（不硬编码 #3，加「序号」列后会错位）
+        pi = self._col_index("platform")
+        try:
+            col_0based = int(col_id.lstrip("#")) - 1
+        except Exception:
+            return
+        if pi < 0 or col_0based != pi:
             return
         now = time.time()
         if now - getattr(self, "_plat_hint_at", 0) < 3:
@@ -3452,7 +3613,9 @@ class App:
                     fname = stem[:14] + "…" + ext
                 else:
                     fname = fname[:20] + "…"
-        return (st, title, plat_cell,
+        # ★ v2.2.0：序号列先留空，插入后由 _renumber_rows() 按显示顺序填。
+        #   （不能在 _row_values 里算：那时还不知道会插到第几行）
+        return ("", st, title, plat_cell,
                 format_size(r.size) if r.size else "-",
                 r.source, r.created[5:], fname)
 
@@ -3660,14 +3823,35 @@ class App:
         return (0, "", "")
 
     def _apply_sort(self):
-        if not self._sort_col:
-            return
-        items = [(rid, iid) for rid, iid in self._row_of.items()
-                 if rid in self.store.items]
-        items.sort(key=lambda t: self._sort_key(t[0]), reverse=self._sort_desc)
-        for idx, (_rid, iid) in enumerate(items):
-            if self.tree.exists(iid):
-                self.tree.move(iid, "", idx)
+        if self._sort_col:
+            items = [(rid, iid) for rid, iid in self._row_of.items()
+                     if rid in self.store.items]
+            items.sort(key=lambda t: self._sort_key(t[0]), reverse=self._sort_desc)
+            for idx, (_rid, iid) in enumerate(items):
+                if self.tree.exists(iid):
+                    self.tree.move(iid, "", idx)
+        # ★ v2.2.0：排序后重新编号（序号必须反映**当前显示顺序**）
+        self._renumber_rows()
+
+    def _renumber_rows(self):
+        """按当前显示顺序重编「序号」列（1,2,3...）。
+
+        ★ 为什么不用固定序号（客户需求 2026-10-20）：
+          客户想"只下前 20 个"，要看的是**当前列表第几个**。
+          如果按内部 id 编号，排序后就乱了，客户无法按序号选。
+          所以每次排序/增删都要重编。
+
+        性能：Treeview 逐行 set 一个单元格，1000 行约 10ms，可接受。
+        """
+        try:
+            kids = self.tree.get_children()
+            for i, iid in enumerate(kids, 1):
+                try:
+                    self.tree.set(iid, "no", str(i))
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
     # ---------------- 事件处理（主线程） ----------------
     def _handle_event(self, item):
