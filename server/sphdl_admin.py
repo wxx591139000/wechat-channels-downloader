@@ -161,6 +161,45 @@ def ledger_add(rec: dict):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+def h16(s: str) -> str:
+    """SHA256 前 16 位 —— 与客户端 / license_server 算法一致。
+
+    ⚠️ 归一化必须与 `license_server.h16()` 完全一致（strip + upper），
+    否则用授权码算出的 hash 对不上上报记录，查客户页就永远显示"未激活"。
+    """
+    return hashlib.sha256((s or "").strip().upper()
+                          .encode("utf-8")).hexdigest()[:16]
+
+
+def _devices_of_code(code: str) -> list:
+    """查某个授权码在**上报库**里激活过哪些设备（v2.1.9）。
+
+    ★ 为什么需要（用户报障 2026-10-19）：「查客户」里看不到客户实际激活的设备码。
+      根因是**两套数据源各查各的**：
+        · 查客户页读 licenses.jsonl —— device 字段是**发码时手填的**（基本都留空）
+        · 客户实际激活的设备在 license.db —— 由客户端激活时自动上报
+      两者从不关联 → 查客户页什么都不显示，用户以为这功能没做。
+
+    返回 [{device_hash, version, first_seen, last_seen, seen_count}, ...]
+    失败一律返回 []（绝不抛异常 —— 上报库出问题不能让查客户页整页报错）。
+    """
+    if not code:
+        return []
+    try:
+        if not LIC_DB.exists():
+            return []
+        ch = h16(code)
+        c = sqlite3.connect(f"file:{LIC_DB}?mode=ro", uri=True, timeout=5)
+        rows = list(c.execute(
+            "SELECT device_hash, version, first_seen, last_seen, seen_count "
+            "FROM reports WHERE code_hash = ? ORDER BY first_seen", (ch,)))
+        c.close()
+        return [{"device_hash": r[0], "version": r[1], "first_seen": r[2],
+                 "last_seen": r[3], "seen_count": r[4]} for r in rows]
+    except Exception:
+        return []
+
+
 def ledger_all() -> list:
     if not LEDGER.exists():
         return []
@@ -499,7 +538,42 @@ class H(BaseHTTPRequestHandler):
                 tags.append("<span class='tag'>公众号</span>")
             if r.get("renewed_from"):
                 tags.append("<span class='tag green'>已升级</span>")
+            # ★ v2.1.9：显示**实际激活**的设备（来自上报库，不是发码时手填的）
+            devs = _devices_of_code(r.get("code", ""))
+            if devs:
+                limit = r.get("max_devices") or 0
+                used = len(devs)
+                if limit:
+                    cls = "red" if used > limit else "green"
+                    tags.append(f"<span class='tag {cls}'>已激活 {used}/{limit} 台</span>")
+                else:
+                    tags.append(f"<span class='tag green'>已激活 {used} 台</span>")
             ec = html.escape(r.get("code", ""))
+            # 设备明细（折叠显示，避免列表太长）
+            dev_block = ""
+            if devs:
+                lines = []
+                for d in devs:
+                    lines.append(
+                        f"<div class='mono meta' style='margin-left:14px'>"
+                        f"└ 设备 {html.escape(d['device_hash'])}　"
+                        f"{html.escape(str(d.get('first_seen',''))[:16])}　"
+                        f"v{html.escape(str(d.get('version','')))}"
+                        f"（上报 {d.get('seen_count',1)} 次）</div>")
+                dev_block = (
+                    "<details style='margin-top:6px'>"
+                    f"<summary class='meta' style='cursor:pointer'>"
+                    f"查看激活设备（{len(devs)} 台）</summary>"
+                    + "".join(lines) + "</details>")
+            else:
+                dev_bind = (r.get("device") or "").strip()
+                if dev_bind:
+                    dev_block = ("<div class='meta' style='margin-top:6px'>"
+                                 f"绑定串：<span class='mono'>{html.escape(dev_bind)}"
+                                 "</span>（发码时填的，尚未激活上报）</div>")
+                else:
+                    dev_block = ("<div class='meta' style='margin-top:6px;color:#999'>"
+                                 "尚未激活（客户还没粘码激活，或网络不通没上报）</div>")
             items.append(f"""<div class="item">
 <b>{html.escape(r.get('customer') or '（未填昵称）')}</b>
 <span class="meta">　{r.get('tier_label','')}</span><br>
@@ -508,6 +582,7 @@ class H(BaseHTTPRequestHandler):
 {r.get('issued','')}</span><br>
 <span class="mono">{ec}</span>
 {''.join(tags)}
+{dev_block}
 <div style="margin-top:8px">
 <a href="/upgrade?code={ec}" style="display:inline-block;padding:6px 14px;
    background:#1e3a5f;color:#fff;border-radius:8px;text-decoration:none;
@@ -661,6 +736,29 @@ class H(BaseHTTPRequestHandler):
                        f"<button style='background:#b91c1c'>🚫 作废此授权码</button>"
                        f"</form>")
 
+        # ★ v2.1.9：实际激活的设备（来自上报库）
+        _devs = _devices_of_code(code)
+        if _devs:
+            _rows = "".join(
+                f"<div class='mono meta'>└ {html.escape(d['device_hash'])}　"
+                f"{html.escape(str(d.get('first_seen',''))[:16])}　"
+                f"v{html.escape(str(d.get('version','')))}"
+                f"（上报 {d.get('seen_count',1)} 次）</div>"
+                for d in _devs)
+            _lim = cur_md or 0
+            _warn = ""
+            if _lim and len(_devs) > _lim:
+                _warn = (f"<div class='err' style='margin-top:6px'>⚠ 已激活 "
+                         f"{len(_devs)} 台，超过允许的 {_lim} 台</div>")
+            _dev_html = (f"<div class='card'><h3>实际激活设备（{len(_devs)} 台）</h3>"
+                         f"{_rows}{_warn}"
+                         f"<p class='meta' style='margin-top:8px'>"
+                         f"数据来自客户端激活上报。同一台电脑重复激活不会重复计数。</p></div>")
+        else:
+            _dev_html = ("<div class='card'><h3>实际激活设备</h3>"
+                         "<p class='meta'>尚未激活 —— 客户还没粘码，"
+                         "或者激活时网络不通没能上报。</p></div>")
+
         body = f"""
 <div class="card"><h3>客户 · {html.escape(cur_name or '未填昵称')}</h3>
 {vb}
@@ -670,6 +768,9 @@ class H(BaseHTTPRequestHandler):
 台数：{('不限' if not cur_md else str(cur_md)+' 台')}<br>
 <span class="mono" style="font-size:12px">{html.escape(code)}</span>
 </div>
+
+<!-- ★ 实际激活设备（v2.1.9：打通上报库） -->
+{_dev_html}
 
 <!-- ★ 客户名称编辑（v2.1.5） -->
 <form method="post" action="/edit_customer">

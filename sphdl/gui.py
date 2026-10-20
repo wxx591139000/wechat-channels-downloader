@@ -2221,6 +2221,40 @@ class App:
         btns1 = ttk.Frame(listf)   # 下载操作
         btns1.pack(side="bottom", fill="x", pady=(6, 2))
 
+        # ★ v2.1.9：多选操作说明常驻条（客户反馈"不知道怎么多选"）
+        #   放在下载按钮行下面（视觉上属于"操作提示"，跟按钮一起读）。
+        #
+        #   为什么不用 tooltip：客户根本不会去悬停按钮找说明。
+        #
+        #   视觉迭代（实测截图两轮才达标）：
+        #     ① 纯蓝字小字号 → 被按钮群淹没，读不到
+        #     ② 加浅底色框 + font=(...,9,"bold") → 底色有了，但**bold 没生效**
+        #        （Windows 上 "Microsoft YaHei UI" 没有独立 bold 字重，
+        #         Tk 会静默回退常规体 → 看起来还是不粗）
+        #     ③ 字号提到 10pt + tkinter.font 显式 weight="bold"（程序化验证生效）
+        #     ④ 客户要"明显"，10pt 与按钮 9pt 差得不够 → 提到 11pt + 加大内边距
+        import tkinter.font as _tkfont
+        _hint_font = _tkfont.Font(family="Microsoft YaHei UI", size=11,
+                                  weight="bold")
+        self.hint_bar = tk.Frame(listf, bg="#dce9fa", bd=0,
+                                 highlightthickness=1,
+                                 highlightbackground="#9dbfe8")
+        self.hint_bar.pack(side="bottom", fill="x", pady=(5, 5))
+        self.lbl_hint = tk.Label(
+            self.hint_bar,
+            text=("💡 多选技巧　点一行＝选中一个　│　"
+                  "按住 Ctrl 再点＝逐个加选　│　"
+                  "按住 Shift 再点＝连续选一段　│　"
+                  "Ctrl+A＝全选"),
+            bg="#dce9fa", fg="#0d2d5c",
+            font=_hint_font,
+            anchor="w", justify="left", padx=12, pady=8)
+        self.lbl_hint.pack(side="left", fill="x", expand=True)
+        # 窗口窄时提示文字会截断 → 允许换行显示（宽度绑定父容器）
+        self.hint_bar.bind(
+            "<Configure>",
+            lambda e: self.lbl_hint.configure(wraplength=max(300, e.width - 30)))
+
         # v2.0.19：新增「来源」列（platform）用于区分 视频号/公众号。
         # 列宽按实际内容调过：状态列要容下「下载中 100%」，文件列要容下
         # 常见中文文件名（原来太窄会被窗口右边缘截断）。
@@ -2294,7 +2328,23 @@ class App:
         self.btn_download.pack(side="left")
         self._tt(self.btn_download,
                  "把选中的「待下载/失败/已停止」记录加入下载队列。\n"
-                 "支持 Ctrl/Shift 多选；双击待下载行也可下载。")
+                 "支持 Ctrl/Shift 多选；双击待下载行也可下载。\n"
+                 "多个一起下：先 Ctrl+A 全选或 Shift 连选，再点这里。")
+
+        # ★ v2.1.9：全选 / 反选（客户反馈不知道 Ctrl+A，给可见按钮）
+        self.btn_sel_all = ttk.Button(btns1, text="全选", width=6,
+                                      command=self._select_all)
+        self.btn_sel_all.pack(side="left", padx=(4, 0))
+        self._tt(self.btn_sel_all,
+                 "选中列表里所有记录（等同 Ctrl+A）。\n"
+                 "选完点『下载选中』即可批量下载。")
+        self.btn_sel_inv = ttk.Button(btns1, text="反选", width=6,
+                                      command=self._invert_selection)
+        self.btn_sel_inv.pack(side="left", padx=2)
+        self._tt(self.btn_sel_inv,
+                 "把选中的变成不选、没选的变成选中。\n"
+                 "常用于：先全选 → 反选 → 只下没下过的。")
+
         self.btn_stop = ttk.Button(btns1, text="停止下载", width=9,
                                    command=lambda: self._stop_selected())
         self.btn_stop.pack(side="left", padx=4)
@@ -2790,8 +2840,27 @@ class App:
 
     # ---------------- 列表操作 ----------------
     def _select_all(self):
-        for iid in self.tree.get_children():
-            self.tree.selection_add(iid)
+        """全选（v2.1.9：加可见按钮，不再只靠 Ctrl+A）。"""
+        try:
+            kids = self.tree.get_children()
+            if kids:
+                self.tree.selection_set(kids)
+        except Exception:
+            pass
+
+    def _invert_selection(self):
+        """反选（v2.1.9）。
+
+        典型用法：先「全选」→ 再「反选」→ 只留下原来没选的
+        （比如列表里大部分已下载完，想挑出没下的）。
+        """
+        try:
+            kids = list(self.tree.get_children())
+            cur = set(self.tree.selection())
+            new = [k for k in kids if k not in cur]
+            self.tree.selection_set(new) if new else self.tree.selection_remove(*kids)
+        except Exception:
+            pass
 
     def _selected_rid(self):
         sel = self.tree.selection()

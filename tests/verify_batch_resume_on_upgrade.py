@@ -48,22 +48,35 @@ def check(name, cond, detail=""):
           + (f"  {detail}" if detail else ""))
 
 
-def make_app(port=8899):
+def make_app(port=8899, tier_code=None):
+    """构造测试用 App。
+
+    ★ v2.1.9 修正（2026-10-20）：
+      档位现在**只由 _resolve_tier() 根据授权码决定**，
+      配置里的 `default_max_records` 是 v2.0.17 的遗留字段，**根本不被读取**。
+      （v2.1.7 把 DEFAULT_MAX_RECORDS 改成 0 之后，未授权档位 = 0，
+       is_full() 改用 UNLICENSED_CAPTURE_LIMIT=500，
+       导致原先靠配置写 500 的测试全部失效 → fill_to_full 填 0 条）
+
+      所以测试必须给一个**真实授权码**，否则拿不到非 0 档位。
+    """
     tdir = Path(tempfile.mkdtemp(prefix="full_"))
     G.RECORDS_FILE = tdir / "records.json"
     G.CONFIG_FILE = tdir / "config.json"
     C.PROXY_BACKUP_FILE = tdir / "proxy_backup.json"
+    codes = {}
+    if tier_code:
+        codes = {str(lic.PRODUCT_VIDEO): tier_code}
     (tdir / "config.json").write_text(json.dumps({
         "port": port, "download_dir": str(tdir / "dl"),
         "auto_proxy": False, "auto_download": False,
         "natural_capture": True, "guide_auto_shown": True,
-        "license_codes": {}, "default_max_records": 500,
+        "license_codes": codes,
+        "license_activated_at": {str(lic.PRODUCT_VIDEO): "2026-10-20T00:00:00"},
     }), encoding="utf-8")
     a = G.App()
     a.root.deiconify()
     return a, tdir
-
-
 def pump(app, ms):
     end = time.time() + ms / 1000
     while time.time() < end:
@@ -85,12 +98,17 @@ def fill_to_full(app):
 
 
 CODE_1000 = lic.make_code(1000, product=lic.PRODUCT_VIDEO)
+CODE_500 = lic.make_code(500, product=lic.PRODUCT_VIDEO)
+
+# ★ 每个 App 都要带授权码，否则档位 = 0（见 make_app 的说明）
+#   F4 需要「升档到 1000 后仍满档」，所以起始用 1000 档、填满 1000 条
+CODE_2000 = lic.make_code(2000, product=lic.PRODUCT_VIDEO)
 
 # ============ F1/F2：满档停批量 → 升档自动恢复 ============
 print("=" * 72)
 print("F1/F2 ★满档停批量 → 升档后自动恢复（用户报障场景）")
 print("=" * 72)
-app, tdir = make_app()
+app, tdir = make_app(tier_code=CODE_500)
 pump(app, 1200)
 
 app._set_batch(True)
@@ -138,7 +156,7 @@ print()
 print("=" * 72)
 print("F3 ★用户主动停批量后，升档不许自动重启")
 print("=" * 72)
-app2, tdir2 = make_app(port=8898)
+app2, tdir2 = make_app(port=8898, tier_code=CODE_500)
 pump(app2, 1200)
 app2._set_batch(True)
 pump(app2, 200)
@@ -161,7 +179,7 @@ print()
 print("=" * 72)
 print("F4 仍满档时不恢复（避免空转）")
 print("=" * 72)
-app3, tdir3 = make_app(port=8897)
+app3, tdir3 = make_app(port=8897, tier_code=CODE_500)
 pump(app3, 1200)
 app3._set_batch(True)
 fill_to_full(app3)
@@ -183,7 +201,7 @@ print()
 print("=" * 72)
 print("F5 删记录脱离满档 → 也自动恢复")
 print("=" * 72)
-app3b, tdir3b = make_app(port=8896)
+app3b, tdir3b = make_app(port=8896, tier_code=CODE_500)
 pump(app3b, 1200)
 app3b._set_batch(True)
 fill_to_full(app3b)
