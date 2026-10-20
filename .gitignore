@@ -56,3 +56,7 @@ licenses.jsonl
 # 设备指纹缓存（性能优化用）
 .devcache
 sphdl/.devcache
+
+# v2.2.1 诊断数据（客户原始 object_desc 样本，绝不入库）
+diag_object_desc/
+开启原始数据记录.txt

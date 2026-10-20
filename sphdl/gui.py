@@ -390,6 +390,12 @@ class Record:
     # v2.0.19：来源平台，用于统一清单里区分/筛选
     #   "视频号"（默认，嗅探捕获） / "公众号"（文章解析）
     platform: str = "视频号"
+    # ★ v2.2.1：抓取序号（客户需求）
+    #   捕获时递增分配（1,2,3...），**永不改变**。
+    #   用途：客户在视频号里按某个顺序刷，希望下载顺序与之一致。
+    #   点「序号」表头排序 = 按抓取先后排列。
+    #   老记录没有这个字段 → 用 0 兜底（排序时排在最前，由 id 二次排序保证稳定）
+    seq: int = 0
 
 
 class RecordStore:
@@ -424,6 +430,12 @@ class RecordStore:
                        "progress", "is_image", "video_id", "quality_note",
                        "platform")}
                 kw["renditions"] = d.get("renditions") or []
+                # ★ v2.2.1：seq 必须显式读回，否则重启后抓取序号全丢
+                #   （白名单式读取容易漏字段 —— 加新字段时务必同步这里）
+                try:
+                    kw["seq"] = int(d.get("seq") or 0)
+                except Exception:
+                    kw["seq"] = 0
                 if not kw.get("platform"):
                     kw["platform"] = "视频号"   # 老数据默认视频号
                 r = Record(**kw)
@@ -435,6 +447,23 @@ class RecordStore:
                     r.progress = 0
                 self.items[r.id] = r
                 self.order.append(r.id)
+
+            # ★ v2.2.1：给老记录（升级前没有 seq 的）补抓取序号
+            #   按 created（时间戳字符串）从小到大补 1,2,3...
+            #   这样老客户升级后，序号也能反映"抓取先后"。
+            _missing = [rid for rid in self.order
+                        if int(getattr(self.items.get(rid), "seq", 0) or 0) <= 0]
+            if _missing:
+                _sorted_old = sorted(
+                    _missing,
+                    key=lambda x: (getattr(self.items[x], "created", "") or "", x))
+                _mx = max([int(getattr(self.items[r2], "seq", 0) or 0)
+                           for r2 in self.order] or [0])
+                for _i, _rid in enumerate(_sorted_old, 1):
+                    try:
+                        self.items[_rid].seq = _mx + _i
+                    except Exception:
+                        pass
         except FileNotFoundError:
             pass
         except Exception:
@@ -1502,7 +1531,19 @@ class App:
         返回 False = 列表已满 → 本次捕获被拒收（不再加载后续视频）。
         addon 收到 False 会把该视频从「已见」集合里撤回，这样用户调高
         档位后重新拉取还能再次捕获到它（不会被永久判重挡掉）。
+
+        ★ v2.2.1：可选把原始 object_desc 落盘（诊断开关）。
+          用途：确认视频号订阅流里是否带「位置序号 / 发布时间」字段，
+                为实现「下载顺序 = 视频号顺序」提供依据。
+          开关：在程序目录建一个空文件 `开启原始数据记录.txt` 即生效，
+                抓几条后看 `diag_object_desc/*.json`，发回样本即可。
         """
+        try:
+            if self._diag_raw_enabled():
+                self._dump_raw_desc(vd)
+        except Exception:
+            pass
+
         if self._capture_full():
             self._rejected_count += 1
             if not self._full_event_pending:
@@ -2257,7 +2298,8 @@ class App:
                   "按住 Ctrl 再点＝逐个加选　│　"
                   "按住 Shift 再点＝连续选一段　│　"
                   "Ctrl+A＝全选　│　"
-                  "「反选」＝选中的变不选、没选的变选中"),
+                  "「反选」＝选中的变不选、没选的变选中"
+                  "\n　　点「序号」表头＝按抓取先后排序（还原你在视频号里刷的顺序）"),
             bg="#dce9fa", fg="#0d2d5c",
             font=_hint_font,
             anchor="w", justify="left", padx=12, pady=8)
@@ -3651,6 +3693,74 @@ class App:
         if iid and self.tree.exists(iid):
             self.tree.delete(iid)
 
+    # ---------------- 原始数据诊断（v2.2.1） ----------------
+    DIAG_FLAG = "开启原始数据记录.txt"
+
+    def _diag_raw_enabled(self) -> bool:
+        """是否开启原始 object_desc 落盘（诊断用）。
+
+        启动方式：在**程序所在目录**新建一个空文件
+        `开启原始数据记录.txt`（内容无所谓），重启程序即生效。
+        关闭：删掉这个文件。
+        """
+        if not hasattr(self, "_diag_flag_cache"):
+            try:
+                self._diag_flag_cache = (BASE_DIR / self.DIAG_FLAG).exists()
+            except Exception:
+                self._diag_flag_cache = False
+        return bool(self._diag_flag_cache)
+
+    def _dump_raw_desc(self, vd):
+        """把一条捕获的原始 object_desc 存成 json（供分析顺序字段）。
+
+        ★ 为什么要这个（客户需求 2026-10-20）：
+          客户要求「下载顺序、标题与视频号里的顺序一致」。
+          但**视频号订阅流的原始数据里是否有位置序号字段，我无法凭空假设** ——
+          必须看真实样本才能确定用什么字段排序。
+          这个开关就是为了拿样本，不改任何正常逻辑。
+
+        存放：<程序目录>/diag_object_desc/<时间戳>_<video_id>.json
+        上限：最多 200 个文件（避免占满磁盘）
+        """
+        try:
+            import json as _json
+            raw = getattr(vd, "raw", None)
+            if not raw:
+                return
+            d = Path(BASE_DIR) / "diag_object_desc"
+            d.mkdir(parents=True, exist_ok=True)
+            # 限流：超过 200 个就不再写
+            if len(list(d.glob("*.json"))) >= 200:
+                return
+            vid = (getattr(vd, "video_id", "") or "novid")[:16]
+            ts = time.strftime("%H%M%S")
+            fn = d / f"{ts}_{vid}.json"
+            fn.write_text(_json.dumps(raw, ensure_ascii=False, indent=1)[:200000],
+                          encoding="utf-8")
+        except Exception:
+            pass
+
+    def _next_seq(self) -> int:
+        """分配下一个抓取序号（v2.2.1）。
+
+        ★ 为什么单独维护计数器（不复用 len(store)）：
+          删记录后 len 会变小，再新抓的序号会与已有记录**重复**，
+          客户按序号排序就会乱。用 max(已有 seq)+1 保证单调递增。
+
+        ★ 启动时（_load 之后）第一次调用要扫描已有记录取最大值，
+          这样重启后继续抓，序号接着往下排，不会从头开始。
+        """
+        if not hasattr(self, "_seq_counter"):
+            mx = 0
+            try:
+                for rr in self.store.items.values():
+                    mx = max(mx, int(getattr(rr, "seq", 0) or 0))
+            except Exception:
+                mx = 0
+            self._seq_counter = mx
+        self._seq_counter += 1
+        return self._seq_counter
+
     def _add_row(self, r: Record):
         iid = self.tree.insert("", 0, values=self._row_values(r),
                                tags=(STATUS_TAG.get(r.status, "tag_pending"),))
@@ -3806,6 +3916,11 @@ class App:
         if r is None:
             return (0, "", "")
         col = self._sort_col or "time"
+        # ★ v2.2.1：序号列排序 = **抓取先后顺序**（客户需求）
+        #   用途：客户在视频号里按某个顺序刷，希望下载顺序跟那个顺序一致。
+        #   seq 是捕获时递增分配的（1,2,3...），排序即还原"刷到的先后"。
+        if col == "no":
+            return (int(getattr(r, "seq", 0) or 0), r.created, r.id)
         if col == "status":
             return (STATUS_SORT_ORDER.get(r.status, 99), r.created, r.id)
         if col == "size":
@@ -3904,7 +4019,8 @@ class App:
                 decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
-                renditions=vd.renditions or [], quality_note=vd.quality_note or "")
+                renditions=vd.renditions or [], quality_note=vd.quality_note or "",
+                seq=self._next_seq())
             if not self.store.add(rec):
                 # 竞态兜底：投递期间被别的记录填满 → 本条不入库
                 self._rejected_count += 1
@@ -4266,7 +4382,7 @@ class App:
                     url=v.url, decode_key="", size=0,
                     source="公众号解析", created=time.strftime("%Y-%m-%d %H:%M:%S"),
                     status="waiting", platform="公众号",
-                    video_id=v.vid,
+                    video_id=v.vid, seq=self._next_seq(),
                     renditions=[{"url": u2, "label": lbl, "size": 0}
                                 for _f, u2, lbl in v.renditions],
                     quality_note=("、".join(labels) or ""))
