@@ -2052,8 +2052,57 @@ class App:
             pass
     def _build_ui(self):
         root = self.root
+        # ★ v2.2.3：main 必须 side="top"。
+        #
+        #   踩过的坑：原来只写 pack(fill="both", expand=True)（默认 side="top"），
+        #   但它先于底部元素 pack，expand 会把整个 root 吃掉，
+        #   之后创建的 filter_bar / status_bar 即使 side="bottom" 也只剩 1px 高
+        #   （实测 winfo_height() == 1，屏幕上完全看不见）。
+        #
+        #   显式 side="top" 让 pack 管理器先给底部元素留位，main 只占剩余空间。
+        # ★★★ v2.2.3 关键顺序：底部元素必须**先 pack**，main 后 pack。
+        #
+        #   Tk 的 pack 是"按调用顺序分配空间"：
+        #     main 先 pack(expand=True) → 吃掉整个 root
+        #     → 之后 side="bottom" 的控件只剩 1px（实测 h=1，完全看不见）
+        #   把底部先 pack，它们先占住自己的高度，main 再拿剩下的。
+        #   （踩了两次：第一次只改 side="top" 不够，顺序才是根因）
+        # ===== ⑥ 来源筛选横幅（v2.2.3）=====
+        #   ★ 客户报障（2026-10-23）：
+        #     「点击『在主清单中查看』后，找不到回到之前列的视频号视频清单了」
+        #
+        #   根因：_goto_main("公众号") 会把清单筛成「只显示公众号」，
+        #   而旧版取消筛选的入口只有「双击来源列」和「状态栏文字提示」，
+        #   客户根本发现不了 → 以为视频号记录丢了（其实一条没少）。
+        #   更糟的是：旧提示写着「点状态栏『显示全部』」，但那个按钮从来不存在。
+        #
+        #   修法：有筛选时在状态栏上方显示一条**醒目的可点击横幅**，
+        #   上面直接放「显示全部」按钮。
+        self.filter_bar = tk.Frame(root, bg="#fff7ed")
+        self.lbl_filter = tk.Label(
+            self.filter_bar, text="", bg="#fff7ed", fg="#92400e",
+            font=("Microsoft YaHei UI", 10, "bold"), anchor="w")
+        self.lbl_filter.pack(side="left", padx=(10, 6), pady=6)
+        self.btn_filter_all = ttk.Button(
+            self.filter_bar, text="显示全部", width=10,
+            command=lambda: self._filter_by_platform(""))
+        self.btn_filter_all.pack(side="left", padx=(0, 6), pady=6)
+        self.btn_filter_video = ttk.Button(
+            self.filter_bar, text="只看视频号", width=12,
+            command=lambda: self._filter_by_platform("视频号"))
+        self.btn_filter_video.pack(side="left", padx=(0, 10), pady=6)
+        self._tt(self.btn_filter_all,
+                 "取消来源筛选，显示全部记录（视频号 + 公众号）")
+        self._tt(self.btn_filter_video,
+                 "只显示「视频号」来源的记录（公众号记录只是被隐藏，不删除）")
+
+        # ===== ⑦ 状态栏 =====
+        self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
+                                    padding=(8, 2))
+        self.status_bar.pack(fill="x", side="bottom")
+
         main = ttk.Frame(root, padding=8)
-        main.pack(fill="both", expand=True)
+        main.pack(side="top", fill="both", expand=True)
 
         # ===== ⓿ 防盗声明横幅（v2.0.19）=====
         # 目的：让客户一眼看到这是"有授权追溯的正版"，同时让转卖者有所顾忌。
@@ -2514,10 +2563,6 @@ class App:
         self._tt(self.btn_clear_log,
                  "清空日志区显示（不影响落盘的完整日志）。")
 
-        # ===== ⑥ 状态栏 =====
-        self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
-                                    padding=(8, 2))
-        self.status_bar.pack(fill="x", side="bottom")
 
         self._refresh_tree_all()
         self._update_capture_hint()
@@ -4144,12 +4189,35 @@ class App:
         if flt:
             shown = sum(1 for r in self.store.items.values()
                         if (r.platform or "视频号") == flt)
-            filter_txt = f"   |   🔍来源={flt}（{shown}/{total} 条）· 双击来源列可取消"
+            filter_txt = f"   |   🔍来源={flt}（{shown}/{total} 条）· 双击来源列可取消。"
         self.status_bar.config(
             text=f"  {engine_txt}   |   {proxy_txt}   |   {ca_txt}   |   "
                  f"{hook_txt}   |   列表: 共 {total} 条 / 上限 {limit}"
                  f" · 待下载 {waiting} · 完成 {done} · 失败 {failed}"
                  f"{batch_txt}{filter_txt}")
+        # ★ v2.2.3：有筛选时显示醒目横幅（带「显示全部」按钮），否则隐藏
+        #
+        #   ★ 判据必须用 winfo_manager()，不能用 winfo_ismapped()：
+        #     ismapped() 要求控件在屏幕上真正可见 —— 窗口最小化/被遮挡/
+        #     或处于 withdraw 状态时它返回 0，即使 pack 过也是 0。
+        #     用它做"要不要 pack"的判断会导致横幅永远不隐藏（实测踩到：
+        #     点「显示全部」后记录恢复了但横幅还挂着）。
+        try:
+            shown_now = self.filter_bar.winfo_manager() == "pack"
+            if flt:
+                shown = sum(1 for r in self.store.items.values()
+                            if (r.platform or "视频号") == flt)
+                self.lbl_filter.config(
+                    text=f"🔍 当前只显示「{flt}」（{shown}/{total} 条）"
+                         f" — 其他来源的记录只是被隐藏，没有删除")
+                if not shown_now:
+                    self.filter_bar.pack(fill="x", side="bottom",
+                                         before=self.status_bar)
+            else:
+                if shown_now:
+                    self.filter_bar.pack_forget()
+        except Exception:
+            pass
 
     def _diagnose_no_traffic(self, now, a):
         """「零流量」主动诊断（v2.0.19）。
@@ -4344,6 +4412,75 @@ class App:
         btn_view.pack(side="right")
         self._tt(btn_view, "关闭本窗口，回到主清单并筛选出所有「公众号」来源的视频")
 
+        # ★ v2.2.3：解析进度条（默认隐藏，解析时才出现）
+        #
+        #   客户实测反馈（2026-10-23）：
+        #   「点『解析并加入清单』后没有视频出现，以为故障了」
+        #   实际是 — 大文章 HTML 有 3.5MB，抓取+解析要 10-30 秒，
+        #   而旧版只在窗口底部显示一行小灰字，容易被忽略 → 以为卡死。
+        #
+        #   三条可见反馈：
+        #     ① 按钮文字变「⏳ 解析中…」（眼睛最常看的地方）
+        #     ② 数据表出现「正在抓取…」占位行
+        #     ③ 底部进度条 + 每秒更新的秒数
+        #   ★ 必须放进已显示的 bot 框架：放进 pad 末尾会分不到空间（实测 1x1/mapped=0）
+        prog = ttk.Progressbar(bot, mode="indeterminate", length=150)
+        _watch = {"id": None, "n": 0}
+
+        def _watch_start():
+            """开始解析 → 三条可见反馈全部亮起。"""
+            _watch["n"] = 0
+            btn_parse.config(text="⏳ 解析中…", state="disabled")
+            status.config(text="⏳ 正在抓取文章页…", foreground="#1d4ed8")
+            # 数据表里放一行占位，让"有反应"这件事在结果区也看得见
+            for i in tv.get_children():
+                tv.delete(i)
+            tv.insert("", "end", values=("…", "正在抓取文章并解析视频，请稍等…", "—"),
+                      tags=("busy",))
+            tv.tag_configure("busy", foreground="#2563eb")
+            try:
+                prog.pack(side="left", fill="x", expand=True, padx=(10, 10))
+                prog.start(12)
+            except Exception:
+                pass
+
+            def _tick():
+                _watch["n"] += 1
+                n = _watch["n"]
+                try:
+                    if n <= 30:
+                        status.config(
+                            text="⏳ 正在抓取文章页…已 %d 秒（大文章约 10-30 秒）" % n,
+                            foreground="#1d4ed8")
+                    else:
+                        status.config(
+                            text="⏳ 仍在抓取…已 %d 秒，网络较慢或文章很大，请再等等" % n,
+                            foreground="#b45309")
+                    _watch["id"] = self.root.after(1000, _tick)
+                except Exception:
+                    # 窗口已关闭 → 静默停止计时，别在控制台喷异常
+                    _watch["id"] = None
+            _tick()
+
+        def _watch_stop():
+            """解析结束（成功/失败）→ 全部复原。"""
+            if _watch["id"]:
+                try:
+                    self.root.after_cancel(_watch["id"])
+                except Exception:
+                    pass
+                _watch["id"] = None
+            try:
+                prog.stop()
+                prog.pack_forget()
+            except Exception:
+                pass
+            try:
+                btn_parse.config(text="解析并加入清单", state="normal")
+            except Exception:
+                pass
+
+
         def _do_paste():
             try:
                 s = self.root.clipboard_get()
@@ -4362,8 +4499,8 @@ class App:
                 status.config(text="✗ 这不是公众号文章链接（应形如 "
                                     "https://mp.weixin.qq.com/s/xxxxx）")
                 return
-            status.config(text="正在抓取文章页并加入清单…（大文章可能需 10-30 秒）")
-            btn_parse.config(state="disabled")
+            # ★ v2.2.3：三条可见反馈（按钮文字+表格占位+进度条秒数）
+            _watch_start()
 
             def _work():
                 try:
@@ -4380,13 +4517,18 @@ class App:
             threading.Thread(target=_work, daemon=True).start()
 
         def _on_parse_done(vids, title, err, article_url=""):
-            btn_parse.config(state="normal")
+            _watch_stop()          # ★ 复原按钮文字 + 隐藏进度条 + 停计时
             if err:
-                status.config(text=err)
+                status.config(text=err, foreground="#b91c1c")
+                for i in tv.get_children():
+                    tv.delete(i)
                 return
             if not vids:
                 status.config(text="✗ 没解析到视频。可能原因：文章里没有视频、"
-                                   "需要登录/付费、或链接已失效。")
+                                   "需要登录/付费、或链接已失效。",
+                              foreground="#b91c1c")
+                for i in tv.get_children():
+                    tv.delete(i)
                 return
             # 清空预览表
             for i in tv.get_children():

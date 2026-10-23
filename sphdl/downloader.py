@@ -32,6 +32,23 @@ def format_size(size: int) -> str:
     return f"{size:.2f} TB"
 
 
+def _needs_mp_referer(url: str) -> bool:
+    """该 URL 是否必须带公众号 Referer（v2.2.3）。
+
+    mpvideo.qpic.cn 是公众号文章视频的 CDN，**校验 Referer**：
+      无 Referer         → 403 Forbidden
+      带 mp.weixin.qq.com → 200
+
+    视频号走 finder.video.qq.com，不校验 Referer（带了也无害）。
+
+    实测（2026-10-23）：同一个 mpvideo URL
+      无 Referer   HTTP 403
+      带 Referer   HTTP 200, Content-Length=1052205
+    """
+    u = (url or "").lower()
+    return "mpvideo.qpic.cn" in u or "qpic.cn" in u
+
+
 class MpdDownloader:
     """单连接顺序下载器（适配微信视频号 CDN 的实测行为）。
 
@@ -66,6 +83,17 @@ class MpdDownloader:
             # 微信 webview 的 UA 被 CDN 优先服务；捕获不到时用默认 UA
             "User-Agent": shared.get_wechat_ua() or USER_AGENT,
         }
+        # ★ v2.2.3：公众号视频必须带 Referer，否则 403 Forbidden
+        #
+        #   客户报障（2026-10-23）：公众号解析出的视频点下载 → 状态「失败」。
+        #   实测：mpvideo.qpic.cn 对 Referer 做校验
+        #     无 Referer        → HTTP 403
+        #     带 mp.weixin.qq.com → HTTP 200（1052205 字节）
+        #
+        #   视频号（finder.video.qq.com）不校验 Referer，带了也无副作用。
+        #   所以这里统一带上，两种来源都能下。
+        if _needs_mp_referer(self.url):
+            self.headers["Referer"] = "https://mp.weixin.qq.com/"
 
     # ---------- 停止下载 ----------
     def cancel(self):
