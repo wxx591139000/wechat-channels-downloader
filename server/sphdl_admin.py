@@ -42,6 +42,8 @@ TOKEN_FILE = BASE / ".admin_token"
 LIC_DB = Path("/opt/sphdl-license/data/license.db")
 # ★ v2.2.3：话术库（预定义套路词 + 各版本网盘链接，可编辑）
 SNIPPETS = DATA / "snippets.json"
+# ★ v2.2.4：版本更新要点来源（本仓库 CHANGELOG 同步到 VPS 后自动解析）
+CHANGELOG = DATA / "CHANGELOG.md"
 
 PORT = int(os.environ.get("SPHDL_ADMIN_PORT", "3011"))
 BIND = os.environ.get("SPHDL_ADMIN_BIND", "127.0.0.1")
@@ -251,6 +253,8 @@ def snippets_load() -> dict:
                 "filename": str(v.get("filename") or "").strip(),
                 "link": link,
                 "pwd": str(v.get("pwd") or "").strip(),
+                # ★ v2.2.4：本版相比上一版的主要升级内容（可编辑，空则从 CHANGELOG 取）
+                "notes": str(v.get("notes") or "").strip(),
             })
         # 版本号倒序；同版本内按渠道名排序（稳定）
         out["versions"].sort(
@@ -292,6 +296,75 @@ def channel_of(link: str) -> str:
     if "115.com" in lk:
         return "115"
     return "其他"
+
+
+def changelog_notes(ver: str) -> str:
+    """从 CHANGELOG.md 里抽出某个版本的更新要点（v2.2.4）。
+
+    ★ 为什么要有：用户希望发码时能直接看到「这个版本比上一版改了什么」，
+      并且能一键复制发给老客户。手写一遍重复劳动，而 CHANGELOG 里本来就有。
+
+    解析规则（对应本仓库 CHANGELOG 的固定格式）：
+        ## [2.2.3] 2026-10-23 — 公众号下载修复 + 交互反馈
+        ### 修复（3 个客户报障）
+        1. **★ 公众号视频下载失败（403 Forbidden）**
+           ...
+        ## [2.2.2] ...        ← 到下一个 ## [ 为止
+
+    返回去掉 markdown 装饰的纯文本（客户看得懂的版本）。
+    """
+    if not CHANGELOG.exists():
+        return ""
+    try:
+        txt = CHANGELOG.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    v = str(ver or "").strip().lstrip("vV")
+    if not v:
+        return ""
+    # 找该版本段落（到下一个 "## [" 或文件末尾）
+    pat = re.compile(r"^##\s*\[" + re.escape(v) + r"\][^\n]*\n(.*?)(?=^##\s*\[|\Z)",
+                     re.S | re.M)
+    m = pat.search(txt)
+    if not m:
+        return ""
+    body = m.group(1)
+
+    out = []
+    for line in body.splitlines():
+        ln = line.rstrip()
+        if not ln.strip():
+            if out and out[-1] != "":
+                out.append("")
+            continue
+        # 跳过「已知限制」这类技术段落？保留 —— 客户也需要知道
+        ln = re.sub(r"^#{1,6}\s*", "", ln)          # 去标题井号
+        ln = ln.replace("**", "").replace("`", "")   # 去加粗/行内代码
+        ln = re.sub(r"^\s*[-*]\s+", "· ", ln)        # 列表符号统一
+        ln = re.sub(r"^\s*", "", ln)
+        out.append(ln)
+    # 去掉尾部空行
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out)
+
+
+def version_notes(ver: str) -> str:
+    """取某版本的更新要点：话术库里手填的优先，没填/不在库里则用 CHANGELOG。
+
+    ★ 注意「不在库里」也要回退到 CHANGELOG ——
+      话术库只存"正在卖"的几个版本，历史版本（如 2.2.2 已下架）
+      在库里没有条目，但客户问"这版改了什么"时仍要能答上。
+    """
+    v = str(ver or "").strip().lstrip("vV")
+    try:
+        d = snippets_load()
+        for item in d["versions"]:
+            if item["ver"] == v and item.get("notes"):
+                return item["notes"]
+    except Exception:
+        pass
+    return changelog_notes(v)
 
 
 def parse_share_text(text: str) -> dict:
@@ -799,6 +872,15 @@ class H(BaseHTTPRequestHandler):
   <p class="meta" style="margin-top:8px">
     「复制话术 + 授权码」= 套路词 + 网盘链接 + 授权码，一次性粘给客户<br>
     要改套路词或换网盘链接 → <a href="/snippets">点这里编辑话术库</a></p>
+
+  <!-- ★ v2.2.4：本版相比上一版的主要升级内容 -->
+  <details id="notesBox" style="margin-top:10px">
+    <summary style="cursor:pointer;color:#0f766e;font-weight:600;
+      font-size:13.5px">📋 这一版改了什么（可复制发给老客户）</summary>
+    <div class="snip" id="notes" style="margin-top:8px"></div>
+    <button type="button" class="btn2 gray" onclick="copyNotes()"
+      style="margin-top:8px">复制更新说明</button>
+  </details>
 </div>"""
             else:
                 snip_block = """
@@ -818,12 +900,20 @@ class H(BaseHTTPRequestHandler):
                      f"<script>{JS_COPY}"
                      f"const CODE={json.dumps(code)};"
                      f"const SNIPS={json.dumps({(v['ver'] + '||' + v.get('channel','')): snippet_text(v['ver'], v.get('channel','')) for v in vers}, ensure_ascii=False)};"
-                     f"function snipUpd(){{var v=document.getElementById('ver').value;"
-                     f"document.getElementById('snip').innerText=SNIPS[v]||'';}}"
+                     f"const NOTES={json.dumps({v['ver']: (v.get('notes') or changelog_notes(v['ver'])) for v in vers}, ensure_ascii=False)};"
+                     f"function notesUpd(){{var v=document.getElementById('ver').value.split('||')[0];"
+                     f"var el=document.getElementById('notes');"
+                     f"if(el)el.innerText=NOTES[v]||'（这一版没有记录更新要点）';}}"
+                     f"function copyNotes(){{var v=document.getElementById('ver').value.split('||')[0];"
+                     f"cp(NOTES[v]||'','');}}"
+                     f"function snipUpd(){{notesUpd();var v=document.getElementById('ver').value;"
+                     f"document.getElementById('snip').innerText=SNIPS[v]||'';"
+                     f"notesUpd();}}"
                      f"function copySnip(){{var v=document.getElementById('ver').value;"
                      f"cp(SNIPS[v]||'','');}}"
                      f"function copyBoth(){{var v=document.getElementById('ver').value;"
                      f"cp((SNIPS[v]||'')+'\\n\\n授权码：'+CODE,'');}}"
+                     f"try{{notesUpd();}}catch(e){{}}"
                      f"</script>")
         opts = "".join(f"<option value={t}>{l}</option>"
                        for t, l in TIER_LABEL.items())
@@ -1356,6 +1446,22 @@ class H(BaseHTTPRequestHandler):
             del_js = ("document.getElementById('dv').value='" + ver_esc
                       + "';document.getElementById('dc').value='" + chan_esc
                       + "';document.getElementById('df').submit()")
+            # 更新要点：手填的优先，否则从 CHANGELOG 抽
+            nt = v.get("notes") or changelog_notes(v["ver"])
+            if nt:
+                notes_html = ("<details style='margin-top:6px'>"
+                              "<summary style='cursor:pointer;color:#0f766e;"
+                              "font-size:12.5px'>本版更新要点（"
+                              + ("手填" if v.get("notes") else "CHANGELOG")
+                              + "）</summary>"
+                              "<div style='white-space:pre-wrap;font-size:12px;"
+                              "color:#475569;background:#f8fafc;border-radius:7px;"
+                              "padding:8px 10px;margin-top:4px;"
+                              "max-height:200px;overflow:auto'>"
+                              + html.escape(nt) + "</div></details>")
+            else:
+                notes_html = ("<div style='margin-top:6px;font-size:12px;"
+                              "color:#94a3b8'>（暂无更新要点，可手填或同步 CHANGELOG）</div>")
             items += (
                 "<div class='ver-item'>"
                 "<b>v" + ver_esc + "</b>" + tag_html
@@ -1365,6 +1471,8 @@ class H(BaseHTTPRequestHandler):
                 + html.escape(v['link'] or '(未填链接)')
                 + ('  提取码 ' + html.escape(v['pwd']) if v['pwd'] else "")
                 + "</span>"
+                # ★ v2.2.4：本版更新要点（折叠显示，避免列表太长）
+                + notes_html
                 + "<div style='margin-top:8px;display:flex;gap:8px'>"
                 + "<button type='button' class='del' onclick=\"" + del_js + "\">"
                 + "删除</button></div></div>"
@@ -1410,6 +1518,13 @@ class H(BaseHTTPRequestHandler):
 <input name="link" id="f_lk" placeholder="https://pan.baidu.com/s/1xxxx?pwd=abcd">
 <label>提取码（自动识别，可改）</label>
 <input name="pwd" id="f_pw" placeholder="bfcr">
+<label>本版更新要点（留空 = 自动从 CHANGELOG 提取）</label>
+<textarea name="notes" id="f_nt" rows="4" placeholder="留空会自动从 CHANGELOG.md 里这个版本的段落提取；
+也可以自己改写成人话，比如：
+· 修好了公众号视频下载失败的问题
+· 解析时会显示进度，不会以为卡死"
+ style="width:100%;padding:11px 12px;border:1px solid #d1d5db;
+  border-radius:9px;font-size:13.5px;font-family:inherit;line-height:1.7"></textarea>
 <button>保存这个版本</button>
 </form>
 <p class="meta" style="margin-top:8px">
@@ -1451,7 +1566,12 @@ class H(BaseHTTPRequestHandler):
                     pwd = pwd or parsed["pwd"]
                 if not ver:
                     raise ValueError("版本号不能为空（可粘贴分享文字自动识别）")
-                item = {"ver": ver, "filename": fn, "link": link, "pwd": pwd}
+                notes = (form.get("notes") or "").strip()
+                if not notes:
+                    # 没手填就自动从 CHANGELOG 抽（用户不用重复劳动）
+                    notes = changelog_notes(ver)
+                item = {"ver": ver, "filename": fn, "link": link,
+                        "pwd": pwd, "notes": notes}
                 if not item["link"]:
                     raise ValueError("分享链接不能为空（可粘贴分享文字自动识别）")
                 # ★ 按「版本号 + 网盘渠道」去重：
