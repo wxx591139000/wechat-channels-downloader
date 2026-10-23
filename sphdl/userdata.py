@@ -180,9 +180,22 @@ def resolve(fname: str) -> Path:
 
     fname: "config.json" / "records.json"
 
-    ★ 这是**启动路径上的函数**，任何异常都会导致程序打不开。
-      所以整个函数包在 try 里，出问题一律退回程序目录（老行为），
-      绝不因为"迁移失败"让客户用不了软件（2026-10-23 事故教训）。
+    ★★★ 授权继承规则（用户明确要求，2026-10-23）★★★
+
+      「后续压缩包分享给别人时，默认不能有授权。
+        只能是对方电脑装过授权，更换新版本时继承电脑里已有的授权。」
+
+    所以 config.json（含授权码）**只在"本机已经授权过"时才沿用**：
+      · 来源只有一处 —— 用户级目录 %LOCALAPPDATA%\\sphdl\\config.json
+      · 程序目录 / 相邻版本目录里的 config.json **一律不迁移授权**
+
+    为什么必须这么严：打包时若误把开发机的 config.json 带进 zip，
+    别人拿到压缩包就白得授权（旧逻辑真会这么干，已实测复现）。
+
+    ★ 列表（records.json）不属于授权，可以从程序目录迁移 ——
+      老客户升级时保住他已抓的清单，不涉及权限。
+
+    ★ 整个函数包 try：任何异常都回退程序目录，绝不因迁移失败让程序打不开。
     """
     if fname in _MIGRATED:
         return _MIGRATED[fname]
@@ -194,11 +207,46 @@ def resolve(fname: str) -> Path:
         return fallback
 
 
+def _is_license_file(fname: str) -> bool:
+    return fname.startswith("config")
+
+
+def _sanitize_license(path: Path) -> bool:
+    """把配置里的授权码清空（保留其他设置）。返回是否改动过。
+
+    ★ 用途：程序目录里的 config.json 可能带着开发机/打包机的授权，
+      迁移到用户级之前必须清掉，否则等于把授权送出去。
+      设置项（下载目录/开关等）保留，客户少配一遍。
+    """
+    try:
+        if not path.exists():
+            return False
+        d = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            return False
+        changed = False
+        if d.get("license_codes"):
+            d["license_codes"] = {}
+            changed = True
+        if d.get("license_code"):
+            d.pop("license_code", None)
+            changed = True
+        if changed:
+            try:
+                path.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+            except Exception:
+                return False
+        return changed
+    except Exception:
+        return False
+
+
 def _resolve_inner(fname: str) -> Path:
     uhome = user_dir()
     target = uhome / fname
 
-    # ① 用户级已有 → 直接用
+    # ① 用户级已有 → 直接用（唯一合法的授权来源）
     if target.exists():
         _MIGRATED[fname] = target
         return target
@@ -210,15 +258,36 @@ def _resolve_inner(fname: str) -> Path:
         _MIGRATED[fname] = app_dir() / fname
         return _MIGRATED[fname]
 
+    is_lic = _is_license_file(fname)
+
+    # ===== config.json（含授权）=====
+    # ★ 只搬「设置项」，授权一律清空 —— 保证分享出去的包不含授权
+    if is_lic:
+        src = None
+        same = app_dir() / fname
+        if same.exists() and same.resolve() != target.resolve():
+            src = same
+        if src is None:
+            try:
+                src = find_previous(fname, app_dir())
+            except Exception:
+                src = None
+        if src is not None:
+            try:
+                shutil.copy2(src, target)
+            except Exception:
+                _MIGRATED[fname] = src
+                return src
+            # ★ 关键：清掉继承来的授权码，只保留设置
+            _sanitize_license(target)
+        _MIGRATED[fname] = target
+        return target
+
+    # ===== records.json（列表，不含授权）=====
     src = None
-    # ② 程序目录（同目录，老用户首次升级）
     same = app_dir() / fname
     if same.exists() and same.resolve() != target.resolve():
         src = same
-    # ③ 相邻版本目录
-    #   ★ 不依赖 is_frozen()：开发模式下也可能有人把项目放在 dist/<ver>/ 里，
-    #     而测试需要能覆盖这条路。find_previous 本身是安全的（找不到返回 None），
-    #     所以无条件调用即可。
     if src is None:
         try:
             src = find_previous(fname, app_dir())
@@ -229,7 +298,6 @@ def _resolve_inner(fname: str) -> Path:
         try:
             shutil.copy2(src, target)
         except Exception:
-            # 迁移失败 → 继续用旧文件，至少能跑
             _MIGRATED[fname] = src
             return src
 

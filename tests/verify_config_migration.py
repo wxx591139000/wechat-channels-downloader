@@ -106,10 +106,13 @@ check("U4a 迁到用户级", p.parent != fake_app, str(p))
 check("U4b 目标文件已生成", p.exists())
 d = json.loads(p.read_text(encoding="utf-8"))
 print(f"  迁移后授权码: {d.get('license_codes')}")
-check("U4c 授权码数量一致（2 个）", len(d.get("license_codes") or {}) == 2,
+# ★ v2.2.7 规则变更：程序目录的授权**不能继承**（分享包不得带授权）
+#   只继承设置项。原断言要求"授权码数量一致"，与新安全规则冲突，故改。
+check("U4c 授权码必须被清空（分享包不带授权）",
+      not (d.get("license_codes") or {}),
       str(d.get("license_codes")))
-check("U4d 授权码内容一致",
-      d["license_codes"].get("1") == "SPHDL-CODE-VIDEO")
+check("U4d 设置项仍被继承（少配一遍）",
+      d.get("max_records") == 500 or d.get("download_dir"), str(d)[:80])
 
 print()
 print("=" * 76)
@@ -148,10 +151,11 @@ p = userdata.resolve("config.json")
 d = json.loads(p.read_text(encoding="utf-8"))
 print(f"  扫描到的最优源: v2.2.3（2 个码）")
 print(f"  迁移后: {d.get('license_codes')}")
-check("U5a 挑中授权码最多的（v2.2.3 而非 v2.2.2）",
-      len(d.get("license_codes") or {}) == 2, str(d.get("license_codes")))
-check("U5b 内容来自 v2.2.3",
-      d["license_codes"].get("1") == "BEST-223-V", str(d.get("license_codes")))
+# ★ v2.2.7：相邻版本的授权同样不继承（来源可能是别人拷来的包）
+check("U5a 相邻版本的授权也不继承",
+      not (d.get("license_codes") or {}), str(d.get("license_codes")))
+check("U5b 但仍迁到了配置（文件存在且有设置项）",
+      d.get("max_records") == 500 or d.get("download_dir"), str(d)[:80])
 
 print()
 print("=" * 76)

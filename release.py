@@ -68,6 +68,43 @@ ZIP_SUFFIX = "-win64-portable.zip"
 ZIP_INCLUDE = {"微信视频号下载器.exe", "_internal", "install-cert.bat",
                "使用说明.txt", "诊断-双击我.bat"}
 
+# ★★★ v2.2.7 硬红线：这些文件名**永不进包**，与 ZIP_INCLUDE 无关
+#
+#   用户明确要求（2026-10-23）：
+#   「后续压缩包分享给别人时，默认是不能有授权的。只能是对方电脑装过授权，
+#     更换新版本时继承电脑里已有的授权」
+#
+#   即：授权跟着**电脑**（%LOCALAPPDATA%\sphdl\config.json），不跟压缩包。
+#   一旦 config.json 混进 zip，别人解压就直接是已授权状态 → 授权体系崩了。
+#
+#   为什么要有这份独立黑名单（而不只靠 ZIP_INCLUDE 白名单）：
+#     · ZIP_INCLUDE 是"允许什么"，将来有人图省事加一项（如 "."、"_internal"）
+#       就可能把 config.json 一起带进去
+#     · 这份是"绝对禁止什么"，无视白名单，双保险
+FORBIDDEN_IN_ZIP = {
+    "config.json", "config.json.bak", "records.json", "records.json.bak",
+    "proxy_backup.json", ".license_secret", "_lic_key.py", "_key.py",
+    ".admin_token", "snippets.json", "licenses.jsonl", "license.db",
+}
+# 目录级禁入：整个目录都不许出现在包里
+FORBIDDEN_DIRS_IN_ZIP = {"downloads", "logs", "data", ".venv", ".git"}
+
+
+def _zip_forbidden(rel) -> str:
+    """返回命中原因（空串 = 允许）。供打包与校验共用。"""
+    parts = [x.lower() for x in rel.parts]
+    if not parts:
+        return ""
+    if parts[0] in FORBIDDEN_DIRS_IN_ZIP:
+        return f"禁入目录 {parts[0]}"
+    name = parts[-1]
+    if name in FORBIDDEN_IN_ZIP:
+        return f"敏感文件 {name}"
+    # 兜底：任何 .log / .db / .jsonl / .secret 都不进包
+    if name.endswith((".log", ".db", ".jsonl", ".secret")):
+        return f"敏感后缀 {name}"
+    return ""
+
 # 列表容量锁档（v2.0.17）：档位 → 产物名后缀；键与 sphdl.config.MAX_RECORDS_TIERS 一致
 # v2.1.5 档位改名：轻量 / 标准 / 旗舰 / 至尊
 EDITION_SUFFIX = {500: "轻量", 1000: "标准", 2000: "旗舰", 20000: "至尊"}
@@ -202,6 +239,22 @@ def build_frozen(v: tuple, force: bool, edition_sfx: str = "",
     if out_dir.exists() and not force:
         sys.exit(f"❌ {out_dir} 已存在（保留旧版本）。确认要覆盖请加 --force")
     log(f"📦 PyInstaller 构建 → {out_dir}")
+    # ★★★ v2.2.7 打包前红线：源目录里不许有含授权码的 config.json
+    #   （用户要求：分享出去的包默认不能有授权，授权只跟电脑走）
+    _src_cfg = ROOT / "config.json"
+    if _src_cfg.exists():
+        try:
+            import json as _json
+            _d = _json.loads(_src_cfg.read_text(encoding="utf-8"))
+            _lic = _d.get("license_codes") or {}
+            _n = sum(1 for x in _lic.values() if x) if isinstance(_lic, dict) else 0
+            _n += 1 if _d.get("license_code") else 0
+        except Exception:
+            _n = -1
+        if _n > 0:
+            log(f"  ⚠️ 源码目录的 config.json 含 {_n} 个授权码")
+            log("     → 不会进 zip（ZIP_INCLUDE 白名单 + 黑名单双拦），但建议清理")
+            log("     → 打包后会自动校验包内无敏感文件")
     if WORK.exists():
         shutil.rmtree(WORK)
     run([sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm",
@@ -298,8 +351,28 @@ def make_share_zip(v: tuple, out_dir: Path, force: bool, edition_sfx: str = "",
                 continue
             if rel.parts[0] not in ZIP_INCLUDE:
                 continue
+            # ★★★ v2.2.7 硬红线：敏感文件/目录永不进包（无视 ZIP_INCLUDE）
+            _why = _zip_forbidden(rel)
+            if _why:
+                log(f"  🚫 已拦截（不进包）: {rel.as_posix()}  ← {_why}")
+                continue
             z.write(p, arcname=f"{out_dir.name}/{rel.as_posix()}")
     sha = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    # ★★★ v2.2.7 打完包立刻自检：确认里面没有任何授权/配置/日志
+    #   （用户要求：分享出去的包默认必须未授权）
+    _leak = []
+    with zipfile.ZipFile(zip_path) as _z:
+        for _n in _z.namelist():
+            _rel = _n.split("/", 1)[1] if "/" in _n else _n
+            from pathlib import PurePosixPath as _PP
+            _why = _zip_forbidden(_PP(_rel))
+            if _why:
+                _leak.append((_n, _why))
+    if _leak:
+        for _n, _why in _leak[:10]:
+            log(f"  ❌ 分享包里发现敏感文件: {_n}  ← {_why}")
+        sys.exit("❌ 打包自检失败：分享包内不允许出现授权/配置/日志文件")
+    log("  ✅ 分享包自检通过：无 config.json / records.json / 密钥 / 日志")
     log(f"  ✅ zip 完成: {zip_path.stat().st_size / 1048576:.1f} MB")
     log(f"  sha256: {sha}")
     return zip_path
