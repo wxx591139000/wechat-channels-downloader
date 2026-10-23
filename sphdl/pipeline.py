@@ -92,6 +92,45 @@ class Pipeline:
         self._cancelled_urls.add(url)
         return True
 
+    def cancel_all(self) -> int:
+        """★ 停止**全部**：打断当前任务 + 清空内部排队。返回清掉的排队数。
+
+        ⚠️ 为什么需要（2026-10-23 客户报障）：
+          「点击『停止所有下载』后，序号 500 那行还在一直下载」
+          根因：`_stop_all_downloads()` 是**按 URL 逐个 cancel**，
+          只对"界面上还在 pending/downloading/decrypting 的记录"生效；
+          而 pipeline 内部队列里可能还有记录已被改状态/已不在列表的任务，
+          这些没人去 cancel → 队列继续往下跑，看起来像"停不住"。
+
+          这里直接从队列层面清空，不依赖界面状态，才是确定的停。
+        """
+        self._stop_event.set()
+        if self._current_dl is not None:
+            try:
+                self._current_dl.cancel()
+            except Exception:
+                pass
+        n = 0
+        while True:
+            try:
+                vd = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._queue.task_done()
+            except Exception:
+                pass
+            if vd is None:
+                # 哨兵不能被吞掉，放回队尾让工作线程正常退出
+                try:
+                    self._queue.put(None)
+                except Exception:
+                    pass
+                break
+            self._cancelled_urls.discard(getattr(vd, "url", ""))
+            n += 1
+        return n
+
     def _process(self, vd: VideoData):
         # 绑定当前任务（供 cancel() 精确定位），并复位停止事件
         self._current = vd

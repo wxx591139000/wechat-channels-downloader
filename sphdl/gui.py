@@ -44,9 +44,20 @@ from sphdl.pipeline import Pipeline            # noqa: E402
 from sphdl.addon import SphAddon               # noqa: E402
 from sphdl.proxy_manager import ProxyManager, restore_proxy   # noqa: E402
 from sphdl.downloader import format_size       # noqa: E402
+from sphdl import userdata                     # noqa: E402
 
-CONFIG_FILE = BASE_DIR / "config.json"
-RECORDS_FILE = BASE_DIR / "records.json"
+# ★ v2.2.5：配置与列表改存用户级目录（%LOCALAPPDATA%\sphdl），
+#   换版本目录不再丢授权码 —— 客户解压新版的常见操作不再清空授权。
+#
+#   事故背景（2026-10-23）：
+#     「为何我换新版本 2.2.4 时，之前授权好的视频号与公众号授权没了」
+#     dist/v2.2.3 有 2 个授权码，dist/v2.2.4 有 0 个 —— 因为
+#     BASE_DIR 是 exe 目录，解压到新文件夹就等于全新安装。
+#
+#   首次启动会自动从「程序目录」或「相邻版本目录」把旧配置搬过来，
+#   所以老客户升级后授权码、列表都还在。
+CONFIG_FILE = userdata.resolve("config.json")
+RECORDS_FILE = userdata.resolve("records.json")
 
 # 列表容量档位（v2.0.17）：真实档位由 AppConfig.max_records 驱动（500/1000/2000/0=不限）。
 # 这里保留常量为「默认档」，仅为兼容旧引用与测试。
@@ -926,6 +937,8 @@ class App:
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
         self.addon.natural_capture = self.cfg.natural_capture
+        # ★ v2.2.5：把授权门禁交给 addon，堵住「自动下载绕过授权」的漏洞
+        self.addon.license_check = self._has_download_license
         # 自动下载提交前的跨会话去重（records.json 已有同视频/链接 → 不重复下载）
         self.addon.duplicate_check = self._is_known_video
 
@@ -3292,6 +3305,18 @@ class App:
                 f"将停止 {len(targets)} 个正在下载/排队的任务？\n"
                 "（已下载完成的文件保留，可稍后『重试失败』再下）"):
             return
+        # ★ v2.2.5：从 pipeline 队列层面清空，而不是按 URL 逐个 cancel。
+        #
+        #   客户报障：「点击『停止所有下载』后，序号 500 那行还在一直下载」
+        #   根因：按 URL cancel 只覆盖"界面上还在下载状态"的记录；
+        #   pipeline 内部队列里还有别的任务（状态已被改/已不在列表）没人取消，
+        #   于是队列继续跑，看起来停不住。
+        #   另外：自动下载开着会**立刻补新任务**，用户点了停止却看到新的又开始了。
+        _flushed = 0
+        try:
+            _flushed = self.pipeline.cancel_all()
+        except Exception as e:
+            self.push_log("warn", f"清空下载队列时出错：{e}")
         for r in targets:
             try:
                 self.pipeline.cancel(r.url)
@@ -3299,8 +3324,25 @@ class App:
                 pass
             self.store.update(r.id, status="stopped", error="用户停止")
             self._update_row(r.id)
+        # 停止所有 = 用户明确不想再下了 → 同时关掉「自动下载」，
+        # 否则新捕获的视频又会自动排队，用户会以为没停住
+        _auto_off = False
+        try:
+            if getattr(self.cfg, "auto_download", False):
+                self.cfg.auto_download = False
+                if getattr(self, "var_auto", None) is not None:
+                    self.var_auto.set(False)
+                self.addon.auto_download = False
+                _auto_off = True
+        except Exception:
+            pass
         self._dirty = True
-        self.push_log("ok", f"已停止所有下载：{len(targets)} 个任务已停止")
+        _msg = f"已停止所有下载：{len(targets)} 个任务已停止"
+        if _flushed:
+            _msg += f"，并清空排队 {_flushed} 个"
+        if _auto_off:
+            _msg += "；已同时关闭「自动下载」（避免新视频又自动排队）"
+        self.push_log("ok", _msg)
         self._update_status_bar()
 
     def _cancel_all_queued(self):

@@ -76,18 +76,21 @@ app = G.App()
 app.root.withdraw()
 app.root.update()
 eng = app.engine
-eng.start(eng.port, auto_proxy=False)      # 不自改系统代理，只测代理本身
+# ★ 必须用独立端口：客户可能正在运行客户端（占 8899），
+#   否则测试请求会走到那个实例上，导致 P5b 之类的判据失真
+TEST_PORT = 18898
+eng.start(TEST_PORT, auto_proxy=False)     # 不自改系统代理，只测代理本身
 for _ in range(40):
     time.sleep(0.3)
     app.root.update()
-    if eng.running and eng._port_open(eng.port):
+    if eng.running and eng._port_open(TEST_PORT):
         break
-port_ok = eng._port_open(eng.port)
-print(f"  端口 {eng.port} 就绪: {port_ok}")
+port_ok = eng._port_open(TEST_PORT)
+print(f"  端口 {TEST_PORT} 就绪: {port_ok}")
 check("引擎启动", port_ok)
 
 if port_ok:
-    proxy = f"http://127.0.0.1:{eng.port}"
+    proxy = f"http://127.0.0.1:{TEST_PORT}"
 
     def via_proxy(url, timeout=15):
         op = urllib.request.build_opener(

@@ -262,6 +262,9 @@ class SphAddon:
         # 可选 fn(vd)->bool：GUI 跨会话去重（records.json 已有该视频/链接则 True）。
         # 在自动下载提交前拦截，避免"列表去重跳过了、文件却重复下载"（v2.0.5 修复）
         self.duplicate_check = None
+        # ★ v2.2.5：自动下载的授权门禁回调（GUI 传 self._has_download_license）。
+        #   None = 不做校验（命令行/测试场景）；GUI 模式必须设置。
+        self.license_check = None
         self.seen = set()          # 去重: (url, decode_key)
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
@@ -690,6 +693,25 @@ class SphAddon:
                             "调高「列表上限」后重新拉取即可加载）")
             return
         if self.auto_download:
+            # ★ v2.2.5：自动下载也必须过授权门禁
+            #
+            #   客户报障（2026-10-23）：「当前 2.2.4 显示未授权，为何还能下载视频」
+            #   根因：这里直接 self.pipeline.submit(vd)，
+            #   **绕过了 GUI 的 _submit_record() 授权门禁** ——
+            #   未授权时只要 auto_download 为真就能下载。
+            #   现在加一道 license_check 回调（GUI 传 _has_download_license），
+            #   未授权一律不提交，并只提示一次（自动下载不能刷屏）。
+            if self.license_check is not None:
+                try:
+                    _ok = bool(self.license_check())
+                except Exception:
+                    _ok = False
+                if not _ok:
+                    if not getattr(self, "_unlic_skip_logged", False):
+                        self._unlic_skip_logged = True
+                        logger.warn("🔒 未授权：可捕获但不会下载（自动下载已跳过）。"
+                                    "激活授权码后自动恢复。")
+                    return
             if self.duplicate_check and self.duplicate_check(vd):
                 if key not in self._dedup_logged:
                     self._dedup_logged.add(key)
