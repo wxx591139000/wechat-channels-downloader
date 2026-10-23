@@ -24,6 +24,7 @@ import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sys
 import sqlite3
@@ -31,7 +32,7 @@ import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -39,6 +40,8 @@ DATA.mkdir(parents=True, exist_ok=True)
 LEDGER = DATA / "licenses.jsonl"
 TOKEN_FILE = BASE / ".admin_token"
 LIC_DB = Path("/opt/sphdl-license/data/license.db")
+# ★ v2.2.3：话术库（预定义套路词 + 各版本网盘链接，可编辑）
+SNIPPETS = DATA / "snippets.json"
 
 PORT = int(os.environ.get("SPHDL_ADMIN_PORT", "3011"))
 BIND = os.environ.get("SPHDL_ADMIN_BIND", "127.0.0.1")
@@ -200,6 +203,210 @@ def _devices_of_code(code: str) -> list:
         return []
 
 
+DEFAULT_TEMPLATE = "请您查收，满意的话帮忙给个红花，遇到问题的话联系我。"
+
+
+def snippets_load() -> dict:
+    """读取话术库（模板 + 各版本网盘链接）。
+
+    ★ 为什么要有（2026-10-21 用户需求）：
+      客户下单后要手工拼消息："套路词 + 对应版本的百度网盘链接"，
+      每次都要翻网盘复制粘贴，容易贴错版本、贴漏提取码。
+      这里把「套路词」和「各版本网盘信息」存成可编辑的配置，
+      发码时选一下版本就能一键复制完整话术。
+
+    结构：
+      {
+        "template": "请您查收，满意的话帮忙给个红花，遇到问题的话联系我。",
+        "versions": [
+          {"ver": "2.2.2",
+           "filename": "微信视频号下载器-v2.2.2-win64-portable.zip",
+           "link": "https://pan.baidu.com/s/xxx?pwd=abcd",
+           "pwd": "abcd"}
+        ]
+      }
+    """
+    blank = {"template": DEFAULT_TEMPLATE, "versions": []}
+    try:
+        if not SNIPPETS.exists():
+            return blank
+        d = json.loads(SNIPPETS.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            return blank
+        out = {
+            "template": str(d.get("template") or DEFAULT_TEMPLATE),
+            "versions": [],
+        }
+        for v in (d.get("versions") or []):
+            if not isinstance(v, dict):
+                continue
+            ver = str(v.get("ver") or "").strip()
+            if not ver:
+                continue
+            link = str(v.get("link") or "").strip()
+            chan = str(v.get("channel") or "").strip() or channel_of(link)
+            out["versions"].append({
+                "ver": ver,
+                "channel": chan,
+                "filename": str(v.get("filename") or "").strip(),
+                "link": link,
+                "pwd": str(v.get("pwd") or "").strip(),
+            })
+        # 版本号倒序；同版本内按渠道名排序（稳定）
+        out["versions"].sort(
+            key=lambda x: (_ver_key(x["ver"]), x["channel"]), reverse=True)
+        return out
+    except Exception:
+        return blank
+
+
+def _ver_key(v: str):
+    """版本号排序键（"2.2.10" 要排在 "2.2.9" 之后，不能按字符串排）。"""
+    parts = []
+    for seg in str(v).replace("-", ".").split("."):
+        parts.append(int(seg) if seg.isdigit() else 0)
+    while len(parts) < 4:
+        parts.append(0)
+    return tuple(parts[:4])
+
+
+def snippets_save(d: dict):
+    """写回话术库（原子写，避免写一半断电把文件弄坏）。"""
+    tmp = SNIPPETS.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    tmp.replace(SNIPPETS)
+
+
+def channel_of(link: str) -> str:
+    """从链接判断是哪个网盘（用于同一版本多网盘并存时的区分）。"""
+    lk = (link or "").lower()
+    if "pan.quark.cn" in lk:
+        return "夸克"
+    if "baidu.com" in lk:
+        return "百度"
+    if "drive.uc.cn" in lk:
+        return "UC"
+    if "aliyundrive" in lk or "alipan" in lk:
+        return "阿里"
+    if "115.com" in lk:
+        return "115"
+    return "其他"
+
+
+def parse_share_text(text: str) -> dict:
+    """从网盘「分享文字」里自动解析出 版本号/文件名/链接/提取码。
+
+    ★ 为什么要有（2026-10-21 用户需求）：
+      百度网盘每次生成的分享文字是固定格式，手工拆成 4 个字段太麻烦、
+      还容易填错版本号。这里一次粘贴全部解析出来。
+
+    支持两个网盘（2026-10-21 加夸克）：
+
+    【百度网盘】
+      通过网盘分享的文件：微信视频号下载器-v2.1.8-win64-portable.zip
+      链接: https://pan.baidu.com/s/1sAqh5NZiMPGdceG4z_TEPA?pwd=bfcr 提取码: bfcr
+
+    【夸克网盘】
+      我用夸克网盘给你分享了「微信视频号下载器-v2.2.2-win64-portable.zip」，
+      点击链接或复制整段内容，打开「夸克网盘APP」即可获取。
+      /~f3fa3bgctl~/:/          ← ★ 这行不是链接，别抓它
+      链接：https://pan.quark.cn/s/4402de3baafd?pwd=xsSS
+      提取码：xsSS
+
+    ▲ 这个函数必须与实际粘贴内容**逐字符核对过**再改，别凭想象改正则。
+    """
+    out = {"ver": "", "filename": "", "link": "", "pwd": ""}
+    if not text:
+        return out
+    t = str(text).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # ---- ① 文件名 ----
+    #   a) 夸克风格：书名号里带扩展名的（「微信视频号下载器-v2.2.2-...zip」）
+    m = re.search(r"[「『]([^」』\n]+?\.(?:zip|rar|7z|exe|tar\.gz))[」』]", t, re.I)
+    if m:
+        out["filename"] = m.group(1).strip()
+    #   b) 百度风格：「通过网盘分享的文件：X」
+    if not out["filename"]:
+        m = re.search(
+            r"(?:通过网盘分享的文件|分享的文件|分享文件|文件名称|文件名)\s*[:：]\s*"
+            r"([^\n]+?)\s*$",
+            t, re.M)
+        if m:
+            out["filename"] = m.group(1).strip()
+    #   c) 兜底：任意位置像安装包文件名的片段
+    if not out["filename"]:
+        m = re.search(r"([^\s/\\:：「」『』]+\.(?:zip|rar|7z|exe|tar\.gz))", t, re.I)
+        if m:
+            out["filename"] = m.group(1).strip()
+
+    # ---- ② 链接 ----
+    #   ★ 夸克那行 `/~f3fa3bgctl~:/` 不是 http 链接，这里的 \bhttps?:// 不会误抓。
+    #   支持：pan/yun.baidu.com、pan.quark.cn、drive.uc.cn（夸克同源）
+    m = re.search(
+        r"(https?://(?:(?:pan|yun)\.baidu\.com|pan\.quark\.cn|drive\.uc\.cn)"
+        r"/(?:s/[\w\-]+|share/init\?surl=[\w\-]+)"
+        r"(?:\?[^\s\"'<>]*)?)", t)
+    if not m:
+        # 兜底：任意 http(s) 链接（其他网盘也能用）
+        m = re.search(r"(https?://[^\s\"'<>]+)", t)
+    if m:
+        out["link"] = m.group(1).strip().rstrip("，,。；;")
+        # 去掉链接尾部粘上的中文/标点（如 "?pwd=xsSS提取码"）
+        out["link"] = re.split(r"(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])",
+                               out["link"])[0]
+
+    # ---- ③ 提取码 ----
+    #   优先从链接里的 pwd= 取；再找「提取码: xxxx」
+    if out["link"]:
+        mp = re.search(r"[?&]pwd=([A-Za-z0-9]{2,12})", out["link"])
+        if mp:
+            out["pwd"] = mp.group(1)
+    if not out["pwd"]:
+        mp = re.search(r"(?:提取码|访问码|密码|口令)\s*[:：]?\s*([A-Za-z0-9]{4,12})", t)
+        if mp:
+            out["pwd"] = mp.group(1)
+
+    # ---- ④ 版本号：从文件名里抽 v2.1.8 ----
+    src = out["filename"] or t
+    mv = re.search(r"[vV]\s*(\d+(?:\.\d+){1,3})", src)
+    if mv:
+        out["ver"] = mv.group(1)
+    else:
+        # 文件名里没 v 前缀时，退一步找形如 2.1.8 的片段
+        mv = re.search(r"(?<![\d.])(\d+\.\d+(?:\.\d+)*)(?![\d.])", src)
+        if mv:
+            out["ver"] = mv.group(1)
+
+    return out
+
+
+def snippet_text(ver: str, channel: str = "") -> str:
+    """拼出某个版本+渠道的完整话术（模板 + 网盘信息）。
+
+    ★ channel 为空时取该版本的第一条（用于兼容旧调用）。
+    """
+    d = snippets_load()
+    cands = [v for v in d["versions"] if v["ver"] == ver]
+    if channel:
+        cands = [v for v in cands if v["channel"] == channel] or cands
+    item = cands[0] if cands else None
+    if not item:
+        return ""
+    lines = [d["template"].strip()]
+    if item["filename"]:
+        lines.append(f"通过网盘分享的文件：{item['filename']}")
+    if item["link"]:
+        link = item["link"]
+        if item["pwd"] and "pwd=" not in link:
+            link = f"{link}?pwd={item['pwd']}"
+        if item["pwd"]:
+            lines.append(f"链接: {link} 提取码: {item['pwd']}")
+        else:
+            lines.append(f"链接: {link}")
+    return "\n".join([x for x in lines if x])
+
+
 def ledger_all() -> list:
     if not LEDGER.exists():
         return []
@@ -285,7 +492,127 @@ button.gray{background:#e5e7eb;color:#374151}
 .tag.red{background:#fee2e2;color:#991b1b}
 .tag.green{background:#dcfce7;color:#166534}
 h3{font-size:15px;margin:4px 0 10px;color:#111827}
+/* ★ v2.2.3 话术复制区 */
+.snip{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+      padding:12px;margin:10px 0;font-size:13.5px;color:#334155;
+      white-space:pre-wrap;word-break:break-all;line-height:1.7;
+      max-height:260px;overflow:auto}
+.row2{display:flex;gap:8px}
+.row2>*{flex:1}
+.btn2{padding:13px;border:none;border-radius:10px;background:#0f766e;color:#fff;
+      font-size:15px;font-weight:600;cursor:pointer;width:100%}
+.btn2:active{background:#0b5750}
+.btn2.gray{background:#e5e7eb;color:#374151}
+.btn2:disabled{background:#cbd5e1;color:#64748b}
+.ver-item{border:1px solid #e5e7eb;border-radius:10px;padding:11px 12px;
+          margin-bottom:8px;font-size:13px}
+.ver-item b{color:#0f766e;font-size:14px}
+.ver-item .lk{font-family:Consolas,monospace;font-size:11.5px;color:#64748b;
+              word-break:break-all;display:block;margin-top:3px}
+.del{background:#fee2e2;color:#991b1b;border:none;border-radius:7px;
+     padding:7px 12px;font-size:13px;cursor:pointer;width:auto}
 """
+
+
+# ★ v2.2.3：复制到剪贴板（带降级）
+#   navigator.clipboard 只在 HTTPS / localhost 可用；
+#   手机通过隧道访问时若被降级成 http 会失败 → 必须有 execCommand 兜底
+JS_COPY = """
+function cp(txt, btn){
+  var done=function(){
+    if(btn){var old=btn.innerText;btn.innerText='✅ 已复制';
+      setTimeout(function(){btn.innerText=old;},1400);}
+  };
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      navigator.clipboard.writeText(txt).then(done).catch(function(){fb();});
+    }else{fb();}
+  }catch(e){fb();}
+  function fb(){
+    var ta=document.createElement('textarea');
+    ta.value=txt;
+    ta.style.cssText='position:fixed;left:-9999px;top:0';
+    document.body.appendChild(ta);
+    ta.focus();ta.select();
+    try{document.execCommand('copy');done();}catch(e){alert('复制失败，请长按文字手动复制');}
+    document.body.removeChild(ta);
+  }
+}
+"""
+
+
+# ★ v2.2.3：粘贴即解析脚本（独立常量，避免与 f-string 的 {} 冲突）
+JS_PASTE = r"""<script>
+/* ★ 粘贴即解析（前端即时反馈，不用等提交）
+   与服务端 parse_share_text() 同一套规则；服务端也有解析兜底，
+   前端失效（老浏览器）时仍能保存。 */
+function autoParse(){
+  var el=document.getElementById('raw');
+  var t=(el&&el.value)||'';
+  var msg=document.getElementById('pmsg');
+  if(!t.trim()){msg.innerText='粘进来后下面 4 栏会自动填好，确认无误再点保存。';return;}
+  t=t.replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+
+  // 文件名（夸克在「」里 / 百度在「通过网盘分享的文件：」后）
+  var fn='';
+  var m=t.match(/[「『]([^」』\n]+?\.(?:zip|rar|7z|exe|tar\.gz))[」』]/i);
+  if(m){fn=m[1].trim();}
+  if(!fn){
+    var mb=t.match(/(?:通过网盘分享的文件|分享的文件|分享文件|文件名称|文件名)\s*[:：]\s*([^\n]+?)\s*$/m);
+    if(mb){fn=mb[1].trim();}
+  }
+  if(!fn){
+    var m2=t.match(/([^\s\/\\:：「」『』]+\.(?:zip|rar|7z|exe|tar\.gz))/i);
+    if(m2)fn=m2[1].trim();
+  }
+
+  // 链接
+  var lk='';
+  var ml=t.match(/(https?:\/\/(?:(?:pan|yun)\.baidu\.com|pan\.quark\.cn|drive\.uc\.cn)\/(?:s\/[\w\-]+|share\/init\?surl=[\w\-]+)(?:\?[^\s"'<>]*)?)/);
+  if(!ml){ml=t.match(/(https?:\/\/[^\s"'<>]+)/);}
+  if(ml){
+    lk=ml[1].trim().replace(/[，,。；;]$/,'');
+    // 去掉链接尾部粘上的中文（如 "?pwd=xsSS提取码"）
+    var cut=lk.search(/[\u4e00-\u9fff]/);
+    if(cut>0)lk=lk.slice(0,cut);
+  }
+
+  // 提取码
+  var pw='';
+  if(lk){
+    var mp=lk.match(/[?&]pwd=([A-Za-z0-9]{2,12})/);
+    if(mp)pw=mp[1];
+  }
+  if(!pw){
+    var mp2=t.match(/(?:提取码|访问码|密码|口令)\s*[:：]?\s*([A-Za-z0-9]{4,12})/);
+    if(mp2)pw=mp2[1];
+  }
+
+  // 版本号（从文件名抽 v2.1.8）
+  var ver='';
+  var src=fn||t;
+  var mv=src.match(/[vV]\s*(\d+(?:\.\d+){1,3})/);
+  if(mv){ver=mv[1];}
+  else{
+    var mv2=src.match(/(?<![\d.])(\d+\.\d+(?:\.\d+)*)(?![\d.])/);
+    if(mv2)ver=mv2[1];
+  }
+
+  if(fn)document.getElementById('f_fn').value=fn;
+  if(lk)document.getElementById('f_lk').value=lk;
+  if(pw)document.getElementById('f_pw').value=pw;
+  if(ver)document.getElementById('f_ver').value=ver;
+
+  var got=[];
+  if(ver)got.push('版本 '+ver);
+  if(fn)got.push('文件名');
+  if(lk)got.push('链接');
+  if(pw)got.push('提取码 '+pw);
+  msg.innerHTML = got.length
+    ? '✅ 已识别：'+got.join(' · ')+'（可手动改）'
+    : '⚠️ 没识别出来，请手动填下面 4 栏';
+}
+</script>"""
 
 
 def page(title: str, body: str, nav: str = "", flash: str = "") -> str:
@@ -305,7 +632,17 @@ NAV = """<nav>
 <a href="/" class="{0}">发码</a>
 <a href="/customers" class="{1}">查客户</a>
 <a href="/suspect" class="{2}">转卖追踪</a>
+<a href="/snippets" class="{3}">话术</a>
 </nav>"""
+
+
+def nav_on(idx: int) -> str:
+    """生成导航高亮参数（4 项，索引 0~3）。
+
+    ★ 用函数而不是到处手写 format 参数 ——
+      加导航项时只改这里，不会漏掉某个页面。
+    """
+    return NAV.format(*["on" if i == idx else "" for i in range(4)])
 
 
 class H(BaseHTTPRequestHandler):
@@ -329,7 +666,11 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def _redirect(self, to, cookie=None):
+    def _redirect(self, to, cookie=None, ok=""):
+        """303 重定向。ok 非空时把提示塞进 URL（目标页读 q['ok'] 显示）。"""
+        if ok:
+            sep = "&" if "?" in to else "?"
+            to = f"{to}{sep}ok={quote(ok)}"
         self.send_response(303)
         self.send_header("Location", to)
         if cookie:
@@ -384,6 +725,9 @@ class H(BaseHTTPRequestHandler):
             return self._page_upgrade(q)
         if p == "/suspect":
             return self._page_suspect()
+        # ★ v2.2.3：话术库（模板 + 各版本网盘链接，可编辑）
+        if p == "/snippets":
+            return self._page_snippets(q)
         self._send(404, page("404", "<div class='card'>页面不存在</div>"))
 
     def do_POST(self):
@@ -417,6 +761,9 @@ class H(BaseHTTPRequestHandler):
             return self._do_void(form, voided=True)
         if u.path == "/restore":
             return self._do_void(form, voided=False)
+        # ★ v2.2.3：话术库保存 / 版本增删
+        if u.path == "/snippets_save":
+            return self._do_snippets_save(form)
         self._send(404, "not found")
 
     # ---------- 发码页 ----------
@@ -424,13 +771,60 @@ class H(BaseHTTPRequestHandler):
         flash = ""
         code = q.get("code", [""])[0]
         if code:
+            sn = snippets_load()
+            vers = sn["versions"]
+            # 版本下拉：默认选第一个（版本号最大 + 渠道排序靠前的）
+            # value 用 "版本||渠道"，让同一版本的百度/夸克能分别选
+            vopts = "".join(
+                f"<option value=\"{html.escape(v['ver'] + '||' + v.get('channel',''))}\""
+                f"{' selected' if i == 0 else ''}>"
+                f"v{html.escape(v['ver'])}"
+                f"{' · ' + html.escape(v['channel']) if v.get('channel') else ''}"
+                f"{' — ' + html.escape(v['filename'][:24]) if v['filename'] else ''}"
+                f"</option>"
+                for i, v in enumerate(vers))
+
+            if vers:
+                snip_block = f"""
+<div style="margin-top:14px;padding-top:14px;border-top:1px dashed #cbd5e1">
+  <label style="margin-top:0">② 发给客户的话术（选版本 → 一键复制）</label>
+  <select id="ver" onchange="snipUpd()">{vopts}</select>
+  <div class="snip" id="snip">{html.escape(snippet_text(vers[0]['ver']))}</div>
+  <div class="row2">
+    <button type="button" class="btn2" id="bc" onclick="copyBoth()">
+      📋 复制话术 + 授权码</button>
+    <button type="button" class="btn2 gray" onclick="copySnip()">
+      只复制话术</button>
+  </div>
+  <p class="meta" style="margin-top:8px">
+    「复制话术 + 授权码」= 套路词 + 网盘链接 + 授权码，一次性粘给客户<br>
+    要改套路词或换网盘链接 → <a href="/snippets">点这里编辑话术库</a></p>
+</div>"""
+            else:
+                snip_block = """
+<div style="margin-top:14px;padding-top:14px;border-top:1px dashed #cbd5e1">
+  <div class="warn">⚠️ 话术库还没有版本链接，无法一键复制话术。
+  <a href="/snippets">去添加版本和网盘链接</a></div>
+</div>"""
+
             flash = (f"<div class='card'><div class='ok'>✅ 已生成并登记台账</div>"
+                     f"<label style='margin-top:10px'>① 授权码</label>"
                      f"<div class='code' id='c'>{html.escape(code)}</div>"
-                     f"<button onclick=\"navigator.clipboard.writeText("
-                     f"document.getElementById('c').innerText);this.innerText='已复制'\">"
-                     f"复制授权码</button>"
-                     f"<p class='meta'>把这个码发给客户，在软件「🔑 授权管理」粘贴激活</p>"
-                     f"</div>")
+                     f"<button type='button' onclick=\"cp(document.getElementById('c')"
+                     f".innerText,this)\">复制授权码</button>"
+                     f"<p class='meta'>把码发给客户，在软件「🔑 授权管理」粘贴激活</p>"
+                     f"{snip_block}"
+                     f"</div>"
+                     f"<script>{JS_COPY}"
+                     f"const CODE={json.dumps(code)};"
+                     f"const SNIPS={json.dumps({(v['ver'] + '||' + v.get('channel','')): snippet_text(v['ver'], v.get('channel','')) for v in vers}, ensure_ascii=False)};"
+                     f"function snipUpd(){{var v=document.getElementById('ver').value;"
+                     f"document.getElementById('snip').innerText=SNIPS[v]||'';}}"
+                     f"function copySnip(){{var v=document.getElementById('ver').value;"
+                     f"cp(SNIPS[v]||'','');}}"
+                     f"function copyBoth(){{var v=document.getElementById('ver').value;"
+                     f"cp((SNIPS[v]||'')+'\\n\\n授权码：'+CODE,'');}}"
+                     f"</script>")
         opts = "".join(f"<option value={t}>{l}</option>"
                        for t, l in TIER_LABEL.items())
         body = f"""
@@ -468,7 +862,7 @@ class H(BaseHTTPRequestHandler):
 <button>生成授权码</button>
 </form></div>"""
         return self._send(200, page("发码", body,
-                                    NAV.format("on", "", ""), flash))
+                                    nav_on(0), flash))
 
     def _do_gen(self, form):
         try:
@@ -596,7 +990,7 @@ class H(BaseHTTPRequestHandler):
 <p class="meta" style="margin-top:8px">
 点「⚙ 管理」可以：改档位、改客户名、作废/恢复授权码。</p></div>
 <div class="card">{''.join(items) or '<p class="meta">没有记录</p>'}</div>"""
-        return self._send(200, page("查客户", body, NAV.format("", "on", "")))
+        return self._send(200, page("查客户", body, nav_on(1)))
 
     def _merged_rows(self):
         """把台账归一化成一"行"一客户（v2.1.5）。
@@ -688,7 +1082,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, page("改档位", f"<div class='card'>"
                 f"<div class='err'>找不到这个授权码：{html.escape(code)}</div>"
                 f"<a href='/customers'><button class='gray'>返回查客户</button></a>"
-                f"</div>", NAV.format("", "on", "")))
+                f"</div>", nav_on(1)))
 
         prod = int(old.get("product") or PRODUCT_VIDEO)
         cur_tier = int(old.get("tier") or 0)
@@ -811,7 +1205,7 @@ class H(BaseHTTPRequestHandler):
 </div>
 
 <div class="card"><a href="/customers"><button class="gray">返回查客户</button></a></div>"""
-        return self._send(200, page("客户管理", body, NAV.format("", "on", "")))
+        return self._send(200, page("客户管理", body, nav_on(1)))
 
     # ---------- 作废状态（台账事件驱动） ----------
     def _status_of(self, code: str) -> str:
@@ -900,7 +1294,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, page("改档位", f"<div class='card'>"
                 f"<div class='err'>生成失败：{html.escape(str(e))}</div>"
                 f"<a href='/customers'><button class='gray'>返回</button></a>"
-                f"</div>", NAV.format("", "on", "")))
+                f"</div>", nav_on(1)))
 
         rec = {
             "code": new_code,
@@ -944,6 +1338,157 @@ class H(BaseHTTPRequestHandler):
             pass
 
     # ---------- 转卖追踪 ----------
+    # ---------- 话术库（v2.2.3） ----------
+    def _page_snippets(self, q):
+        d = snippets_load()
+        ok = q.get("ok", [""])[0]
+        flash = f"<div class='card'><div class='ok'>✅ {html.escape(ok)}</div></div>" if ok else ""
+
+        # 版本列表（带删除）
+        items = ""
+        for i, v in enumerate(d["versions"]):
+            chan = v.get("channel") or ""
+            # ★ tag 先算好，不能写在 f-string 里（反斜杠会触发 SyntaxError）
+            tag_html = ('<span class="tag">' + html.escape(chan) + '</span>'
+                        if chan else "")
+            ver_esc = html.escape(v["ver"])
+            chan_esc = html.escape(chan)
+            del_js = ("document.getElementById('dv').value='" + ver_esc
+                      + "';document.getElementById('dc').value='" + chan_esc
+                      + "';document.getElementById('df').submit()")
+            items += (
+                "<div class='ver-item'>"
+                "<b>v" + ver_esc + "</b>" + tag_html
+                + "<span class='lk'>"
+                + html.escape(v['filename'] or '(未填文件名)') + "</span>"
+                + "<span class='lk'>"
+                + html.escape(v['link'] or '(未填链接)')
+                + ('  提取码 ' + html.escape(v['pwd']) if v['pwd'] else "")
+                + "</span>"
+                + "<div style='margin-top:8px;display:flex;gap:8px'>"
+                + "<button type='button' class='del' onclick=\"" + del_js + "\">"
+                + "删除</button></div></div>"
+            )
+        if not items:
+            items = "<div class='warn'>还没有任何版本，先在下面添加一个。</div>"
+
+        body = f"""
+<div class="card"><h3>① 套路词（每次发码都会带上）</h3>
+<form method="post" action="/snippets_save">
+<input type="hidden" name="act" value="save_template">
+<textarea name="template" rows="3" style="width:100%;padding:11px 12px;
+  border:1px solid #d1d5db;border-radius:9px;font-size:15px;
+  font-family:inherit;line-height:1.6">{html.escape(d['template'])}</textarea>
+<p class="meta">例如：请您查收，满意的话帮忙给个红花，遇到问题的话联系我。</p>
+<button>保存套路词</button>
+</form></div>
+
+<div class="card"><h3>② 已保存的版本（{len(d['versions'])} 个）</h3>
+{items}
+</div>
+
+<div class="card"><h3>③ 添加 / 更新版本（粘贴即自动解析）</h3>
+<form method="post" action="/snippets_save" id="vf">
+<input type="hidden" name="act" value="save_version">
+<label>把网盘生成的分享文字整段粘进来 ↓（<b>百度网盘 / 夸克网盘</b> 都支持）</label>
+<textarea id="raw" name="raw" rows="4" placeholder="【百度】通过网盘分享的文件：微信视频号下载器-v2.1.8-win64-portable.zip
+链接: https://pan.baidu.com/s/1sAqh5NZiMPGdceG4z_TEPA?pwd=bfcr 提取码: bfcr
+
+【夸克】我用夸克网盘给你分享了「微信视频号下载器-v2.2.2-win64-portable.zip」
+链接：https://pan.quark.cn/s/4402de3baafd?pwd=xsSS
+提取码：xsSS"
+ oninput="autoParse()" style="width:100%;padding:11px 12px;
+  border:1px solid #d1d5db;border-radius:9px;font-size:13.5px;
+  font-family:Consolas,monospace;line-height:1.7"></textarea>
+<p class="meta" id="pmsg">粘进来后下面 4 栏会自动填好，确认无误再点保存。</p>
+
+<label>版本号 *（自动识别，可改）</label>
+<input name="ver" id="f_ver" required placeholder="2.1.8">
+<label>网盘文件名（自动识别，可改）</label>
+<input name="filename" id="f_fn" placeholder="微信视频号下载器-v2.1.8-win64-portable.zip">
+<label>分享链接 *（自动识别，可改）</label>
+<input name="link" id="f_lk" placeholder="https://pan.baidu.com/s/1xxxx?pwd=abcd">
+<label>提取码（自动识别，可改）</label>
+<input name="pwd" id="f_pw" placeholder="bfcr">
+<button>保存这个版本</button>
+</form>
+<p class="meta" style="margin-top:8px">
+同一版本号会覆盖旧的；链接里已带 <code>?pwd=</code> 时提取码可留空。</p>
+</div>
+
+<form method="post" action="/snippets_save" id="df" style="display:none">
+<input type="hidden" name="act" value="del_version">
+<input type="hidden" name="ver" id="dv">
+<input type="hidden" name="channel" id="dc">
+</form>
+
+{JS_PASTE}
+"""
+        return self._send(200, page("话术库", body, nav_on(3), flash))
+
+    def _do_snippets_save(self, form):
+        act = (form.get("act") or "").strip()
+        d = snippets_load()
+        try:
+            if act == "save_template":
+                tpl = (form.get("template") or "").strip()
+                d["template"] = tpl or DEFAULT_TEMPLATE
+                snippets_save(d)
+                return self._redirect("/snippets", None,
+                                      ok="套路词已保存")
+            if act == "save_version":
+                # ★ v2.2.3：若前端没填全但粘贴了原始分享文字 → 服务端再解析一次兜底
+                raw_text = (form.get("raw") or "").strip()
+                ver = (form.get("ver") or "").strip().lstrip("vV")
+                fn = (form.get("filename") or "").strip()
+                link = (form.get("link") or "").strip()
+                pwd = (form.get("pwd") or "").strip()
+                if raw_text and (not ver or not link):
+                    parsed = parse_share_text(raw_text)
+                    ver = ver or parsed["ver"]
+                    fn = fn or parsed["filename"]
+                    link = link or parsed["link"]
+                    pwd = pwd or parsed["pwd"]
+                if not ver:
+                    raise ValueError("版本号不能为空（可粘贴分享文字自动识别）")
+                item = {"ver": ver, "filename": fn, "link": link, "pwd": pwd}
+                if not item["link"]:
+                    raise ValueError("分享链接不能为空（可粘贴分享文字自动识别）")
+                # ★ 按「版本号 + 网盘渠道」去重：
+                #   同一版本可以在百度、夸克各存一份（客户可能只认某一个），
+                #   同版本同渠道才覆盖。
+                chan = channel_of(link)
+                item["channel"] = chan
+                d["versions"] = [
+                    v for v in d["versions"]
+                    if not (v.get("ver") == ver
+                            and (v.get("channel") or channel_of(v.get("link", ""))) == chan)
+                ]
+                d["versions"].append(item)
+                snippets_save(d)
+                return self._redirect("/snippets", None,
+                                      ok=f"v{ver}（{chan}）已保存")
+            if act == "del_version":
+                ver = (form.get("ver") or "").strip()
+                chan = (form.get("channel") or "").strip()
+                if chan:
+                    d["versions"] = [
+                        v for v in d["versions"]
+                        if not (v["ver"] == ver
+                                and (v.get("channel") or channel_of(v.get("link", ""))) == chan)
+                    ]
+                else:
+                    d["versions"] = [v for v in d["versions"] if v["ver"] != ver]
+                snippets_save(d)
+                return self._redirect("/snippets", None,
+                                      ok=f"v{ver}{('（' + chan + '）') if chan else ''} 已删除")
+        except Exception as e:                              # noqa: BLE001
+            return self._send(200, page("话术库", f"<div class='card'>"
+                f"<div class='err'>保存失败：{html.escape(str(e))}</div>"
+                f"<a href='/snippets'><button class='gray'>返回</button></a>"
+                f"</div>", nav_on(3)))
+        return self._redirect("/snippets", None)
+
     def _page_suspect(self):
         s = vps_suspect()
         led = {code_hash(r.get("code", "")): r for r in ledger_all() if r.get("code")}
@@ -959,7 +1504,7 @@ class H(BaseHTTPRequestHandler):
                     f"<p class='meta'>暂无数据</p></div>"
                     f"<div class='card'><h3>② 一机多码 —— 收集授权码</h3>"
                     f"<p class='meta'>暂无数据</p></div>")
-            return self._send(200, page("转卖追踪", body, NAV.format("", "", "on")))
+            return self._send(200, page("转卖追踪", body, nav_on(2)))
 
         def who(ch):
             r = led.get(ch)
@@ -995,7 +1540,7 @@ class H(BaseHTTPRequestHandler):
                           "<div class='ok'>✅ 没有发现</div></div>")
 
         body = "".join(blocks)
-        return self._send(200, page("转卖追踪", body, NAV.format("", "", "on")))
+        return self._send(200, page("转卖追踪", body, nav_on(2)))
 
 
 def main():
