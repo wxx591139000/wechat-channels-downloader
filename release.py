@@ -372,7 +372,35 @@ def make_share_zip(v: tuple, out_dir: Path, force: bool, edition_sfx: str = "",
         for _n, _why in _leak[:10]:
             log(f"  ❌ 分享包里发现敏感文件: {_n}  ← {_why}")
         sys.exit("❌ 打包自检失败：分享包内不允许出现授权/配置/日志文件")
-    log("  ✅ 分享包自检通过：无 config.json / records.json / 密钥 / 日志")
+    # ★★★ v2.2.8：文本内容扫描 —— 包内说明文档不得含完整授权码
+    #
+    #   事故（2026-10-23）：usage_instructions_v20.txt 的"格式示例"
+    #   贴的是一个**真实可用**的授权码（tier=1000），
+    #   v2.2.2~v2.2.7 所有发出的 zip 里都带着它。
+    import re as _re
+    _LIC_RX = _re.compile(rb"SPHDL-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-"
+                          rb"[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}")
+    _txt_leak = []
+    with zipfile.ZipFile(zip_path) as _z:
+        for _n in _z.namelist():
+            if not _n.lower().endswith((".txt", ".md", ".json", ".bat", ".ini")):
+                continue
+            try:
+                _data = _z.read(_n)
+            except Exception:
+                continue
+            for _m in _LIC_RX.finditer(_data):
+                _code = _m.group(0).decode("ascii", "replace")
+                # 全 0 是文档里的格式示例，允许
+                if set(_code.replace("SPHDL-", "").replace("-", "")) == {"0"}:
+                    continue
+                _txt_leak.append((_n, _code))
+    if _txt_leak:
+        for _n, _c in _txt_leak[:10]:
+            log(f"  ❌ 包内文本含完整授权码: {_n}  →  {_c}")
+        log("     （格式示例请用全 0：SPHDL-0000-0000-0000-0000-0000-0000）")
+        sys.exit("❌ 打包自检失败：分享包内的文本不得出现真实授权码")
+    log("  ✅ 分享包自检通过：无 config.json / records.json / 密钥 / 日志 / 授权码")
     log(f"  ✅ zip 完成: {zip_path.stat().st_size / 1048576:.1f} MB")
     log(f"  sha256: {sha}")
     return zip_path
