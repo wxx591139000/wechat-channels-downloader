@@ -573,6 +573,9 @@ def main():
                          "用于同版本号重复构建时避开被锁住的旧目录"
                          "（Windows 上杀软/残留句柄常锁住 dist 里的文件）")
     ap.add_argument("--no-commit", action="store_true")
+    # ★ v2.2.10：跳过「同步 CHANGELOG 到发码后台」（离线/没网时用）
+    ap.add_argument("--no-sync-changelog", action="store_true",
+                    help="不把 CHANGELOG 同步到 VPS 发码后台")
     ap.add_argument("--note", default="")
     ap.add_argument("--max-records", default=None, choices=sorted(EDITION_CLI),
                     help="预置锁档构建：档位写死（500/1000/2000/20000）")
@@ -640,6 +643,37 @@ def main():
     log(f"\n🎉 发布完成: v{new[0]}.{new[1]}.{new[2]}")
     log(f"  构建: dist/v{new[0]}.{new[1]}.{new[2]}/")
     log(f"  分享: dist/{ZIP_PREFIX}{new[0]}.{new[1]}.{new[2]}{ZIP_SUFFIX}")
+
+    # ★★★ v2.2.10：把 CHANGELOG 同步到发码后台
+    #
+    #   为什么要有（2026-10-23）：
+    #     发码后台的「版本更新要点」是从 VPS 上的
+    #     /opt/sphdl-admin/data/CHANGELOG.md 里提取的。
+    #     此前靠手工 scp，**发版时很容易忘** ——
+    #     结果 v2.2.8 / v2.2.9 上线后后台显示「暂无更新要点」。
+    #     现在发完版自动 scp，并重启服务让缓存失效。
+    #
+    #   失败不阻断发版（网络问题不该让打包白跑），只提示手工补。
+    if not getattr(args, "no_sync_changelog", False):
+        try:
+            r = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=8", "vps-aliyun",
+                 "sudo tee /opt/sphdl-admin/data/CHANGELOG.md >/dev/null "
+                 "&& sudo systemctl restart sphdl-admin && echo SYNCED"],
+                input=CHANGELOG.read_text(encoding="utf-8"),
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=90)
+            if "SYNCED" in (r.stdout or ""):
+                log("  ✅ 更新要点已同步到发码后台（VPS CHANGELOG）")
+            else:
+                _e = (r.stderr or r.stdout or "").strip()[:100]
+                log(f"  ⚠️ 更新要点同步失败（发版不受影响）：{_e}")
+                log("     手工补：scp CHANGELOG.md vps-aliyun:/tmp/ && "
+                    "ssh vps-aliyun 'sudo cp /tmp/CHANGELOG.md "
+                    "/opt/sphdl-admin/data/ && sudo systemctl restart sphdl-admin'")
+        except Exception as _e:                      # noqa: BLE001
+            log(f"  ⚠️ 更新要点同步异常（发版不受影响）：{str(_e)[:80]}")
+            log("     后台会显示「暂无更新要点」，可手工 scp CHANGELOG.md 补救")
 
 
 if __name__ == "__main__":
