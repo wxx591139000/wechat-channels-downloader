@@ -239,6 +239,37 @@ def build_frozen(v: tuple, force: bool, edition_sfx: str = "",
     if out_dir.exists() and not force:
         sys.exit(f"❌ {out_dir} 已存在（保留旧版本）。确认要覆盖请加 --force")
     log(f"📦 PyInstaller 构建 → {out_dir}")
+    # ★★★ v2.2.9 打包前自动清理：构建目录里绝不许带本机数据
+    #
+    #   客户担忧（2026-10-23）：
+    #   「视频清单里面有很多文件，假如我把 2.2.8 压缩包发给用户，
+    #     他们不会看到我的这些视频清单吧？」
+    #
+    #   实测发现历史版本目录（v2.2.2/3/4）里确实残留着
+    #   config.json + records.json（含开发机的授权码和视频清单）。
+    #   虽然 zip 有白名单+黑名单双拦，但**残留本身就是隐患**：
+    #   一旦有人手工打包、或用别的工具压缩整个目录，就全泄了。
+    #   所以这里构建前主动清一遍，让目录本身就干净。
+    _purge = ("config.json", "config.json.bak", "records.json",
+              "records.json.bak", "proxy_backup.json", ".devcache")
+    if out_dir.exists():
+        for _fn in _purge:
+            _f = out_dir / _fn
+            if _f.exists():
+                try:
+                    _f.unlink()
+                    log(f"  🧹 构建目录已清理残留: {_fn}")
+                except Exception as _e:
+                    log(f"  ⚠️ 清理 {_fn} 失败: {_e}")
+    # 源码根目录同样清理（PyInstaller 有时会把同目录文件带进包）
+    for _fn in _purge:
+        _f = ROOT / _fn
+        if _f.exists():
+            try:
+                _f.unlink()
+                log(f"  🧹 源码目录已清理残留: {_fn}")
+            except Exception:
+                pass
     # ★★★ v2.2.7 打包前红线：源目录里不许有含授权码的 config.json
     #   （用户要求：分享出去的包默认不能有授权，授权只跟电脑走）
     _src_cfg = ROOT / "config.json"
