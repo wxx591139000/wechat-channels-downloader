@@ -93,13 +93,24 @@ def run_selftest(args):
     async def _amain():
         from mitmproxy import addons, options
         from mitmproxy.master import Master
+        from sphdl import netfix                    # ★ v2.2.4
         from sphdl.addon import SphAddon
+
+        # ★ v2.2.4：确认 netfix 模块被打进包、且逻辑可用
+        #   （打包后 .py 会被编进 exe，这里实际调用一遍才算真的验证到）
+        _v6 = netfix.ipv6_available()
+        _patched = netfix.install_prefer_ipv4()
+        logger.ok(f"网络修正：IPv6 可用={_v6}  已启用 IPv4 优先={_patched}")
 
         opts = options.Options(listen_host=config.PROXY_HOST,
                                listen_port=port, ssl_insecure=True)
         master = Master(opts)
         master.addons.add(*addons.default_addons())
-        master.addons.add(SphAddon(Pipeline(args.dir)))
+        _addon = SphAddon(Pipeline(args.dir))
+        master.addons.add(_addon)
+        # ★ 确认「只拦微信其余透传」的白名单已加载
+        logger.ok(f"流量策略：拦截 {len(_addon._intercept_re)} 类微信域名，"
+                  f"其余透传={'开' if _addon.passthrough_others else '关'}")
         task = asyncio.create_task(master.run())
         await asyncio.sleep(2)  # 等监听起来
         # 验证端口真的在听

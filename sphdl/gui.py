@@ -609,6 +609,15 @@ class SniffEngine:
 
         self.port = port
         self._running = True
+        # ★ v2.2.4：IPv6 不通时让解析只回 IPv4
+        #   （微信域名有 AAAA 记录，mitmproxy 连 IPv6 会卡死 → 视频号播不了）
+        try:
+            from . import netfix
+            if netfix.install_prefer_ipv4():
+                self.app.push_log(
+                    "info", "网络：本机 IPv6 不通，已自动改用 IPv4（避免代理卡住）")
+        except Exception:
+            pass
         # 注入 JS 的 bridge 回传端口必须与本次启动端口一致，否则改端口后
         # 钩子仍回传 8899，bridge 捕获静默失效（2026-08-26 审查发现）
         if self.app.addon is not None:

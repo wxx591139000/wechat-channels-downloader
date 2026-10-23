@@ -2,6 +2,54 @@
 
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
+## [2.2.4] - 2026-10-23
+
+### 修复：启动嗅探后优酷播不了、视频号提示「检查是否配置了代理」
+
+客户报障（三次追加信息，最后一句锁定了根因）：
+- 「启动嗅探后，点击微信-发现-视频号，出现报错」
+  截图：「暂无法观看此视频，可尝试切换网络或检查是否配置了代理。」
+- 「优酷当前也播放不了了」
+- **「关闭嗅探后，优酷能播放，视频号也能播放了」**
+
+**诊断**：系统代理正常、mitmproxy 在跑、微信容器确实连上代理，
+但代理日志里一条微信域名的 flow 都没有。对比发现：
+- `open.workbuddy.cn`（只有 IPv4）走代理 → 200，0.26s
+- `mp.weixin.qq.com`（有 IPv4+IPv6）走代理 → 超时
+- 本机 IPv6 连通性 → 全部 TimeoutError
+- 直连 `mp.weixin.qq.com` → 200，0.5s（curl 有 Happy Eyeballs 回退）
+
+**根因（两条叠加）**：
+1. mitmproxy 拦截**全系统**流量，视频类大流量走 MITM 容易中断
+   → 优酷、视频号都播不了
+2. 本机 IPv6 不通，微信域名有 AAAA 记录，mitmproxy 连 IPv6 卡死
+
+**修复**：
+1. `addon.py` 新增 `tls_clienthello`：**只拦截微信域名，其余裸透传**
+   （`ignore_connection=True`，证书不替换、不解析，等同没装代理）
+   白名单 9 类：`*.weixin.qq.com` / `*.wx.qq.com` / `*.qpic.cn` /
+   `*.weixin.com` / `*.weixinbridge.com` / `*.tc.qq.com` /
+   `finder.video.qq.com` / `*.wxqcloud.qq.com` / `*.qlogo.cn`
+   ★ 故意不含 `qq.com` 通配 —— 否则腾讯视频(v.qq.com)也会被拦
+2. 新增 `sphdl/netfix.py`：启动嗅探时探测 IPv6，不通则让 `getaddrinfo`
+   只回 IPv4（进程内生效，不改注册表、不动系统设置）
+
+**实测**：
+```
+走代理 www.youku.com            → 200  0.69s  （透传）
+走代理 www.baidu.com            → 200  0.19s  （透传）
+走代理 mp.weixin.qq.com         → 200  0.41s  （IPv4 修正）
+走代理 channels.weixin.qq.com   → 200  0.35s + bridge 钩子正常注入
+```
+
+### 测试
+
+新增 2 套共 24 项：
+- `tests/verify_sniff_passthrough.py`（18 项，含真实代理连通验证）
+- `tests/verify_ipv6_netfix.py`（6 项）
+
+`--selftest` 现在会输出网络修正与流量策略，便于确认打包产物是否含新模块。
+
 ## [2.2.3] - 2026-10-23
 
 ### 修复：公众号视频下载失败（HTTP 403 Forbidden）

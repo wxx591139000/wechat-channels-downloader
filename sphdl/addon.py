@@ -21,6 +21,7 @@ import time
 from urllib.parse import parse_qs, urlparse
 
 from mitmproxy import http
+from mitmproxy import tls as _tls
 
 from . import config
 from . import shared
@@ -210,6 +211,38 @@ def _extract_encfilekey(url: str) -> str:
 
 
 class SphAddon:
+    # ★ v2.2.4：只拦截微信域名，其余流量**原样透传**（不 MITM）
+    #
+    #   客户报障（2026-10-23）：
+    #     「启动嗅探后，优酷播不了，视频号也提示
+    #      『暂无法观看此视频，可尝试切换网络或检查是否配置了代理』」
+    #     关闭嗅探后两者都恢复正常 → 确认是代理的问题。
+    #
+    #   根因两条叠加：
+    #     ① mitmproxy 拦截**全系统**流量。视频类大流量走 MITM 后
+    #        握手/流式播放容易中断（优酷、视频号都是重视频站点）。
+    #     ② 本机 IPv6 不通，但微信域名有 AAAA 记录，
+    #        mitmproxy 连 IPv6 卡死（直连有 Happy Eyeballs 会自动回退）。
+    #
+    #   修法：
+    #     · 本类新增 tls_clienthello：非微信域名 → ignore_connection（裸 TCP 隧道，
+    #       证书透传，等同没装代理）→ 优酷/浏览器/其他 App 完全不受影响。
+    #     · `sphdl/netfix.py`：IPv6 不通时让 getaddrinfo 只回 IPv4。
+    #
+    #   ★ 白名单只放**本工具真的要抓**的域名，别图省事写 "qq.com" ——
+    #     那会把腾讯视频(v.qq.com)也拦进来，同样会播不了。
+    INTERCEPT_HOST_PATTERNS = (
+        r"(^|\.)weixin\.qq\.com$",        # mp./channels./open.weixin.qq.com
+        r"(^|\.)wx\.qq\.com$",            # res.wx.qq.com 等
+        r"(^|\.)qpic\.cn$",               # mmbiz.qpic.cn / mpvideo.qpic.cn
+        r"(^|\.)weixin\.com$",
+        r"(^|\.)weixinbridge\.com$",
+        r"(^|\.)tc\.qq\.com$",            # wxapp.tc.qq.com（钩子回传）
+        r"^finder\.video\.qq\.com$",      # 视频号视频 CDN
+        r"(^|\.)wxqcloud\.qq\.com$",
+        r"(^|\.)qlogo\.cn$",              # 头像
+    )
+
     def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
                  allow_images: bool = False):
         """auto_download=False 时（GUI 模式）：只捕获进列表，
@@ -217,6 +250,11 @@ class SphAddon:
         allow_images=False 时（v2.0.4「🖼 下载图片」开关关闭；
         **v2.0.19 起为默认值**）：图片不捕获、不显示、不下载——直接跳过
         （不占去重名额，重新开启后同一图片可再次被捕获）。"""
+        self._intercept_re = [re.compile(p, re.I)
+                              for p in self.INTERCEPT_HOST_PATTERNS]
+        # 透传开关（诊断用：设为 False 可恢复"拦截全部"的旧行为）
+        self.passthrough_others = True
+        self._passthrough_logged = set()
         self.pipeline = pipeline
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
         self.auto_download = auto_download
@@ -285,6 +323,48 @@ class SphAddon:
             self.bridge_js = _BRIDGE_JS_TEMPLATE.replace("__PORT__", str(port))
             self._bridge_port = port
             logger.debug(f"bridge 钩子端口已更新为 {port}")
+
+    # ---------- ⓿ TLS 握手前：非微信域名一律裸透传（v2.2.4）----------
+    def tls_clienthello(self, data: _tls.ClientHelloData):
+        """在 MITM 接管 TLS 之前决定「拦还是透」。
+
+        ★ 为什么必须有（2026-10-23 客户报障）：
+          启动嗅探后优酷播不了、视频号提示「检查是否配置了代理」，
+          关掉嗅探就都好了 —— 是 mitmproxy 把**全系统**流量都 MITM 了。
+          视频类大流量走 MITM 很容易中断（握手/分片/长连接都可能踩坑）。
+
+        做法：只有白名单里的微信域名才 MITM；
+        其余（优酷、B站、浏览器、其他 App）设 `ignore_connection = True`
+        → mitmproxy 退化成裸 TCP 隧道，证书不替换、不解析内容，
+        对客户端来说「等于没装代理」。
+
+        ★ 这个钩子只在 CONNECT/TLS 阶段触发，O(1) 正则匹配，不阻塞事件循环。
+        """
+        if not getattr(self, "passthrough_others", True):
+            return
+        host = (getattr(data, "client_hello", None)
+                and getattr(data.client_hello, "sni", None)) or ""
+        host = (host or "").strip().lower().rstrip(".")
+        if not host:
+            # 无 SNI（如直接用 IP 连）→ 不拦，避免把未知流量弄坏
+            try:
+                data.ignore_connection = True
+            except Exception:
+                pass
+            return
+        if any(rx.search(host) for rx in self._intercept_re):
+            return          # 微信域名 → 正常 MITM，继续嗅探
+        try:
+            data.ignore_connection = True
+        except Exception:
+            pass
+        # 每个域名只记一次，避免刷屏
+        if host not in self._passthrough_logged and len(self._passthrough_logged) < 200:
+            self._passthrough_logged.add(host)
+            try:
+                logger.debug(f"↪ 透传（不拦截）{host}")
+            except Exception:
+                pass
 
     # ---------- ① JS 回调通道 + ④ bridge 钩子回传 ----------
     def request(self, flow: http.HTTPFlow):
