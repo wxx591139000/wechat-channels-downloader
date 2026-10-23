@@ -75,16 +75,42 @@ def user_dir() -> Path:
 
 
 def _license_count(cfg_path: Path) -> int:
-    """配置里有多少个授权码（用于挑选"最有价值"的旧配置）。"""
+    """配置里有多少个授权码（用于挑选"最有价值"的旧配置）。
+
+    ★ 必须容错：这个函数会被拿去给 records.json 排序（那是 **JSON 数组**），
+      原来直接 `d.get(...)` → `AttributeError: 'list' object has no attribute 'get'`
+      → 客户 v2.2.5 启动即崩（2026-10-23 事故）。
+      任何非 dict 的 JSON 一律返回 0，绝不抛。
+    """
     try:
         d = json.loads(cfg_path.read_text(encoding="utf-8"))
     except Exception:
         return 0
-    lic = d.get("license_codes")
-    if isinstance(lic, dict):
-        return sum(1 for v in lic.values() if v)
-    # 兼容单码的极老版本
-    return 1 if d.get("license_code") else 0
+    if not isinstance(d, dict):
+        return 0            # records.json 是 list；其他脏数据同理
+    try:
+        lic = d.get("license_codes")
+        if isinstance(lic, dict):
+            return sum(1 for v in lic.values() if v)
+        # 兼容单码的极老版本
+        return 1 if d.get("license_code") else 0
+    except Exception:
+        return 0
+
+
+def _record_value(path: Path) -> int:
+    """records.json 的"价值"：记录条数（列表越长越值得迁移）。"""
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    if isinstance(d, list):
+        return len(d)
+    if isinstance(d, dict):
+        # 极老版本可能存成 {"items": [...]}
+        items = d.get("items")
+        return len(items) if isinstance(items, list) else 0
+    return 0
 
 
 def _mtime(p: Path) -> float:
@@ -131,7 +157,21 @@ def find_previous(fname: str, start: Path) -> Path:
             continue
     if not cands:
         return None
-    cands.sort(key=lambda p: (_license_count(p), _mtime(p)), reverse=True)
+    # ★ v2.2.6：按文件名选对应的"价值"算法
+    #   config.json → 授权码个数；records.json → 记录条数
+    #   原来两种情况都用 _license_count，records.json 是 list 会崩。
+    if fname.startswith("records"):
+        key = lambda p: (_record_value(p), _mtime(p))       # noqa: E731
+    else:
+        key = lambda p: (_license_count(p), _mtime(p))      # noqa: E731
+    try:
+        cands.sort(key=key, reverse=True)
+    except Exception:
+        # 排序出任何意外都不要让程序起不来 —— 退回按修改时间
+        try:
+            cands.sort(key=_mtime, reverse=True)
+        except Exception:
+            pass
     return cands[0]
 
 
@@ -139,10 +179,22 @@ def resolve(fname: str) -> Path:
     """返回该数据文件应使用的路径，必要时把旧数据迁移过来。
 
     fname: "config.json" / "records.json"
+
+    ★ 这是**启动路径上的函数**，任何异常都会导致程序打不开。
+      所以整个函数包在 try 里，出问题一律退回程序目录（老行为），
+      绝不因为"迁移失败"让客户用不了软件（2026-10-23 事故教训）。
     """
     if fname in _MIGRATED:
         return _MIGRATED[fname]
+    try:
+        return _resolve_inner(fname)
+    except Exception:
+        fallback = app_dir() / fname
+        _MIGRATED[fname] = fallback
+        return fallback
 
+
+def _resolve_inner(fname: str) -> Path:
     uhome = user_dir()
     target = uhome / fname
 
@@ -164,8 +216,14 @@ def resolve(fname: str) -> Path:
     if same.exists() and same.resolve() != target.resolve():
         src = same
     # ③ 相邻版本目录
-    if src is None and is_frozen():
-        src = find_previous(fname, app_dir())
+    #   ★ 不依赖 is_frozen()：开发模式下也可能有人把项目放在 dist/<ver>/ 里，
+    #     而测试需要能覆盖这条路。find_previous 本身是安全的（找不到返回 None），
+    #     所以无条件调用即可。
+    if src is None:
+        try:
+            src = find_previous(fname, app_dir())
+        except Exception:
+            src = None
 
     if src is not None:
         try:

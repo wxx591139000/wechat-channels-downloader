@@ -180,6 +180,94 @@ print(f"  开发模式 user_dir → {p}")
 check("U9 开发模式仍用项目目录", "LocalAppData" not in str(p)
       and "AppData" not in str(p), str(p))
 
+
+print()
+print("=" * 76)
+print("U10 ★事故回归：records.json 是 JSON 数组，排序不能崩")
+print("=" * 76)
+userdata.is_frozen = lambda: True      # ★ 前面的测试还原过，这里重新置回
+# 复现客户 2.2.5 启动崩溃：
+#   AttributeError: 'list' object has no attribute 'get'
+#   userdata.py line 83 in _license_count ← 被 records.json 排序调用
+userdata.app_dir = lambda: fake_new
+# ★ 必须清干净：上一个测试在 fake_new 里留过 records.json（1 条），
+#   不清掉的话"程序目录优先"会先命中它，导致 U10b 选错
+for f in (fake_local / "sphdl").glob("records*.json"):
+    f.unlink()
+_stale = fake_new / "records.json"
+if _stale.exists():
+    _stale.unlink()
+    print("  已清理上一测试遗留:", _stale.name)
+userdata.reset_for_tests()
+
+# 相邻版本目录里放两个 records.json（都是数组）
+rA = tmp / "dist" / "v2.2.3" / "微信视频号下载器" / "records.json"
+rB = tmp / "dist" / "v2.2.2" / "微信视频号下载器" / "records.json"
+rA.parent.mkdir(parents=True, exist_ok=True)
+rB.parent.mkdir(parents=True, exist_ok=True)
+rA.write_text(json.dumps([{"id": f"a{i}", "title": f"记录{i}"}
+                          for i in range(5)], ensure_ascii=False), encoding="utf-8")
+rB.write_text(json.dumps([{"id": "b0", "title": "只有一条"}],
+                         ensure_ascii=False), encoding="utf-8")
+
+try:
+    userdata.reset_for_tests()          # ★ 必须在清理之后 reset，否则缓存指向已删文件
+    rp = userdata.resolve("records.json")
+    if not rp.exists():
+        print(f"  resolve → {rp}（文件不存在，回退路径）")
+        check("U10a 不抛 AttributeError（事故回归）", True)
+        check("U10b 挑记录最多的那份（5 条 > 1 条）", False,
+              "解析结果指向不存在的文件")
+    else:
+        d = json.loads(rp.read_text(encoding="utf-8"))
+        print(f"  resolve('records.json') → {rp.name}  条数={len(d)}")
+        check("U10a 不抛 AttributeError（事故回归）", True)
+        check("U10b 挑记录最多的那份（5 条 > 1 条）", len(d) == 5, f"{len(d)} 条")
+except AttributeError as e:
+    check("U10a 不抛 AttributeError（事故回归）", False, str(e))
+    check("U10b 挑记录最多的那份（5 条 > 1 条）", False, "前面已失败")
+except Exception as e:
+    check("U10a 不抛 AttributeError（事故回归）", False,
+          f"{type(e).__name__}: {e}")
+    check("U10b 挑记录最多的那份（5 条 > 1 条）", False, "前面已失败")
+
+print()
+print("=" * 76)
+print("U11 脏数据不炸（非 JSON / 空文件 / 数字）")
+print("=" * 76)
+for name, content in (("垃圾文本", "not json at all"),
+                      ("空文件", ""),
+                      ("纯数字", "12345"),
+                      ("null", "null"),
+                      ("字符串", '"hello"')):
+    pth = rA.parent / f"dirty_{name}.json"
+    pth.write_text(content, encoding="utf-8")
+    try:
+        v = userdata._license_count(pth)
+        rv = userdata._record_value(pth)
+        print(f"  {name:6s} → _license_count={v}  _record_value={rv}")
+        check(f"U11 {name} 不抛异常", True)
+    except Exception as e:
+        check(f"U11 {name} 不抛异常", False, f"{type(e).__name__}: {e}")
+
+print()
+print("=" * 76)
+print("U12 resolve 整体兜底：出任何异常都回退程序目录")
+print("=" * 76)
+_orig_user_dir = userdata.user_dir
+userdata.user_dir = lambda: (_ for _ in ()).throw(RuntimeError("模拟磁盘故障"))
+userdata.reset_for_tests()
+try:
+    rp = userdata.resolve("config.json")
+    print(f"  异常情况下 resolve → {rp}")
+    check("U12 不抛异常，回退到程序目录", rp.parent == fake_new.resolve()
+          or str(rp).endswith("config.json"), str(rp))
+except Exception as e:
+    check("U12 不抛异常，回退到程序目录", False, f"{type(e).__name__}: {e}")
+finally:
+    userdata.user_dir = _orig_user_dir
+    userdata.reset_for_tests()
+
 # 还原
 userdata.is_frozen = _orig_frozen
 userdata.app_dir = _orig_appdir

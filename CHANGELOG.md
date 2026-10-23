@@ -2,6 +2,36 @@
 
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
+## [2.2.6] - 2026-10-23
+
+- v2.2.6 修复启动崩溃
+### 紧急修复：v2.2.5 启动即崩溃
+
+客户反馈 v2.2.5 打不开，报错：
+```
+File "sphdl\userdata.py", line 83, in _license_count
+AttributeError: 'list' object has no attribute 'get'
+```
+
+**根因**：`userdata.find_previous()` 用 `_license_count()` 给候选文件排序，
+但 `records.json` 是 **JSON 数组**（list），`_license_count` 里直接
+`d.get("license_codes")` → list 没有 `.get()` → 启动崩溃。
+
+**这是我 v2.2.5 引入的回归**：迁移逻辑只测了 `config.json`（dict），
+没测 `records.json`（list）这条路径。
+
+**修复**：
+1. `_license_count()` 加 `isinstance(d, dict)` 检查，非 dict 一律返回 0
+2. 新增 `_record_value()`：`records.json` 按**记录条数**算价值（列表越长越值得迁移）
+3. `find_previous()` 按文件名选对应算法（records → 条数，config → 授权码数）
+4. `resolve()` 整体包 try：**任何异常都回退程序目录**，绝不因迁移失败让程序打不开
+5. 去掉 `is_frozen()` 依赖（测试覆盖不到，且开发模式也可能在 dist/<ver>/ 下）
+
+**测试**：`verify_config_migration.py` 扩到 23 项，新增事故回归组：
+- U10 records.json 是数组不崩 + 正确挑记录最多的
+- U11 脏数据（非 JSON/空/数字/null/字符串）不抛
+- U12 resolve 整体兜底（模拟磁盘故障仍能启动）
+
 ## [2.2.5] - 2026-10-23
 
 - v2.2.5 授权迁移+停止修复+门禁
