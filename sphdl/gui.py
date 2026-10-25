@@ -18,6 +18,7 @@ sphdl GUI —— tkinter 桌面界面（零新增依赖，标准库自带）
 import datetime
 import json
 import os
+import re as _re
 import platform
 import queue
 import subprocess
@@ -378,6 +379,40 @@ class AppConfig:
                 pass
         except Exception:
             pass
+
+
+def _safe_filename(name: str, maxlen: int = 60) -> str:
+    """把视频标题变成合法文件名（跨平台安全）。"""
+    s2 = str(name or "untitled")
+    s2 = _re.sub(r'[\\/:*?"<>|\r\n\t]', "_", s2)
+    s2 = _re.sub(r"\s+", " ", s2).strip().strip(".")
+    if not s2:
+        s2 = "untitled"
+    return s2[:maxlen]
+
+
+def _flatten_comments(nodes, depth: int = 0, out=None):
+    """把评论树拍平成文本行（回复用缩进 + └ 前缀）。
+
+    与评论区里「复制/导出」用的是同一套格式，保证两处一致。
+    """
+    if out is None:
+        out = []
+    for c in nodes or []:
+        if not isinstance(c, dict):
+            continue
+        prefix = ("  " * depth) + ("└ " if depth else "")
+        line = f"{prefix}{c.get('nick', '')}：{c.get('content', '')}"
+        extra = []
+        if c.get("likes"):
+            extra.append(f"👍{c['likes']}")
+        if c.get("time"):
+            extra.append(str(c["time"])[:19])
+        if extra:
+            line += "（" + " ".join(extra) + "）"
+        out.append(line)
+        _flatten_comments(c.get("replies"), depth + 1, out)
+    return out
 
 
 # ============================== 下载记录（持久化列表） ==============================
@@ -1618,6 +1653,88 @@ class App:
                 return rid
         return None
 
+    # ---------- ★ v2.2.15 下载评论（批量）----------
+    def _download_comments(self):
+        """把选中视频的评论导出成文件，支持批量。
+
+        输出（下载目录/评论/）：
+          <标题>_评论.txt    给人看，回复用 └ 缩进
+          <标题>_评论.json   给程序用，保留完整嵌套树
+
+        客户需求（2026-10-23）：
+          「需要有下载评论的按钮，并支持批量下载评论」
+        """
+        rids = self._selected_rids()
+        if not rids:
+            messagebox.showinfo(
+                "提示",
+                "请先在列表里选中视频（可 Ctrl/Shift 多选），再点「⬇ 下载评论」。\n\n"
+                "提示：评论会在你于微信视频号里点开该视频评论区时自动抓取。")
+            return
+        # 只处理有评论的
+        todo, empty = [], []
+        for rid in rids:
+            rec = self.store.items.get(rid)
+            if rec is None:
+                continue
+            if getattr(rec, "comments", None):
+                todo.append(rec)
+            else:
+                empty.append(rec)
+        if not todo:
+            messagebox.showwarning(
+                "没有可导出的评论",
+                f"选中的 {len(rids)} 条视频都还没有抓到评论。\n\n"
+                "评论抓取方式：在微信视频号里点开该视频的评论区、往上翻几页，\n"
+                "评论会自动进入清单，之后就能导出了。")
+            return
+
+        out_dir = Path(self.cfg.download_dir) / "评论"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:                      # noqa: BLE001
+            messagebox.showerror("创建目录失败", str(e))
+            return
+
+        ok, fail = 0, []
+        for rec in todo:
+            try:
+                base = _safe_filename(rec.title or rec.video_id or rec.id)
+                comments = list(rec.comments or [])
+                try:
+                    from .parser import count_tree as _ct
+                    n = _ct(comments)
+                except Exception:
+                    n = len(comments)
+                total = int(getattr(rec, "comment_count", 0) or 0)
+                # TXT
+                flat = _flatten_comments(comments)
+                txt = "\n".join(
+                    [f"视频：{rec.title}",
+                     f"评论总数：{total}（已捕获 {n} 条）",
+                     f"导出时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                     "-" * 50, ""] + flat)
+                (out_dir / f"{base}_评论.txt").write_text(txt, encoding="utf-8")
+                # JSON
+                data = {"video_title": rec.title, "video_url": rec.url,
+                        "comment_total": total, "captured": n,
+                        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "comments": comments}
+                (out_dir / f"{base}_评论.json").write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+                ok += 1
+            except Exception as e:                  # noqa: BLE001
+                fail.append(f"{rec.title[:20]}: {e}")
+
+        msg = f"已导出 {ok} 个视频的评论 → {out_dir}"
+        if empty:
+            msg += f"\n（{len(empty)} 个视频还没有评论，已跳过）"
+        if fail:
+            msg += f"\n失败 {len(fail)} 个：\n" + "\n".join(fail[:5])
+        self.push_log("ok", msg.split(chr(10))[0])
+        messagebox.showinfo("下载评论完成", msg)
+
     def _show_comments(self, rid=None):
         """「查看评论」：弹出评论区窗口，风格对齐视频号。
 
@@ -1785,25 +1902,8 @@ class App:
             except Exception as e:                  # noqa: BLE001
                 messagebox.showerror("复制失败", str(e), parent=win)
 
-        def _flatten(nodes, depth=0, out=None):
-            """把评论树拍平成文本行（回复用缩进+└ 前缀）。"""
-            if out is None:
-                out = []
-            for c in nodes or []:
-                if not isinstance(c, dict):
-                    continue
-                prefix = ("  " * depth) + ("└ " if depth else "")
-                line = f"{prefix}{c.get('nick','')}：{c.get('content','')}"
-                extra = []
-                if c.get("likes"):
-                    extra.append(f"👍{c['likes']}")
-                if c.get("time"):
-                    extra.append(str(c["time"])[:19])
-                if extra:
-                    line += "（" + " ".join(extra) + "）"
-                out.append(line)
-                _flatten(c.get("replies"), depth + 1, out)
-            return out
+        # ★ v2.2.15：复用模块级 _flatten_comments，保证「查看/复制/下载」三处格式一致
+        _flatten = _flatten_comments
 
         def _export():
             """导出评论到文件：.txt（给人看）+ .json（给程序用）。"""
@@ -2816,6 +2916,15 @@ class App:
         self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=11,
                                        command=self._show_comments)
         self.btn_comments.pack(side="left", padx=(8, 4))
+        # ★ v2.2.15：下载评论（支持批量，选中多条即可）
+        self.btn_dl_comments = ttk.Button(
+            btns1, text="⬇ 下载评论", width=11,
+            command=self._download_comments)
+        self.btn_dl_comments.pack(side="left", padx=(0, 4))
+        self._tt(self.btn_dl_comments,
+                 "把选中视频的评论保存成文件（.txt 给人看 + .json 给程序用）。\n"
+                 "支持批量：Ctrl/Shift 多选后点这里，一次导出多个视频的评论。\n"
+                 "保存位置：下载目录下的「评论」文件夹。")
         self._tt(self.btn_comments,
                  "查看选中视频的评论（和视频号评论区一样的展示）。\n"
                  "评论会在你于微信里点开该视频评论区时自动抓取，\n"

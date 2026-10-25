@@ -59,8 +59,17 @@ cases = [
     ("www.bilibili.com", False),
     ("github.com", False),
 ]
+def _will_intercept(host):
+    """★ v2.2.15：判定顺序改为「先排除、后拦截」。
+    只看 _intercept_re 会把 v.qq.com（腾讯视频）误判为拦，
+    因为 qq.com 通配会命中它 —— 实际运行时被 PASSTHROUGH 排除了。"""
+    if any(rx.search(host) for rx in getattr(a, "_passthrough_re", [])):
+        return False
+    return any(rx.search(host) for rx in a._intercept_re)
+
+
 for host, want in cases:
-    hit = any(rx.search(host) for rx in a._intercept_re)
+    hit = _will_intercept(host)
     mark = "拦" if hit else "透传"
     print(f"  {host:26s} → {mark}")
     check(f"P1/P2 {host}", hit == want, f"期望{'拦' if want else '透传'}，实际{mark}")

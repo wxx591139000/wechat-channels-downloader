@@ -18,6 +18,7 @@ import queue as _queue
 import re
 import threading as _threading
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from mitmproxy import http
@@ -26,7 +27,8 @@ from mitmproxy import tls as _tls
 from . import config
 from . import shared
 from .logger import logger
-from .parser import extract_from_object_desc, iter_object_descs
+from .parser import (extract_from_object_desc, iter_object_descs,
+                     extract_comments)
 from .util import mask_url, describe_capture
 
 # ④ 注入到 HTML 的 JS：包装 WeixinJSBridge.invoke，
@@ -241,6 +243,28 @@ class SphAddon:
         r"^finder\.video\.qq\.com$",      # 视频号视频 CDN
         r"(^|\.)wxqcloud\.qq\.com$",
         r"(^|\.)qlogo\.cn$",              # 头像
+        # ★★★ v2.2.15：整个 qq.com 都拦（评论等接口散落在各个子域）
+        #
+        #   客户反馈（2026-10-23）：「有些视频我看有评论，但工具里显示没拉到」
+        #   根因：我们的拦截白名单只有 9 条，而视频号的**评论接口**
+        #   散落在 wxa.wxs.qq.com / mmfinder.qq.com / finder.qq.com /
+        #   wxis.qq.com / wss.qq.com ... 这些都不在白名单里 →
+        #   tls_clienthello 直接把连接**裸透传**，一个字节都看不到。
+        #   评论区能显示多少，取决于评论接口恰好走没走白名单 → 时好时坏。
+        r"(^|\.)qq\.com$",
+        r"(^|\.)gtimg\.cn$",              # 微信图片 CDN（体量小）
+    )
+
+    # ★ v2.2.15：这些重型媒体域名**不拦**（MITM 大流量视频会卡/断流）
+    #   注：放 qq.com 之后判定，优先级更高。
+    PASSTHROUGH_HOST_PATTERNS = (
+        r"(^|\.)v\.qq\.com$",             # 腾讯视频（整站）
+        # ★ 只排除腾讯视频 CDN 的 vv 子域，**不能写 video.qq.com 通配** ——
+        #   那会把 finder.video.qq.com（视频号视频 CDN）一起透传掉，
+        #   视频号就抓不到了（v2.2.15 自查时抓到的问题）。
+        r"(^|\.)vv\.video\.qq\.com$",
+        r"(^|\.)live\.qq\.com$",
+        r"(^|\.)now\.qq\.com$",
     )
 
     def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
@@ -252,6 +276,8 @@ class SphAddon:
         （不占去重名额，重新开启后同一图片可再次被捕获）。"""
         self._intercept_re = [re.compile(p, re.I)
                               for p in self.INTERCEPT_HOST_PATTERNS]
+        self._passthrough_re = [re.compile(p, re.I)
+                                for p in self.PASSTHROUGH_HOST_PATTERNS]
         # 透传开关（诊断用：设为 False 可恢复"拦截全部"的旧行为）
         self.passthrough_others = True
         self._passthrough_logged = set()
@@ -265,6 +291,18 @@ class SphAddon:
         # ★ v2.2.5：自动下载的授权门禁回调（GUI 传 self._has_download_license）。
         #   None = 不做校验（命令行/测试场景）；GUI 模式必须设置。
         self.license_check = None
+        # ★ v2.2.11：bridge 全量诊断（定位评论等非视频数据走哪个 cmdName）
+        self._bridge_diag = False
+        self._bridge_diag_dir = None
+        self._bridge_diag_seen = {}
+        # ★ v2.2.12：评论抓取
+        #   comments_enabled：总开关（GUI 可关，默认开）
+        #   on_comments：GUI 回调 fn(video_key, comments, total) 把评论写进清单
+        #   _cur_video_key：当前正在播放的视频标识（评论挂它身上）
+        self.comments_enabled = True
+        self.on_comments = None
+        self._cur_video_key = ""
+        self._comment_seen = {}       # video_key -> set(cid 或 content)，去重
         self.seen = set()          # 去重: (url, decode_key)
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
@@ -327,6 +365,53 @@ class SphAddon:
             self._bridge_port = port
             logger.debug(f"bridge 钩子端口已更新为 {port}")
 
+    def _dump_bridge_diag(self, body: bytes):
+        """把一条 bridge 调用落盘（仅诊断模式）。
+
+        输出：diag_bridge/bridge_calls.jsonl，每行一个调用，
+        含 cmdName / arguments / result 的头部片段。
+        同时把 cmdName 种类汇总打到日志（每种只打一次），
+        跑一次就能看出「评论」是哪个 cmdName。
+        """
+        try:
+            obj = json.loads(body.decode("utf-8", "replace"))
+        except Exception:
+            return
+        if not isinstance(obj, dict):
+            return
+        cmd = obj.get("cmdName") or "(无 cmdName)"
+        args = obj.get("arguments")
+        res = obj.get("result")
+        try:
+            if self._bridge_diag_dir is None:
+                base = Path(config.BASE_DIR) if hasattr(config, "BASE_DIR") else Path(".")
+                d = base / "diag_bridge"
+                d.mkdir(parents=True, exist_ok=True)
+                self._bridge_diag_dir = d
+            rec = {
+                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "cmd": cmd,
+                "args_len": len(str(args)),
+                "result_len": len(str(res)),
+                "args_head": str(args)[:400],
+                "result_head": str(res)[:1200],
+            }
+            with (self._bridge_diag_dir / "bridge_calls.jsonl").open(
+                    "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        # 每种 cmdName 只在日志里报一次，避免刷屏
+        n = self._bridge_diag_seen.get(cmd, 0)
+        self._bridge_diag_seen[cmd] = n + 1
+        if n == 0:
+            try:
+                logger.info(
+                    f"🔬 bridge诊断：新命令 {cmd} "
+                    f"(args={len(str(args))}B result={len(str(res))}B)")
+            except Exception:
+                pass
+
     # ---------- ⓿ TLS 握手前：非微信域名一律裸透传（v2.2.4）----------
     def tls_clienthello(self, data: _tls.ClientHelloData):
         """在 MITM 接管 TLS 之前决定「拦还是透」。
@@ -355,8 +440,16 @@ class SphAddon:
             except Exception:
                 pass
             return
+        # ① 重型媒体一律透传（腾讯视频等，MITM 会卡）
+        if any(rx.search(host) for rx in self._passthrough_re):
+            try:
+                data.ignore_connection = True
+            except Exception:
+                pass
+            return
+        # ② 微信生态域名 → 正常 MITM，继续嗅探
         if any(rx.search(host) for rx in self._intercept_re):
-            return          # 微信域名 → 正常 MITM，继续嗅探
+            return
         try:
             data.ignore_connection = True
         except Exception:
@@ -452,6 +545,23 @@ class SphAddon:
             # bridge 调用（log/心跳/finderH5ExtTransfer 等），零漏报
             # （解析器只按这两个字面键搜索，凡能捕获的 body 必含字面键）。
             if b"object_desc" not in body and b"objectDesc" not in body:
+                # ★ v2.2.12：先试评论提取（客户需求）
+                #
+                #   评论数据不含 objectDesc，会被下面这条预检丢弃。
+                #   所以在丢弃前先跑一次评论提取 —— 提取器是纯结构识别
+                #   （不看 cmdName），找到评论就挂到「当前播放的视频」上。
+                #
+                #   ★ 为什么在事件循环里做：
+                #     评论 body 一般几 KB~几十 KB，extract_comments 是
+                #     一次线性遍历，比视频 objectDesc 的小得多。
+                #     但为稳妥仍先做字节预检（必须有昵称/内容类键之一），
+                #     不含才跳过，避免每条 bridge 都全量 json.loads。
+                if (b"nick" in body or b"content" in body or b"comment" in body) \
+                        and self.comments_enabled:
+                    self._parse_q.put((body, "__comment__"))
+                # ★ v2.2.11：诊断模式下记录「非视频」的 bridge 调用
+                if self._bridge_diag:
+                    self._dump_bridge_diag(body)
                 flow.response = http.Response.make(
                     200, b"OK", {"Content-Type": "text/plain"})
                 return
@@ -459,6 +569,59 @@ class SphAddon:
         # 钩子全程 O(1)：预检 + 回包 + 入队，无 json.loads、无递归扫描。
         flow.response = http.Response.make(200, b"OK", {"Content-Type": "text/plain"})
         self._parse_q.put((body, source))
+
+    def _handle_comment_payload(self, body: bytes):
+        """处理评论 payload：解析 → 去重 → 回调 GUI 写进清单（v2.2.12）。
+
+        ★ 挂在「当前正在播放的视频」上：
+          视频号里翻评论必然是在看某条视频，所以评论 payload 到达时，
+          最近一次捕获的视频就是它的宿主（`_cur_video_key`）。
+
+        ★ 去重：同一个视频反复翻评论会重复收到同一批。
+          按 (cid 或 content) 去重，只把新评论交给 GUI 追加。
+        """
+        if not self.comments_enabled:
+            return
+        try:
+            obj = json.loads(body.decode("utf-8", "replace"))
+        except Exception:
+            return
+        try:
+            comments, total = extract_comments(obj)
+        except Exception:
+            return
+        if not comments:
+            return
+        key = self._cur_video_key
+        if not key:
+            # 还没捕获过视频（比如先翻评论后播视频）→ 先放着不挂
+            return
+        seen = self._comment_seen.setdefault(key, set())
+        fresh = []
+        for c in comments:
+            ident = c.get("cid") or (c.get("nick", "") + "\x00" + c.get("content", ""))
+            if ident in seen:
+                continue
+            seen.add(ident)
+            fresh.append(c)
+        if not fresh:
+            return
+        try:
+            if self.on_comments is not None:
+                self.on_comments(key, fresh, total)
+        except Exception as e:                      # noqa: BLE001
+            try:
+                logger.debug(f"评论回调异常: {e}")
+            except Exception:
+                pass
+
+    def set_current_video(self, key: str):
+        """设置「当前播放的视频」，评论会挂到它身上。
+
+        key 用 video_id（md5sum）优先，没有就用 url。
+        """
+        if key:
+            self._cur_video_key = key
 
     def _parse_worker_loop(self):
         """独立解析线程（sphdl-parse）：json.loads + 递归扫描 + 字符串
@@ -469,6 +632,10 @@ class SphAddon:
         while True:
             body, source = self._parse_q.get()
             try:
+                # ★ v2.2.12：评论 payload 走单独分支（不含 objectDesc）
+                if source == "__comment__":
+                    self._handle_comment_payload(body)
+                    continue
                 obj = json.loads(body)
                 odes = list(iter_object_descs(obj))
                 if not odes:
