@@ -269,3 +269,135 @@ def load_and_extract(json_text: str) -> Optional[VideoData]:
         # 允许直接传入 object_desc 本体或 media 列表
         od = obj
     return extract_from_object_desc(od)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ★ v2.2.12 视频号评论提取
+#
+#   客户需求：「能下载对应视频所对应的视频号评论吗」
+#   落地形态：「先做个存进视频清单里，有个『查看评论』的选项展开评论，
+#              跟视频号同样的评论区展示效果」
+#
+# ★ 设计原则：**不依赖固定 cmdName / 固定字段名**
+#   视频号接口会改名，写死 cmdName 就等于写死一个会过期的功能。
+#   这里按「结构特征」识别评论条目：
+#     · 有昵称类字段  nick / nickname / nickName / userName / displayName
+#     · 有内容类字段  content / text / msg / commentContent
+#     · 可选：点赞数 likeCount / likeNum / likes
+#   只要一个 list 里有多条这种 dict，就当成评论列表。
+# ═══════════════════════════════════════════════════════════════════
+
+_NICK_KEYS = ("nickname", "nickName", "nick_name", "nick",
+              "userName", "user_name", "displayName", "display_name")
+_CONTENT_KEYS = ("content", "text", "msg", "commentContent",
+                 "comment_content", "comment")
+_LIKE_KEYS = ("likeCount", "like_count", "likeNum", "like_num", "likes")
+_TIME_KEYS = ("createTime", "create_time", "timestamp", "commentTime",
+              "comment_time", "time")
+_ID_KEYS = ("commentId", "comment_id", "id")
+
+
+def _norm_comment(d: dict):
+    """把一个疑似评论的 dict 规范化成 {nick, content, likes, time, cid}。
+
+    返回 None = 不像评论（缺昵称或缺内容）。
+    """
+    if not isinstance(d, dict):
+        return None
+    nick = _pick(d, *_NICK_KEYS)
+    content = _pick(d, *_CONTENT_KEYS)
+    if nick is None or content is None:
+        return None
+    # content 必须是短的纯文本（排除把整个对象当 content 的畸形数据）
+    if not isinstance(content, (str, int, float)):
+        return None
+    content = str(content).strip()
+    if not content or len(content) > 5000:
+        return None
+    nick = str(nick).strip()
+    if not nick or len(nick) > 200:
+        return None
+    likes = _pick(d, *_LIKE_KEYS)
+    try:
+        likes = int(likes) if likes is not None else 0
+    except Exception:
+        likes = 0
+    tm = _pick(d, *_TIME_KEYS)
+    cid = _pick(d, *_ID_KEYS)
+    return {
+        "nick": nick,
+        "content": content,
+        "likes": likes,
+        "time": str(tm) if tm is not None else "",
+        "cid": str(cid) if cid is not None else "",
+    }
+
+
+def _find_total(d: dict):
+    """在一个 dict 里找评论总数（视频号常见字段名）。找不到返回 None。"""
+    for k in ("totalCount", "total_count", "commentCount",
+              "comment_count", "total", "totalNum", "total_num"):
+        v = d.get(k)
+        if isinstance(v, int) and v >= 0:
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    return None
+
+
+def iter_comment_lists(obj: Any, depth: int = 0):
+    """递归找出 JSON 里所有「像评论列表」的节点。
+
+    生成 (comments:list[dict], total:int|None)。
+
+    ★ 判定：一个 list 里 ≥1 条能规范化成评论的 dict。
+      只要求 1 条而非多条 —— 单条评论也要能抓到（比如只有一条评论的视频）。
+    """
+    if depth > 14 or obj is None:
+        return
+    if isinstance(obj, dict):
+        total = _find_total(obj)
+        for v in obj.values():
+            if isinstance(v, str) and v.strip()[:1] in ("[", "{"):
+                dv = _try_json(v)
+                if dv is not None:
+                    for lst, t in iter_comment_lists(dv, depth + 1):
+                        yield (lst, t if t is not None else total)
+                    continue
+            if isinstance(v, (dict, list)):
+                for lst, t in iter_comment_lists(v, depth + 1):
+                    yield (lst, t if t is not None else total)
+        return
+
+    if isinstance(obj, list):
+        norm = []
+        for it in obj:
+            n = _norm_comment(it)
+            if n is not None:
+                norm.append(n)
+        if norm:
+            yield (norm, None)
+        # 更深层也可能有嵌套回复
+        for it in obj:
+            if isinstance(it, (dict, list)):
+                yield from iter_comment_lists(it, depth + 1)
+
+
+def extract_comments(payload: Any):
+    """从任意 payload 里抽出「最像评论列表」的那一份。
+
+    返回 (comments:list, total:int|None)；没找到返回 ([], None)。
+
+    ★ 选「条数最多的那份」：一页 bridge 回传里可能同时有
+      嵌套回复列表和主评论列表，主列表通常条数更多。
+    """
+    best = []
+    best_total = None
+    try:
+        for lst, tot in iter_comment_lists(payload):
+            if len(lst) > len(best):
+                best = lst
+                best_total = tot
+    except Exception:
+        pass
+    return best, best_total
