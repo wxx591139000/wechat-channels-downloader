@@ -407,6 +407,13 @@ class Record:
     #   点「序号」表头排序 = 按抓取先后排列。
     #   老记录没有这个字段 → 用 0 兜底（排序时排在最前，由 id 二次排序保证稳定）
     seq: int = 0
+    # ★ v2.2.12：视频号评论（客户需求）
+    #   "先在清单里点开看评论，跟视频号评论区一样的展示效果"
+    #   结构：[{nick, content, likes, time, reply_to}]
+    #   ★ 必须在 _load 的字段白名单里同步加上，否则重启就丢（踩过 seq 的坑）
+    comments: list = field(default_factory=list)
+    comment_count: int = 0        # 视频号口径的评论总数（可能 > len(comments)）
+    comments_updated: str = ""    # 评论抓取时间
 
 
 class RecordStore:
@@ -447,6 +454,13 @@ class RecordStore:
                     kw["seq"] = int(d.get("seq") or 0)
                 except Exception:
                     kw["seq"] = 0
+                # ★ v2.2.12：评论字段同样必须显式读回（seq 踩过这个坑）
+                kw["comments"] = d.get("comments") or []
+                try:
+                    kw["comment_count"] = int(d.get("comment_count") or 0)
+                except Exception:
+                    kw["comment_count"] = 0
+                kw["comments_updated"] = d.get("comments_updated") or ""
                 if not kw.get("platform"):
                     kw["platform"] = "视频号"   # 老数据默认视频号
                 r = Record(**kw)
@@ -456,6 +470,17 @@ class RecordStore:
                     r.status = "failed"
                     r.error = "已中断（程序重启）"
                     r.progress = 0
+                # ★ v2.2.14：有文件的记录，size 一律以磁盘为准
+                #   （老版本保存的 size 是微信元数据最高画质值，
+                #     与真实文件差很多 —— 客户看到 183M 实际 18M）
+                if r.file and r.status in ("done", "failed", "stopped"):
+                    try:
+                        if os.path.exists(r.file):
+                            _real = os.path.getsize(r.file)
+                            if _real > 0:
+                                r.size = _real
+                    except Exception:
+                        pass
                 self.items[r.id] = r
                 self.order.append(r.id)
 
@@ -939,8 +964,22 @@ class App:
         self.addon.natural_capture = self.cfg.natural_capture
         # ★ v2.2.5：把授权门禁交给 addon，堵住「自动下载绕过授权」的漏洞
         self.addon.license_check = self._has_download_license
+        # ★ v2.2.11：bridge 全量诊断开关（共用「开启原始数据记录.txt」）
+        #   打开后，所有非视频的 bridge 调用也落盘到 diag_bridge/，
+        #   用于定位评论等数据类型走哪个 cmdName。
+        try:
+            self.addon._bridge_diag = self._diag_raw_enabled()
+            if self.addon._bridge_diag:
+                self.push_log(
+                    "info",
+                    "🔬 bridge 诊断已开启：所有 bridge 调用会写入 diag_bridge/"
+                    "（用于定位评论接口，用完请删「开启原始数据记录.txt」）")
+        except Exception:
+            pass
         # 自动下载提交前的跨会话去重（records.json 已有同视频/链接 → 不重复下载）
         self.addon.duplicate_check = self._is_known_video
+        # ★ v2.2.12：评论回调（解析线程调用）→ 入队，主线程写清单
+        self.addon.on_comments = self._on_comments
 
         # 档位显示/状态栏首次刷新（此时 self.addon 已就绪）
         self._refresh_limit_display()
@@ -1540,6 +1579,276 @@ class App:
     def push_event(self, item):
         self.ui_q.put(item)
 
+    # ---------- ★ v2.2.12 评论 ----------
+    def _on_comments(self, video_key: str, comments: list, total):
+        """（解析线程调用）把新评论投递给主线程写进清单。
+
+        ★ 不能在解析线程直接改 self.store / Treeview —— tkinter 非线程安全。
+        """
+        try:
+            self.ui_q.put(("comments", video_key, comments, total))
+        except Exception:
+            pass
+
+    def _apply_comments(self, video_key: str, comments: list, total):
+        """（主线程）把评论合并进对应记录。"""
+        rid = self._find_rid_by_video_key(video_key)
+        if rid is None:
+            return
+        rec = self.store.items.get(rid)
+        if rec is None:
+            return
+        cur = list(getattr(rec, "comments", []) or [])
+        cur.extend(comments)
+        rec.comments = cur
+        if isinstance(total, int) and total >= 0:
+            rec.comment_count = max(int(total), len(cur))
+        else:
+            rec.comment_count = max(len(cur), int(getattr(rec, "comment_count", 0) or 0))
+        rec.comments_updated = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._dirty = True
+        self._update_row(rid)
+
+    def _find_rid_by_video_key(self, key: str):
+        """按 video_id（md5sum）或 url 找记录 id。"""
+        if not key:
+            return None
+        for rid, r in self.store.items.items():
+            if getattr(r, "video_id", "") == key or getattr(r, "url", "") == key:
+                return rid
+        return None
+
+    def _show_comments(self, rid=None):
+        """「查看评论」：弹出评论区窗口，风格对齐视频号。
+
+        ★ v2.2.12 布局踩坑记录（别再犯）：
+          用 pack 时——Canvas expand 会把底部按钮挤出可视区；
+          改 grid 时——Canvas 里的 Frame 不会自动伸缩，评论整片消失。
+          最终方案：**固定顺序的 pack（bottom 先、top 次、canvas 最后）**，
+          并给 canvas 一个显式高度初值，让它有空间可画。
+        """
+        if rid is None:
+            sel = self._selected_rids()
+            if not sel:
+                messagebox.showinfo(
+                    "提示",
+                    "请先在列表里选中一个视频，再点「💬 查看评论」")
+                return
+            rid = sel[0]
+        rec = self.store.items.get(rid)
+        if rec is None:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title(f"评论区 — {rec.title[:30]}")
+        win.geometry("620x760")
+        win.minsize(520, 460)
+
+        comments = list(getattr(rec, "comments", []) or [])
+        # ★ v2.2.14：n 要含嵌套回复（粉丝互相对答），不能只数根评论
+        try:
+            from .parser import count_tree as _ct
+            n = _ct(comments)
+        except Exception:
+            n = len(comments)
+        total = int(getattr(rec, "comment_count", 0) or 0)
+
+        # ① 最底部：按钮栏（必须先 pack，否则被中间区挤掉）
+        bt = tk.Frame(win, bg="#ffffff", height=48)
+        bt.pack(fill="x", side="bottom")
+        bt.pack_propagate(False)
+        tk.Frame(win, bg="#e5e7eb", height=1).pack(fill="x", side="bottom")
+
+        # ② 顶部：标题 + 评论数
+        head = tk.Frame(win, bg="#ffffff")
+        head.pack(fill="x", side="top")
+        tk.Label(head, text=rec.title[:100], bg="#ffffff", fg="#111827",
+                 font=("Microsoft YaHei UI", 10, "bold"),
+                 wraplength=570, justify="left", anchor="w"
+                 ).pack(fill="x", padx=14, pady=(12, 4))
+        cnt_txt = f"{total} 条评论" if total > n else f"{n} 条评论"
+        if total > n:
+            cnt_txt += f"（已捕获 {n} 条，翻评论区可继续抓）"
+        tk.Label(head, text=cnt_txt, bg="#ffffff", fg="#6b7280",
+                 font=("Microsoft YaHei UI", 9), anchor="w"
+                 ).pack(fill="x", padx=14, pady=(0, 10))
+        tk.Frame(win, bg="#e5e7eb", height=1).pack(fill="x", side="top")
+
+        # ③ 中间：评论列表（最后 pack，吃掉剩余空间）
+        body = tk.Frame(win, bg="#f7f8fa")
+        body.pack(fill="both", expand=True, side="top")
+
+        canvas = tk.Canvas(body, bg="#f7f8fa", highlightthickness=0,
+                           height=520)          # 显式高度，保证有绘画空间
+        sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = tk.Frame(canvas, bg="#f7f8fa")
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _sync(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            try:
+                canvas.itemconfigure(win_id, width=canvas.winfo_width())
+            except Exception:
+                pass
+        inner.bind("<Configure>", _sync)
+        canvas.bind("<Configure>", _sync)
+
+        def _on_wheel(e):
+            try:
+                canvas.yview_scroll(int(-e.delta / 120), "units")
+            except Exception:
+                pass
+        canvas.bind("<MouseWheel>", _on_wheel)
+
+        if not comments:
+            tk.Label(inner,
+                     text="还没有抓到这条视频的评论。\n\n"
+                          "在微信视频号里点开这条视频的评论区、往上翻几页，\n"
+                          "评论会自动出现在这里（不需要下载视频）。",
+                     bg="#f7f8fa", fg="#9ca3af",
+                     font=("Microsoft YaHei UI", 10), justify="left"
+                     ).pack(anchor="w", padx=20, pady=24)
+        else:
+            def _render_comment(parent, c, depth=0):
+                """递归渲染一条评论及其嵌套回复（粉丝互相对答）。
+
+                ★ v2.2.14：视频号评论区里常见「A 回复 B：…」的串，
+                  这些在数据里是嵌套列表。之前只渲染平铺，回复全看不到。
+                  现在按层级缩进 + 左侧竖线，对齐视频号的视觉层次。
+                """
+                # 缩进：每层 22px；回复用浅灰背景区分
+                pad_left = 10 + depth * 22
+                bg = "#ffffff" if depth == 0 else "#fafbfc"
+                row = tk.Frame(parent, bg=bg)
+                row.pack(fill="x", padx=(pad_left, 10), pady=(2, 3))
+                if depth > 0:
+                    # 左侧竖线（视觉上表示"这是回复"）
+                    tk.Frame(row, bg="#e5e7eb", width=2).pack(
+                        side="left", fill="y", padx=(0, 8))
+                top = tk.Frame(row, bg=bg)
+                top.pack(fill="x", padx=8, pady=(7, 1))
+                # 回复的头像小一号、颜色浅一点
+                av_bg = "#07c160" if depth == 0 else "#95de64"
+                tk.Label(top, text=(c.get("nick") or "?")[:1],
+                         bg=av_bg, fg="#ffffff",
+                         font=("Microsoft YaHei UI", 8 if depth else 9, "bold"),
+                         width=2).pack(side="left", padx=(0, 7))
+                nk = tk.Frame(top, bg=bg)
+                nk.pack(side="left")
+                tk.Label(nk, text=c.get("nick", ""), bg=bg,
+                         fg="#576b95",
+                         font=("Microsoft YaHei UI", 9),
+                         anchor="w").pack(anchor="w")
+                if depth > 0:
+                    tk.Label(nk, text=f"回复 · 第{depth}层", bg=bg,
+                             fg="#a0aec0",
+                             font=("Microsoft YaHei UI", 7),
+                             anchor="w").pack(anchor="w")
+                tk.Label(row, text=c.get("content", ""), bg=bg,
+                         fg="#111827",
+                         font=("Microsoft YaHei UI", 10 if depth == 0 else 9),
+                         wraplength=520 - depth * 22, justify="left", anchor="w"
+                         ).pack(fill="x", padx=(8 if depth == 0 else 16), pady=(2, 3))
+                foot = tk.Frame(row, bg=bg)
+                foot.pack(fill="x", padx=(8 if depth == 0 else 16), pady=(0, 6))
+                tm = c.get("time") or ""
+                if tm:
+                    tk.Label(foot, text=str(tm)[:19], bg=bg,
+                             fg="#c0c4cc", font=("Microsoft YaHei UI", 8)
+                             ).pack(side="left")
+                likes = int(c.get("likes") or 0)
+                if likes:
+                    tk.Label(foot, text=f"👍 {likes}", bg=bg,
+                             fg="#9ca3af", font=("Microsoft YaHei UI", 8)
+                             ).pack(side="right")
+                # 递归渲染回复
+                for rc_ in (c.get("replies") or []):
+                    if isinstance(rc_, dict):
+                        _render_comment(parent, rc_, depth + 1)
+
+            for c in comments:
+                _render_comment(inner, c, 0)
+
+        # ④ 按钮回调
+        def _copy_all():
+            lines = [rec.title, f"共 {total} 条评论（已捕获 {n} 条）", ""]
+            lines.extend(_flatten(comments))
+            try:
+                win.clipboard_clear()
+                win.clipboard_append("\n".join(lines))
+                messagebox.showinfo("已复制", f"已复制 {n} 条评论到剪贴板",
+                                    parent=win)
+            except Exception as e:                  # noqa: BLE001
+                messagebox.showerror("复制失败", str(e), parent=win)
+
+        def _flatten(nodes, depth=0, out=None):
+            """把评论树拍平成文本行（回复用缩进+└ 前缀）。"""
+            if out is None:
+                out = []
+            for c in nodes or []:
+                if not isinstance(c, dict):
+                    continue
+                prefix = ("  " * depth) + ("└ " if depth else "")
+                line = f"{prefix}{c.get('nick','')}：{c.get('content','')}"
+                extra = []
+                if c.get("likes"):
+                    extra.append(f"👍{c['likes']}")
+                if c.get("time"):
+                    extra.append(str(c["time"])[:19])
+                if extra:
+                    line += "（" + " ".join(extra) + "）"
+                out.append(line)
+                _flatten(c.get("replies"), depth + 1, out)
+            return out
+
+        def _export():
+            """导出评论到文件：.txt（给人看）+ .json（给程序用）。"""
+            from tkinter import filedialog
+            base = rec.title[:40].replace("/", "_").replace("\\", "_")
+            path = filedialog.asksaveasfilename(
+                parent=win, title="导出评论",
+                defaultextension=".txt",
+                initialfile=f"{base}_评论.txt",
+                filetypes=[("文本文件", "*.txt"), ("JSON 文件", "*.json")])
+            if not path:
+                return
+            try:
+                if path.lower().endswith(".json"):
+                    import json as _j
+                    data = {
+                        "video_title": rec.title,
+                        "video_url": rec.url,
+                        "comment_total": total,
+                        "captured": n,
+                        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "comments": comments,
+                    }
+                    Path(path).write_text(
+                        _j.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                else:
+                    lines = [f"视频：{rec.title}",
+                             f"评论总数：{total}（已捕获 {n} 条）",
+                             f"导出时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                             "-" * 50, ""]
+                    lines.extend(_flatten(comments))
+                    Path(path).write_text("\n".join(lines), encoding="utf-8")
+                messagebox.showinfo("已导出", f"评论已保存到：\n{path}", parent=win)
+            except Exception as e:                  # noqa: BLE001
+                messagebox.showerror("导出失败", str(e), parent=win)
+
+        ttk.Button(bt, text="💾 导出评论", command=_export
+                   ).pack(side="left", padx=(10, 4), pady=9)
+        ttk.Button(bt, text="📋 复制全部评论", command=_copy_all
+                   ).pack(side="left", padx=4, pady=9)
+        ttk.Button(bt, text="关闭", command=win.destroy
+                   ).pack(side="right", padx=10, pady=9)
+        return win
+
     def push_log(self, level, msg):
         self.log_q.put((level, msg))
         logger.log_file(level, msg)  # 同步落盘，进程消失也能查到全过程
@@ -1563,6 +1872,13 @@ class App:
         try:
             if self._diag_raw_enabled():
                 self._dump_raw_desc(vd)
+        except Exception:
+            pass
+
+        # ★ v2.2.12：把「刚捕获的视频」记为当前播放视频，
+        #   后续到达的评论 payload 会挂到它身上。
+        try:
+            self.addon.set_current_video(vd.video_id or vd.url or "")
         except Exception:
             pass
 
@@ -2449,6 +2765,19 @@ class App:
         self.tree.tag_configure("tag_waiting", foreground="#0f766e")
         self.tree.tag_configure("tag_stopped", foreground="#9ca3af")
         self.tree.bind("<Double-1>", self._on_tree_dclick)
+        # ★ v2.2.12：右键菜单（查看评论 / 下载 / 复制标题）
+        try:
+            self._row_menu = tk.Menu(self.root, tearoff=0)
+            self._row_menu.add_command(label="💬 查看评论",
+                                       command=self._menu_show_comments)
+            self._row_menu.add_separator()
+            self._row_menu.add_command(label="⬇ 下载选中",
+                                       command=self._download_selected)
+            self._row_menu.add_command(label="📋 复制标题",
+                                       command=self._menu_copy_title)
+            self.tree.bind("<Button-3>", self._on_tree_right_click)
+        except Exception:
+            self._row_menu = None
         self.tree.bind("<Control-a>", lambda e: self._select_all())
         # v2.0.19：鼠标移到「来源」列表头时提示「双击可筛选」（见 _on_tree_motion）
         self.tree.bind("<Motion>", self._on_tree_motion)
@@ -2483,6 +2812,14 @@ class App:
         self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=12,
                                        command=self._stop_all_downloads)
         self.btn_stop_all.pack(side="left", padx=4)
+        # ★ v2.2.12：查看评论（客户需求：像视频号一样的评论区）
+        self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=11,
+                                       command=self._show_comments)
+        self.btn_comments.pack(side="left", padx=(8, 4))
+        self._tt(self.btn_comments,
+                 "查看选中视频的评论（和视频号评论区一样的展示）。\n"
+                 "评论会在你于微信里点开该视频评论区时自动抓取，\n"
+                 "不需要下载视频。")
         self._tt(self.btn_stop_all,
                  "一键停止所有「排队中/下载中/解密中」的任务。\n"
                  "注意：已完成的保留；停止后可对选中项点『重试失败』重新下载。")
@@ -3588,6 +3925,58 @@ class App:
         except Exception:
             return -1
 
+    # ---------- ★ v2.2.14 大小显示 ----------
+    def _display_size(self, rec) -> str:
+        """大小列显示。
+
+        ★ 客户报障（2026-10-23）：
+          「为何显示大小 183M 但下载后是 18M」
+        根因：微信给的 `size` 是**元数据里的最高画质大小**，
+              而实际下载的是「微信当时播放的那个档位」，往往小得多
+              （实测 198MB 元数据 → 实际 27MB，只有 14%）。
+
+        显示规则：
+          · 已下载完成且有文件 → 磁盘真实大小（准确）
+          · 其余情况          → 前面加「≈」表示这是估算值
+        ⚠️ 不在这里调 os.path.getsize：列表可能有上万行，逐行 stat 会卡。
+           真实大小在「下载完成」时写入 rec.size，加载时也会修一次。
+        """
+        sz = int(getattr(rec, "size", 0) or 0)
+        if not sz:
+            return "-"
+        has_file = bool(getattr(rec, "file", "")) and \
+            getattr(rec, "status", "") == "done"
+        return format_size(sz) if has_file else "≈" + format_size(sz)
+
+    # ---------- ★ v2.2.12 右键菜单处理 ----------
+    def _on_tree_right_click(self, evt):
+        """右键：先选中被点的行，再弹菜单。"""
+        try:
+            row = self.tree.identify_row(evt.y)
+            if row and row not in self.tree.selection():
+                self.tree.selection_set(row)
+            if self._row_menu is not None:
+                self._row_menu.tk_popup(evt.x_root, evt.y_root)
+        except Exception:
+            pass
+
+    def _menu_show_comments(self):
+        self._show_comments()
+
+    def _menu_copy_title(self):
+        rids = self._selected_rids()
+        if not rids:
+            return
+        rec = self.store.items.get(rids[0])
+        if rec is None:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(rec.title)
+            self.push_log("ok", "已复制标题到剪贴板")
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("warn", f"复制失败：{e}")
+
     def _on_tree_dclick(self, evt):
         # ★ v2.0.19：双击「来源」列的单元格 → 按该来源筛选清单
         #   （不只作用于被双击的那一行，而是筛出该类全部记录，便于批量操作）
@@ -3648,6 +4037,19 @@ class App:
         except Exception:
             return
         if pi < 0 or col_0based != pi:
+            # ★ v2.2.14：鼠标停在「大小」列时解释「≈」是什么意思
+            si = self._col_index("size")
+            if si >= 0 and col_0based == si:
+                now2 = time.time()
+                if now2 - getattr(self, "_size_hint_at", 0) >= 3:
+                    self._size_hint_at = now2
+                    try:
+                        self.push_log(
+                            "info",
+                            "💡 「大小」前面带 ≈ 的是微信给的估算值（按最高画质算），"
+                            "实际下载下来的文件通常更小；下载完成后会自动显示真实大小")
+                    except Exception:
+                        pass
             return
         now = time.time()
         if now - getattr(self, "_plat_hint_at", 0) < 3:
@@ -3763,7 +4165,7 @@ class App:
         # ★ v2.2.0：序号列先留空，插入后由 _renumber_rows() 按显示顺序填。
         #   （不能在 _row_values 里算：那时还不知道会插到第几行）
         return ("", st, title, plat_cell,
-                format_size(r.size) if r.size else "-",
+                self._display_size(r),
                 r.source, r.created[5:], fname)
 
     def _update_row(self, rid):
@@ -4106,6 +4508,12 @@ class App:
             self._full_event_pending = False
             self._warn_full_once()
             self._update_status_bar()
+        elif kind == "comments":
+            # ★ v2.2.12：评论到达（解析线程投递）→ 主线程写清单
+            try:
+                self._apply_comments(item[1], item[2], item[3])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"评论写入失败：{e}")
         elif kind == "engine_state":
             self._apply_engine_state(bool(item[1]))
         elif kind == "ca_state":

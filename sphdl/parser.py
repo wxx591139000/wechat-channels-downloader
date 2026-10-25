@@ -333,6 +333,108 @@ def _norm_comment(d: dict):
     }
 
 
+# ★ v2.2.14：嵌套回复（粉丝互相对答）
+#   视频号评论区里，一条评论下面常有「A 回复 B：...」的串，
+#   这些在数据里是**嵌套列表**（replyList / replies / subComments ...）。
+#   旧实现只取「条数最多的那一层」，嵌套回复全被丢弃 →
+#   客户看到的 24 条 vs 视频号 69 条，差的就是这些。
+_REPLY_LIST_KEYS = (
+    "replyList", "reply_list", "replies", "reply",
+    "subComments", "sub_comments", "subCommentList", "sub_comment_list",
+    "children", "childComments", "child_comments",
+    "replyComments", "reply_comments", "replyCommentList",
+)
+
+
+def _parse_comment_node(d, depth: int = 0):
+    """把一个评论 dict 解析成 {nick, content, likes, time, cid, replies:[...]}。
+
+    会递归解析它内部的嵌套回复列表（最多 4 层，防病态数据）。
+    返回 None = 不像评论。
+    """
+    base = _norm_comment(d)
+    if base is None:
+        return None
+    base["replies"] = []
+    if depth >= 4:
+        return base
+    for k, v in d.items():
+        if k in _NICK_KEYS or k in _CONTENT_KEYS:
+            continue
+        lst = None
+        if isinstance(v, list):
+            lst = v
+        elif isinstance(v, str) and v.strip()[:1] == "[":
+            dv = _try_json(v)
+            if isinstance(dv, list):
+                lst = dv
+        if not lst:
+            continue
+        # 只有「明确是回复字段」或「列表项确实像评论」才收
+        key_is_reply = k in _REPLY_LIST_KEYS
+        kids = []
+        for it in lst:
+            if not isinstance(it, dict):
+                continue
+            child = _parse_comment_node(it, depth + 1)
+            if child is not None:
+                kids.append(child)
+        if kids and (key_is_reply or len(kids) == len(lst)):
+            base["replies"].extend(kids)
+    return base
+
+
+def _walk_comment_roots(obj, depth: int = 0, out=None):
+    """收集所有「候选根评论列表」：(depth, [comment_node...], total)。
+
+    ★ 只把**最浅一层**当根：更深的列表属于某条评论的回复，
+      已被 _parse_comment_node 挂进 replies，再当根会重复计数。
+    """
+    if out is None:
+        out = []
+    if depth > 8 or obj is None:
+        return out
+    if isinstance(obj, dict):
+        total = _find_total(obj)
+        for k, v in obj.items():
+            lst = None
+            if isinstance(v, list):
+                lst = v
+            elif isinstance(v, str) and v.strip()[:1] == "[":
+                dv = _try_json(v)
+                if isinstance(dv, list):
+                    lst = dv
+            if lst:
+                nodes = []
+                for it in lst:
+                    if isinstance(it, dict):
+                        n = _parse_comment_node(it)
+                        if n is not None:
+                            nodes.append(n)
+                if nodes:
+                    out.append((depth, nodes, total))
+                    continue          # 这一支已经当根了，别再把子列表当根
+            if isinstance(v, (dict, list)):
+                _walk_comment_roots(v, depth + 1, out)
+            elif isinstance(v, str) and v.strip()[:1] in ("{", "["):
+                dv = _try_json(v)
+                if isinstance(dv, (dict, list)):
+                    _walk_comment_roots(dv, depth + 1, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            if isinstance(v, (dict, list)):
+                _walk_comment_roots(v, depth + 1, out)
+    return out
+
+
+def count_tree(nodes) -> int:
+    """统计评论树的总条数（含所有嵌套回复）。"""
+    n = 0
+    for c in nodes or []:
+        n += 1 + count_tree(c.get("replies") if isinstance(c, dict) else None)
+    return n
+
+
 def _find_total(d: dict):
     """在一个 dict 里找评论总数（视频号常见字段名）。找不到返回 None。"""
     for k in ("totalCount", "total_count", "commentCount",
@@ -384,20 +486,27 @@ def iter_comment_lists(obj: Any, depth: int = 0):
 
 
 def extract_comments(payload: Any):
-    """从任意 payload 里抽出「最像评论列表」的那一份。
+    """从任意 payload 里抽出评论树（含嵌套回复）。
 
     返回 (comments:list, total:int|None)；没找到返回 ([], None)。
 
-    ★ 选「条数最多的那份」：一页 bridge 回传里可能同时有
-      嵌套回复列表和主评论列表，主列表通常条数更多。
+    ★ v2.2.14 改进：不再「选条数最多的那一层」——
+      那样会把每条评论下面的**粉丝互相对答**当独立列表丢掉
+      （客户实测 24 条 vs 视频号 69 条，差的就是这部分）。
+      现在按「最浅一层为根 + 嵌套列表挂到父评论 replies」解析，
+      取根列表节点数最多的那份。
     """
-    best = []
-    best_total = None
+    best = None
     try:
-        for lst, tot in iter_comment_lists(payload):
-            if len(lst) > len(best):
-                best = lst
-                best_total = tot
+        cands = _walk_comment_roots(payload)
     except Exception:
-        pass
-    return best, best_total
+        cands = []
+    for depth, nodes, total in cands:
+        if not nodes:
+            continue
+        key = (len(nodes), count_tree(nodes))
+        if best is None or key > best[0]:
+            best = (key, nodes, total)
+    if best is None:
+        return [], None
+    return best[1], best[2]
