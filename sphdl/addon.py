@@ -301,8 +301,15 @@ class SphAddon:
         #   _cur_video_key：当前正在播放的视频标识（评论挂它身上）
         self.comments_enabled = True
         self.on_comments = None
+        # ★ v2.2.16：由 GUI 注入 —— 给定一组候选 ID，返回该视频的记录键
+        self.resolve_video_by_ids = None
         self._cur_video_key = ""
         self._comment_seen = {}       # video_key -> set(cid 或 content)，去重
+        # ★ v2.2.16：全局 cid → video_key 归属表
+        #   实测事故：72 条评论串到 3 个不同视频上（同一 cid 出现在多条记录）。
+        #   根因：评论挂在「最后捕获的视频」，而不是 payload 自己所属的视频。
+        #   兜底：一个 cid 只能属于一个视频，已归属的绝不重复挂到别处。
+        self._cid_owner = {}
         self.seen = set()          # 去重: (url, decode_key)
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
@@ -592,7 +599,20 @@ class SphAddon:
             return
         if not comments:
             return
-        key = self._cur_video_key
+        # ★ v2.2.16：先尝试从评论 payload 里认出「这条评论属于哪个视频」
+        #
+        #   视频号的评论接口会在 payload 里带上对象的 nonce/objectId，
+        #   用它匹配记录比「最后捕获的视频」可靠得多。
+        #   找不到才退回 _cur_video_key（老行为）。
+        key = ""
+        try:
+            ids = self._collect_video_ids(obj)
+            if ids and self.resolve_video_by_ids is not None:
+                key = self.resolve_video_by_ids(ids) or ""
+        except Exception:
+            key = ""
+        if not key:
+            key = self._cur_video_key
         if not key:
             # 还没捕获过视频（比如先翻评论后播视频）→ 先放着不挂
             return
@@ -600,9 +620,14 @@ class SphAddon:
         fresh = []
         for c in comments:
             ident = c.get("cid") or (c.get("nick", "") + "\x00" + c.get("content", ""))
+            # ★ 兜底防串：这个 cid 已经归属别的视频 → 跳过
+            owner = self._cid_owner.get(ident)
+            if owner is not None and owner != key:
+                continue
             if ident in seen:
                 continue
             seen.add(ident)
+            self._cid_owner[ident] = key
             fresh.append(c)
         if not fresh:
             return
@@ -614,6 +639,40 @@ class SphAddon:
                 logger.debug(f"评论回调异常: {e}")
             except Exception:
                 pass
+
+    # 评论 payload 里可能出现的「视频标识」字段名
+    _VIDEO_ID_KEYS = ("objectId", "object_id", "objectNonceId", "object_nonce_id",
+                      "nonceId", "nonce_id", "exportId", "export_id",
+                      "feedId", "feed_id", "md5sum", "md5_sum", "vid")
+
+    def _collect_video_ids(self, obj, depth: int = 0, out=None):
+        """从评论 payload 里收集所有可能的「视频标识」值。
+
+        ★ 不认识 payload 具体结构 → 按字段名递归找，
+          找到就交给 GUI 去匹配记录（匹配不上自然退回老行为）。
+        """
+        if out is None:
+            out = set()
+        if depth > 8 or obj is None:
+            return out
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k in self._VIDEO_ID_KEYS and isinstance(v, (str, int)):
+                    sv = str(v).strip()
+                    if sv and len(sv) <= 128:
+                        out.add(sv)
+                elif isinstance(v, (dict, list)):
+                    self._collect_video_ids(v, depth + 1, out)
+                elif isinstance(v, str) and v.strip()[:1] in ("{", "["):
+                    try:
+                        dv = json.loads(v)
+                        self._collect_video_ids(dv, depth + 1, out)
+                    except Exception:
+                        pass
+        elif isinstance(obj, list):
+            for v in obj[:200]:
+                self._collect_video_ids(v, depth + 1, out)
+        return out
 
     def set_current_video(self, key: str):
         """设置「当前播放的视频」，评论会挂到它身上。

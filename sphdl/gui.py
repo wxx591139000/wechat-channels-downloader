@@ -442,6 +442,8 @@ class Record:
     #   点「序号」表头排序 = 按抓取先后排列。
     #   老记录没有这个字段 → 用 0 兜底（排序时排在最前，由 id 二次排序保证稳定）
     seq: int = 0
+    # ★ v2.2.16：视频号对象 nonce（评论归属用）
+    nonce_id: str = ""
     # ★ v2.2.12：视频号评论（客户需求）
     #   "先在清单里点开看评论，跟视频号评论区一样的展示效果"
     #   结构：[{nick, content, likes, time, reply_to}]
@@ -490,6 +492,7 @@ class RecordStore:
                 except Exception:
                     kw["seq"] = 0
                 # ★ v2.2.12：评论字段同样必须显式读回（seq 踩过这个坑）
+                kw["nonce_id"] = d.get("nonce_id") or ""
                 kw["comments"] = d.get("comments") or []
                 try:
                     kw["comment_count"] = int(d.get("comment_count") or 0)
@@ -1015,6 +1018,8 @@ class App:
         self.addon.duplicate_check = self._is_known_video
         # ★ v2.2.12：评论回调（解析线程调用）→ 入队，主线程写清单
         self.addon.on_comments = self._on_comments
+        # ★ v2.2.16：让 addon 能用评论 payload 里的视频 ID 找到正确记录
+        self.addon.resolve_video_by_ids = self._resolve_video_by_ids
 
         # 档位显示/状态栏首次刷新（此时 self.addon 已就绪）
         self._refresh_limit_display()
@@ -1643,6 +1648,28 @@ class App:
         rec.comments_updated = time.strftime("%Y-%m-%d %H:%M:%S")
         self._dirty = True
         self._update_row(rid)
+
+    def _resolve_video_by_ids(self, ids):
+        """在一组候选 ID 里，找出当前清单中哪条记录匹配。
+
+        ★ v2.2.16：评论 payload 带的是视频的 objectId / nonce 等，
+          用它匹配记录，才不会把评论串到别的视频上。
+        匹配顺序：video_id（md5sum）→ nonce_id → 都不中返回 None（走老逻辑）。
+        """
+        try:
+            ids = {str(x) for x in (ids or set()) if x}
+        except Exception:
+            return None
+        if not ids:
+            return None
+        for rid, r in self.store.items.items():
+            vid = getattr(r, "video_id", "") or ""
+            non = getattr(r, "nonce_id", "") or ""
+            if vid and vid in ids:
+                return vid
+            if non and non in ids:
+                return vid or non
+        return None
 
     def _find_rid_by_video_key(self, key: str):
         """按 video_id（md5sum）或 url 找记录 id。"""
@@ -4656,6 +4683,7 @@ class App:
                 decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
+                nonce_id=getattr(vd, "nonce_id", "") or "",
                 renditions=vd.renditions or [], quality_note=vd.quality_note or "",
                 seq=self._next_seq())
             if not self.store.add(rec):

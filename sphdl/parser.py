@@ -162,6 +162,11 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
         # 稳定视频 ID：优先 media 的 md5sum（内容哈希，跨 token 恒定），
         # 没有则退回 URL 里的 encfilekey（同一文件恒定，token 拼在末尾）
         video_id = str(_pick(first, "md5sum", "full_md5sum") or "")
+        # ★ v2.2.16：nonce 用于给评论找对宿主视频
+        nonce_id = str(_pick(obj if isinstance(obj, dict) else {},
+                             "objectNonceId", "object_nonce_id",
+                             "nonceId", "nonce_id", "exportId", "export_id")
+                       or "")
         if not video_id:
             m = re.search(r"encfilekey=([A-Za-z0-9_\-]+)", url)
             if m:
@@ -175,6 +180,7 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
             is_image=is_image,
             cover_url=str(_pick(first, "coverUrl", "cover_url") or ""),
             video_id=video_id,
+            nonce_id=nonce_id,
             renditions=renditions,
             quality_note=_quality_note(media_list),
             raw=obj,
