@@ -739,6 +739,19 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _send_json(self, obj, code: int = 200):
+        """发 JSON 响应（客户端 API 用）。"""
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
+
     def _redirect(self, to, cookie=None, ok=""):
         """303 重定向。ok 非空时把提示塞进 URL（目标页读 q['ok'] 显示）。"""
         if ok:
@@ -786,6 +799,12 @@ class H(BaseHTTPRequestHandler):
             return self._need_login()
         if p == "/logout":
             return self._redirect("/login", "sid=; Path=/; Max-Age=0")
+        # ★ v2.3.0：客户端查询吊销名单（方案 B）
+        #   放在登录校验**之前** —— 客户端没有后台会话。
+        #   只暴露「哪些码被作废」，不含客户名/价格等敏感信息。
+        if u.path == "/api/revoked":
+            return self._api_revoked(parse_qs(u.query))
+            return self._api_revoked()
         if not self._sess_ok():
             return self._need_login()
         q = parse_qs(u.query)
@@ -1316,6 +1335,61 @@ class H(BaseHTTPRequestHandler):
             elif ev == "restored":
                 st = "active"
         return st
+
+    def _api_revoked(self, q=None):
+        """返回被作废的授权码清单（客户端用，无需登录）。
+
+        支持 `?codes=A,B,C` 只返回这些码的状态（减少传输量）。
+        不传 codes 则返回全量名单（便于排查）。
+
+        ★ 方案 B（2026-10-26）：客户要求「作废后立刻停止」。
+          原来客户端纯本地 HMAC 校验，作废只改台账，客户端完全不知道。
+
+        安全边界：
+          · 只返回 code + 减少信息量的 reason
+          · **不含**客户名、价格、渠道、备注
+          · 作废码本身就是一串无意义字符，泄露无害
+          · 不限速也无所谓（数据量小、无敏感信息）
+
+        客户端行为（见 sphdl/revocation.py）：
+          · 启动 / 每 30 分钟拉一次
+          · 命中 → 立即降档 + 停正在下载的任务 + 醒目提示
+          · 服务器不可达 → 用本地缓存（7 天宽限），再不行就放行
+        """
+        try:
+            rows = self._merged_rows()
+        except Exception as e:                      # noqa: BLE001
+            return self._send_json({"ok": False, "error": str(e),
+                                    "revoked": []})
+        out = []
+        for r in rows:
+            if not r.get("_voided"):
+                continue
+            c = (r.get("code") or "").strip()
+            if not c:
+                continue
+            out.append({
+                "code": c,
+                # 只给一个粗粒度原因，不带客户信息
+                "reason": "授权码已作废",
+            })
+        # 客户端可以只问自己关心的码（省钱省流量）
+        want = ""
+        try:
+            want = ((q or {}).get("codes", [""])[0] or "").strip()
+        except Exception:
+            want = ""
+        if want:
+            asked = {c.strip() for c in want.split(",") if c.strip()}
+            out = [it for it in out if it["code"] in asked]
+        return self._send_json({
+            "ok": True,
+            "revoked": out,
+            "count": len(out),
+            "ts": int(time.time()),
+            # 客户端用来判断这份名单有多新
+            "ledger_mtime": int(os.path.getmtime(LEDGER)) if LEDGER.exists() else 0,
+        })
 
     def _do_void(self, form, voided=True):
         """作废 / 恢复（追加事件，不改原记录）。"""

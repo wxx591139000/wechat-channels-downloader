@@ -931,6 +931,13 @@ class App:
         self._sort_col = None          # 表头排序（v2.0.12）：None=默认最新在前
         self._sort_desc = False
         self._rid_seq = 0              # 捕获记录 id 递增序号（防同秒碰撞）
+        # ★ v2.2.23：嗅探运行状态（看门狗用）
+        self.engine_running = False
+        # ★ v2.3.0：吊销名单状态（方案 B —— 作废后立即停用）
+        self._revoked_reason = ""     # 非空 = 当前码已被作废
+        self._revoked_codes = {}      # {code: reason}
+        self._revoke_checked_at = 0.0
+        self.REVOKE_INTERVAL = 1800   # 每 30 分钟校验一次
         # 钩子看门狗状态（防"捕获静默停摆"，2026-08-25 v1.2.1）
         self._hook_warned = False
         self._last_hb_log = 0.0
@@ -3430,6 +3437,177 @@ class App:
         self.engine.stop()
         self.push_event(("engine_state", False))
 
+    # ---------------- ★ v2.3.0 授权码吊销校验（方案 B） ----------------
+    def _start_revoke_watch(self):
+        """启动吊销名单校验：登录时一次 + 每 30 分钟一次。
+
+        ★ 客户要求（2026-10-26）：「作废后要立刻停止」。
+          工具本身就要联网（下视频必须联网），所以联网校验不增加门槛。
+
+        兜底策略（不能误伤正版客户）：
+          · 网络失败 → 用本地缓存（≤7 天）
+          · 无缓存   → 放行
+        """
+        def _tick():
+            try:
+                self._check_revocations()
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.root.after(int(self.REVOKE_INTERVAL * 1000), _tick)
+                except Exception:
+                    pass
+
+        # 首次稍等 5 秒（避免和启动自检抢资源）
+        try:
+            self.root.after(5000, _tick)
+        except Exception:
+            pass
+
+    def _check_revocations(self):
+        """（后台线程执行）拉吊销名单，命中则回主线程处理。"""
+        import threading
+        from . import revocation as rv
+
+        codes = [c for c in (self.cfg.license_codes or {}).values() if c]
+        if self.cfg.license_code:
+            codes.append(self.cfg.license_code)
+        for prod in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE):
+            try:
+                c = self.cfg.code_of(prod)
+                if c:
+                    codes.append(c)
+            except Exception:
+                pass
+        codes = list(dict.fromkeys(codes))       # 去重保序
+        if not codes:
+            return
+
+        self._revoke_checked_at = time.time()
+
+        def _worker():
+            try:
+                hit, src = rv.fetch_revoked(codes)
+            except Exception:
+                hit, src = {}, "none"
+            self.ui_q.put(("revoke_result", hit, src))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_revoke_result(self, hit: dict, src: str):
+        """（主线程）处理吊销校验结果。
+
+        src: net=联网成功 / cache=用缓存 / none=拿不到
+
+        ★★ 客户红线（2026-10-26）：**只有能证明作废时才降档** ★★
+          · 本次联网成功且服务器明确列出该码 → 降档
+          · 断网但 6 小时内的成功响应里明确列出该码 → 降档
+          · 其它一切情况（404/500/HTML/畸形/超时/无缓存/缓存过期）
+            → **绝不降档**，也绝不改动现有档位
+        """
+        if not isinstance(hit, dict):
+            hit = {}
+        # ★ 双保险：来源不可信时，即使 hit 非空也不降档
+        #   （防止上游逻辑变更导致误降——这里再判一次来源）
+        if hit and src not in ("net", "cache"):
+            self.push_log(
+                "warn",
+                f"⚠ 收到作废标记但来源不可信（{src}），为保护正版客户不降档")
+            return
+        if hit:
+            # ★ 命中 → 立即降档 + 停下载 + 醒目提示
+            codes = list(hit.keys())
+            reason = next(iter(hit.values()), "授权码已作废")
+            self._revoked_reason = reason
+            self._revoked_codes = hit
+            self.push_log("error",
+                          f"🚫 授权码已被作废：{codes[0][:18]}…（{reason}）")
+            self._apply_tier(self._resolve_tier(), reason="授权码已作废")
+            self._stop_all_downloads(silent=True)
+            try:
+                self._refresh_mp_button()
+                self._refresh_watermark()
+            except Exception:
+                pass
+            self._warn_revoked(reason)
+            return
+
+        # 没命中：清掉作废标记（可能是「恢复授权」了）
+        if self._revoked_reason:
+            self._revoked_reason = ""
+            self._revoked_codes = {}
+            self.push_log("ok", "✅ 授权已恢复正常")
+            self._apply_tier(self._resolve_tier(), reason="授权恢复")
+
+    def _warn_revoked(self, reason: str):
+        """授权码被作废时的醒目提示（自绘，红色大字）。"""
+        win = tk.Toplevel(self.root)
+        win.title("授权码已失效")
+        win.transient(self.root)
+        win.configure(bg="#ffffff")
+
+        bar = tk.Frame(win, bg="#cf222e", height=44)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  授权码已失效", bg="#cf222e", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 12, "bold"),
+                 anchor="w").pack(side="left", fill="both")
+
+        body = tk.Frame(win, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=26, pady=(18, 8))
+
+        tk.Label(body, text="⚠ 当前授权码已被作废",
+                 bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 20, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(body, text="下载功能已停止，正在进行的下载也已取消。",
+                 bg="#ffffff", fg="#1f2328",
+                 font=("Microsoft YaHei UI", 13),
+                 wraplength=520, justify="left", anchor="w"
+                 ).pack(fill="x", pady=(8, 0))
+
+        tip = tk.Frame(body, bg="#fff8c5", highlightthickness=1,
+                       highlightbackground="#d4a72c")
+        tip.pack(fill="x", pady=(14, 0))
+        tk.Label(tip, text=f"原因：{reason}",
+                 bg="#fff8c5", fg="#7a5c00",
+                 font=("Microsoft YaHei UI", 12, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=8)
+
+        detail = (
+            "已下载的视频文件不受影响，仍在原来的下载目录里。\n\n"
+            "如果你认为这是误操作，请把你的授权码发给发布方核实：\n"
+            "  点【🔑 授权管理】可以查看当前授权码。\n\n"
+            "发布方恢复授权后，重开本软件即可自动恢复（每 30 分钟校验一次）。"
+        )
+        txt = tk.Text(body, height=6, width=54, wrap="word",
+                      bg="#f6f8fa", fg="#1f2328", relief="flat",
+                      font=("Microsoft YaHei UI", 10), cursor="arrow")
+        txt.insert("1.0", detail)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True, pady=(12, 0))
+
+        btns = tk.Frame(win, bg="#ffffff")
+        btns.pack(fill="x", padx=26, pady=(10, 16))
+        tk.Button(btns, text="我知道了", command=win.destroy,
+                  bg="#0969da", fg="#ffffff", relief="flat",
+                  font=("Microsoft YaHei UI", 12, "bold"),
+                  activebackground="#0b5fca", activeforeground="#ffffff",
+                  cursor="hand2", padx=20, pady=8).pack(side="right")
+
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{max(0, px + (pw - w) // 2)}+"
+                         f"{max(0, py + (ph - h) // 3)}")
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+
     def _start_capture_watchdog(self):
         """启动「抓不到」看门狗（v2.2.23）。
 
@@ -4245,6 +4423,11 @@ class App:
           · `_require_license_for_download()` —— 给**用户主动点击**的入口用，
             未授权时弹窗引导去激活
         """
+        # ★ v2.3.0：已被服务器作废 → 一律无下载权限（方案 B）
+        #   放在最前面：即使档位还在、码本地 HMAC 仍能通过，
+        #   只要服务器说作废，就不给下载。
+        if getattr(self, "_revoked_reason", ""):
+            return False
         # 绑定版本（LOCKED_MAX_RECORDS 写死）→ 视为已授权
         if self.cfg.locked_max_records is not None:
             return True
@@ -4356,18 +4539,25 @@ class App:
             self._submit_record(rid)
         self.push_log("ok", f"已加入下载队列 {len(rids)} 个（全部待下载）")
 
-    def _stop_all_downloads(self):
-        """「停止所有下载」：一键停止所有 排队中/下载中/解密中 的任务。"""
+    def _stop_all_downloads(self, silent: bool = False):
+        """「停止所有下载」：一键停止所有 排队中/下载中/解密中 的任务。
+
+        silent=True → 不弹确认框（供「授权码被作废时自动停」调用，
+        此时已经弹了失效提示，不该再弹一个"已停止"）。
+        """
         targets = [r for r in self.store.items.values()
                    if r.status in ("pending", "downloading", "decrypting")]
         if not targets:
-            messagebox.showinfo("提示", "当前没有正在下载/排队中的任务")
+            if not silent:
+                messagebox.showinfo("提示", "当前没有正在下载/排队中的任务")
             return
-        if not messagebox.askyesno(
-                "停止所有下载",
-                f"将停止 {len(targets)} 个正在下载/排队的任务？\n"
-                "（已下载完成的文件保留，可稍后『重试失败』再下）"):
-            return
+        # ★ v2.3.0：silent 模式（授权作废自动停）不问确认，直接停
+        if not silent:
+            if not messagebox.askyesno(
+                    "停止所有下载",
+                    f"将停止 {len(targets)} 个正在下载/排队的任务？\n"
+                    "（已下载完成的文件保留，可稍后『重试失败』再下）"):
+                return
         # ★ v2.2.5：从 pipeline 队列层面清空，而不是按 URL 逐个 cancel。
         #
         #   客户报障：「点击『停止所有下载』后，序号 500 那行还在一直下载」
@@ -5234,6 +5424,12 @@ class App:
             self._full_event_pending = False
             self._warn_full_once()
             self._update_status_bar()
+        elif kind == "revoke_result":
+            # ★ v2.3.0：吊销名单校验结果
+            try:
+                self._on_revoke_result(item[1], item[2] if len(item) > 2 else "")
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"处理吊销结果出错：{e}")
         elif kind == "ca_install_result":
             # ★ v2.2.20：证书后台安装结果
             try:
@@ -5915,6 +6111,12 @@ class App:
         self.root.destroy()
 
     def run(self):
+        # ★ v2.3.0：启动授权码吊销校验（方案 B）
+        #   作废后客户端才会知道 → 立即降档 + 停下载 + 醒目提示
+        try:
+            self._start_revoke_watch()
+        except Exception as _e:                     # noqa: BLE001
+            self.push_log("warn", f"吊销校验启动失败（不影响使用）：{_e}")
         self.push_log("info", "欢迎使用 sphdl 视频号下载器")
         self.push_log("info", "① 点『启动嗅探』→ 打开微信视频号播放视频")
         # ★ v2.2.9：这句必须跟着实际开关状态说，不能硬编码
