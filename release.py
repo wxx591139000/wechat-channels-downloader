@@ -695,6 +695,32 @@ def main():
 
     if not args.no_commit:
         commit_and_tag(new, args.note.strip())
+    # ★★★ v2.3.2：README 版本号漂移检查（已连续踩 6 次）
+    #
+    #   每次发版后两份 README 都会指向旧版本号，而这是**必然**漂移
+    #   （不是偶发疏忽）。所以改成自动检查 + 自动修正提示。
+    #   两份都要查：仓库外的 ../README.md 和仓库内的 README.md。
+    try:
+        _ver = f"v{new[0]}.{new[1]}.{new[2]}"
+        _stale = []
+        for _rd in (ROOT / "README.md", ROOT.parent / "README.md"):
+            if not _rd.exists():
+                continue
+            _t = _rd.read_text(encoding="utf-8", errors="replace")
+            _found = re.findall(
+                r"微信视频号下载器-(v[\d.]+)[a-z0-9-]*\.zip", _t)
+            _old = sorted({v for v in _found if v != _ver})
+            if _old:
+                _stale.append((_rd, _old))
+        if _stale:
+            log("  ⚠ README 版本号漂移（请手工修正，或在下次发版前改好）：")
+            for _rd, _old in _stale:
+                log(f"     {_rd}: 引用 {', '.join(_old)} → 应为 {_ver}")
+        else:
+            log("  ✅ README 版本号已对齐")
+    except Exception as _e:                       # noqa: BLE001
+        log(f"  ⚠ README 检查跳过: {_e}")
+
     log(f"\n🎉 发布完成: v{new[0]}.{new[1]}.{new[2]}")
     log(f"  构建: dist/v{new[0]}.{new[1]}.{new[2]}/")
     log(f"  分享: dist/{ZIP_PREFIX}{new[0]}.{new[1]}.{new[2]}{ZIP_SUFFIX}")
