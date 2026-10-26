@@ -145,16 +145,20 @@ print("=" * 74)
 print("B9 GUI 已改为自动装优先")
 print("=" * 74)
 gui = (ROOT / "sphdl" / "gui.py").read_text(encoding="utf-8")
-check("B9a GUI 调用了 ca_install.install",
-      "ca_install.install()" in gui)
+check("B9a GUI 调用了 ca_install.install_interactive",
+      "install_interactive(" in gui)
 # ★ v2.2.18 演进：失败时**不再开向导**（会闪退的那个），
 #   改为 messagebox 给出手动步骤 + 自动复制证书路径。
 #   旧判据「自动安装未成功 + open_wizard」已过时，改为断言零窗口方案。
 i = gui.find("def _launch_cert_wizard")
 j = gui.find("\n    def ", i + 10)
 body = gui[i:j]
-check("B9b 失败时不开向导（v2.2.18 起）",
-      "open_wizard" not in body and "证书没装上" in body,
+# v2.2.21：失败提示在 _on_ca_install_result
+i2 = gui.find("def _on_ca_install_result")
+j2 = gui.find("\n    def ", i2 + 10)
+res_body = gui[i2:j2]
+check("B9b 不开向导，失败走 messagebox 手动引导",
+      "open_wizard" not in body and "证书没装上" in res_body,
       "应改为 messagebox 手动引导")
 check("B9c 不再用 Popen(shell=True) 拉 bat",
       "Popen" not in body and "shell=True" not in body)

@@ -54,11 +54,20 @@ print("W1 ca_install 全程零窗口")
 print("=" * 74)
 from sphdl import ca_install
 
+mod_src = inspect.getsource(ca_install)
 src = inspect.getsource(ca_install._run)
-print(f"  _run 含 CREATE_NO_WINDOW: {'CREATE_NO_WINDOW' in src}")
-print(f"  _run 传 creationflags:    {'creationflags=flags' in src}")
-check("W1a _run 用 CREATE_NO_WINDOW", "CREATE_NO_WINDOW" in src)
-check("W1b _run 把 flags 传给 subprocess", "creationflags=flags" in src)
+# ★ v2.2.21：零窗口改为模块常量 _NO_WINDOW，判据看"有没有用这个常量"
+has_const = "CREATE_NO_WINDOW" in mod_src
+print("  模块定义含 CREATE_NO_WINDOW: " + str(has_const))
+print(f"  _run 传 creationflags: {'creationflags=_NO_WINDOW' in src}")
+check("W1a 模块定义了 _NO_WINDOW（CREATE_NO_WINDOW）",
+      "CREATE_NO_WINDOW" in mod_src)
+check("W1b _run 把 _NO_WINDOW 传给 subprocess",
+      "creationflags=_NO_WINDOW" in src)
+# Popen 也必须零窗口
+check("W1d 安装用的 Popen 也带 CREATE_NO_WINDOW",
+      "creationflags=_NO_WINDOW" in inspect.getsource(
+          ca_install.install_interactive))
 
 # 源码里不许出现可见窗口的启动方式
 bad_pat = ("shell=True", "start ", "os.system", "Popen(f'")
@@ -82,7 +91,8 @@ check("W2c 不再引用 install-cert.bat",
       "install-cert.bat" not in body.replace(
           "根因是 install-cert.bat 是 LF 换行", ""),
       "注释里提到不算")
-check("W2d 调用了 ca_install.install", "ca_install.install()" in body)
+check("W2d 调用了 ca_install.install_interactive",
+      "install_interactive(" in body)
 
 print()
 print("=" * 74)
@@ -108,8 +118,15 @@ else:
           ok is False and ("启动嗅探" in msg or "生成" in msg), msg[:50])
 
 # 失败提示必须含手动步骤
-manual_ok = ("certmgr.msc" in body and "受信任的根证书颁发机构" in body
-             and "复制" in body)
+# ★ v2.2.21：失败提示移到 _on_ca_install_result
+g2 = gui
+i2 = g2.find("def _on_ca_install_result")
+j2 = g2.find("\n    def ", i2 + 10)
+res_body = g2[i2:j2]
+manual_ok = ("certmgr.msc" in res_body
+             and "受信任的根证书颁发机构" in res_body
+             and "clipboard_append" in res_body
+             and "CA证书手动安装SOP.pdf" in res_body)
 print(f"  失败分支含手动步骤+复制路径: {manual_ok}")
 check("W5 失败时给手动步骤 + 复制路径", manual_ok)
 
@@ -120,7 +137,8 @@ print("=" * 74)
 check("W6a 列定义里 no 宽度为 0", '"no": ("", 0)' in gui)
 check("W6b column 设置了 minwidth=0", "minwidth=0" in gui)
 check("W6c 表头文本为空", '"no": ("", 0)' in gui)
-check("W9 标题列变宽（267）", '"title": ("标题", 267)' in gui)
+check("W9 标题列变宽（349，序号+大小都隐藏后）",
+      '"title": ("标题", 349)' in gui)
 
 # W7：_row_values 仍返回 8 个字段，索引对应
 import sphdl.gui as G

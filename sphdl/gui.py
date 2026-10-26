@@ -2843,22 +2843,30 @@ class App:
         cols = ("no", "status", "title", "platform", "size", "source", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
+        # ★ v2.2.20：「大小」列也不再显示（客户要求）
+        #
+        #   原因：客户看到「待下载 ≈183MB」但下载后只有 18MB，反复纠结
+        #   「为什么变小了」。本质是微信元数据给的是最高画质值，
+        #   实际下的是当时播放档位，两者天然不同 —— 解释了也难接受。
+        #   直接隐藏这一列，避免这个无解的争议。
+        #   （数据仍保留在 Record.size 里，内部逻辑照常使用）
         heads = {"no": ("", 0),
-                 "status": ("状态", 120), "title": ("标题", 267),
-                 "platform": ("来源", 92), "size": ("大小", 82),
+                 "status": ("状态", 120), "title": ("标题", 349),
+                 "platform": ("来源", 92), "size": ("", 0),
                  "source": ("捕获方式", 115), "time": ("时间", 85),
                  "file": ("文件", 215)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
             self.tree.heading(c, text=heads[c][0],
                               command=lambda col=c: self._on_tree_sort(col))
-            if c == "no":
+            if c in ("no", "size"):
                 # 宽度 0 + 不拉伸 + 不可拖宽 = 彻底看不见
                 self.tree.column(c, width=0, minwidth=0, stretch=False)
             else:
                 self.tree.column(c, width=heads[c][1],
                                  stretch=(c in ("title", "file")))
         self._seq_col_hidden = True
+        self._size_col_hidden = True
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -3527,26 +3535,33 @@ class App:
         self._launch_cert_wizard()
 
     def _launch_cert_wizard(self):
-        """装证书：**全程不显示命令窗口**，只用程序内的对话框反馈。
+        """装证书：零命令行窗口 + 引导客户点 Windows 的【安全警告】【是】。
 
-        ★ v2.2.18（2026-10-25 客户事故，2 位客户因此退款）：
-          客户报障「装证书时命令窗口闪退」「反复装不上」。
-          根因是 install-cert.bat 是 LF 换行，cmd 解析失败后 0.03 秒退出
-          → 窗口一闪就没，客户完全不知道发生了什么，只能退款。
+        ★ 三次踩坑的最终结论（2026-10-25）：
 
-        **结论：批处理和命令行窗口本身就是交付风险源。**
-        哪怕换行符修好了，杀软拦截 / UAC / 中文路径 / 环境变量缺失
-        都可能让窗口一闪而过，客户永远看不到原因。
+        ① 用 .bat 向导 → 客户看到「命令窗口闪退」（LF 换行，0.03s 退出）
+           3 个客户报障，2 个退款。
 
-        所以本版起：
-          · 只走**进程内 certutil**（CREATE_NO_WINDOW，零窗口）
-          · 成功/失败都用 messagebox 明确告知，附可复制的错误详情
-          · 提供「手动安装」引导（含复制路径按钮），客户自己能兜底
-          · **完全不再调用 .bat**（批处理只留在包里给高级用户手动用）
+        ② 改成 `certutil -addstore -user Root`（CREATE_NO_WINDOW）→
+           **实测返回 0x800704B7「操作已被用户取消」**，耗时 8 秒。
+           因为写根证书库必须经过 Windows 的安全确认框，
+           无窗口模式下框弹不出来 → 系统自动取消。
+
+        ③ 再改 .NET X509Store → 同样卡住（等确认框，45 秒超时）。
+
+        ★ 实测确认：那个确认框**确实会出现在桌面**
+          （0.5 秒内，类名 #32770，标题「安全警告」）。
+          它不是命令行窗口，客户点【是】是正常操作系统流程。
+
+        所以最终方案：
+          · 先用自己的对话框告诉客户「接下来会弹安全警告，请点【是】」
+          · 后台进程写 Root（**不显示任何命令行窗口**）
+          · 主动把「安全警告」框调到最前，避免被挡住显得没反应
+          · 写入生效立即返回，成功后弹「安装成功」
+          · 失败给真实原因 + 手动步骤（证书路径已复制到剪贴板）
         """
         from . import ca_install
 
-        # ① 先看前提：CA 文件在不在（不在说明还没启动过嗅探）
         ca = ca_install.find_ca_file()
         if ca is None:
             self.push_log("warn", "还没生成证书文件，先启动嗅探")
@@ -3557,49 +3572,89 @@ class App:
                 "  1. 点【启动嗅探】\n"
                 "  2. 等 3~5 秒\n"
                 "  3. 再回来点【安装/检测】\n\n"
-                "如果已经启动过还是没有，请把下面这个文件夹截图发给发布方：\n"
+                f"如果已经启动过还是没有，请把这个文件夹截图发给发布方：\n"
                 f"{Path.home() / '.mitmproxy'}",
                 parent=self.root)
             return
 
-        # ② 进程内安装（零窗口，不需要管理员权限）
+        # 已经装好 → 直接提示，不必打扰
         try:
-            ok, msg = ca_install.install()
-        except Exception as e:                   # noqa: BLE001
-            ok, msg = False, f"{type(e).__name__}: {e}"
+            if ca_install.is_installed():
+                self.push_log("ok", "证书已安装，无需重复操作")
+                messagebox.showinfo(
+                    "证书已安装",
+                    "检测到证书已经装好了，可以直接点【启动嗅探】使用。",
+                    parent=self.root)
+                threading.Thread(target=self._check_ca, daemon=True).start()
+                return
+        except Exception:
+            pass
 
+        # 安装前预告：告诉客户"会弹一个 Windows 安全警告，请点是"
+        go = messagebox.askokcancel(
+            "安装证书（两步）",
+            "点【确定】后开始安装。\n\n"
+            "⚠️ 稍等 1~2 秒，Windows 会弹出「安全警告」窗口，\n"
+            "   请点**【是】**完成安装。\n\n"
+            "（这个警告是 Windows 系统自己的，不是命令行窗口；\n"
+            "  装完不会再出现）",
+            parent=self.root)
+        if not go:
+            return
+
+        # 后台安装（UI 不卡），结果用事件队列回主线程
+        self.push_log("info", "正在安装证书…如果弹出「安全警告」请点【是】")
+
+        def _worker():
+            try:
+                ok, msg, saw = ca_install.install_interactive(timeout=90)
+            except Exception as e:               # noqa: BLE001
+                ok, msg, saw = False, f"{type(e).__name__}: {e}", False
+            self.ui_q.put(("ca_install_result", ok, msg, saw))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_ca_install_result(self, ok, msg, saw_dialog):
+        """（主线程）处理证书安装结果。"""
         if ok:
             self.push_log("ok", f"✅ {msg}")
             try:
                 threading.Thread(target=self._check_ca, daemon=True).start()
             except Exception:
                 pass
-            messagebox.showinfo("证书安装成功", msg, parent=self.root)
+            messagebox.showinfo("证书安装成功",
+                                f"{msg}\n\n现在可以点【启动嗅探】使用了。",
+                                parent=self.root)
             return
 
-        # ③ 失败 → 明确告知 + 给出手动方案（不让客户面对黑窗口）
-        self.push_log("error", f"证书自动安装失败：{msg}")
-        detail = msg
+        self.push_log("error", f"证书安装失败：{msg}")
+        ca = ""
+        try:
+            from . import ca_install
+            f = ca_install.find_ca_file()
+            ca = str(f) if f else ""
+        except Exception:
+            pass
         manual = (
-            "手动安装步骤（不需要命令行）：\n\n"
+            "手动安装（不需要任何命令行）：\n\n"
             "1. 按 Win+R，输入 certmgr.msc 回车\n"
-            "2. 左侧展开「受信任的根证书颁发机构」\n"
-            "3. 右键「证书」→ 所有任务 → 导入\n"
+            "2. 左侧展开「受信任的根证书颁发机构」→ 点「证书」\n"
+            "3. 右侧空白处右键 → 所有任务 → 导入\n"
             "4. 选择这个文件：\n"
             f"   {ca}\n"
             "5. 一路「下一步」，遇到安全警告点【是】\n"
-            "6. 回到软件点【安装/检测】确认\n"
+            "6. 回来点【安装/检测】确认\n\n"
+            "详细图文步骤见压缩包里的：CA证书手动安装SOP.pdf"
         )
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(str(ca))
-        except Exception:
-            pass
+        if ca:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(ca)
+            except Exception:
+                pass
         messagebox.showwarning(
-            "证书没装上（已复制证书路径）",
-            f"自动安装没成功，原因：\n{detail}\n\n"
-            + manual
-            + "\n证书文件路径已复制到剪贴板，第 4 步直接 Ctrl+V 粘贴即可。",
+            "证书没装上（证书路径已复制）",
+            f"原因：{msg}\n\n" + manual,
             parent=self.root)
     def _choose_dir(self):
         d = filedialog.askdirectory(initialdir=self.dir_var.get() or str(BASE_DIR),
@@ -4714,6 +4769,13 @@ class App:
             self._full_event_pending = False
             self._warn_full_once()
             self._update_status_bar()
+        elif kind == "ca_install_result":
+            # ★ v2.2.20：证书后台安装结果
+            try:
+                self._on_ca_install_result(item[1], item[2],
+                                           item[3] if len(item) > 3 else False)
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"处理证书安装结果出错：{e}")
         elif kind == "comments":
             # ★ v2.2.12：评论到达（解析线程投递）→ 主线程写清单
             try:
