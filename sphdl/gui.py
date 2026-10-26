@@ -2831,11 +2831,20 @@ class App:
         #   ★ 序号是**当前显示顺序**的编号（1,2,3...），
         #     排序/筛选变化后要重新编号 —— 见 _renumber_rows()。
         #     不做固定 id：客户要的是"第几个"，不是"哪一条"。
+        # ★ v2.2.18：**「序号」列不再显示**（客户明确要求隐藏）
+        #
+        #   保留 seq 字段和排序能力（清空重置、按序下载仍在用），
+        #   只是不在界面上占一列 —— 少一列后标题列能宽 52px。
+        #
+        #   ★ 隐藏方式：column(..., width=0, minwidth=0, stretch=False)
+        #     配合 heading 文本置空。不能用 `displaycolumns`，
+        #     因为那会让 _col_index() 算出来的索引与实际 values 错位
+        #     （_row_values 仍按 8 个字段返回，索引必须一一对应）。
         cols = ("no", "status", "title", "platform", "size", "source", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
-        heads = {"no": ("序号", 52),
-                 "status": ("状态", 120), "title": ("标题", 215),
+        heads = {"no": ("", 0),
+                 "status": ("状态", 120), "title": ("标题", 267),
                  "platform": ("来源", 92), "size": ("大小", 82),
                  "source": ("捕获方式", 115), "time": ("时间", 85),
                  "file": ("文件", 215)}
@@ -2843,8 +2852,13 @@ class App:
         for c in cols:
             self.tree.heading(c, text=heads[c][0],
                               command=lambda col=c: self._on_tree_sort(col))
-            self.tree.column(c, width=heads[c][1],
-                             stretch=(c in ("title", "file")))
+            if c == "no":
+                # 宽度 0 + 不拉伸 + 不可拖宽 = 彻底看不见
+                self.tree.column(c, width=0, minwidth=0, stretch=False)
+            else:
+                self.tree.column(c, width=heads[c][1],
+                                 stretch=(c in ("title", "file")))
+        self._seq_col_hidden = True
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -3513,24 +3527,80 @@ class App:
         self._launch_cert_wizard()
 
     def _launch_cert_wizard(self):
-        # PyInstaller 6 的 onedir 会把 --add-data 放进 _internal/，
-        # 开发模式则在 exe/main.py 同级目录 → 两处都找
-        bat = BASE_DIR / "install-cert.bat"
-        if not bat.exists():
-            bat = BASE_DIR / "_internal" / "install-cert.bat"
-        if not bat.exists():
-            self.push_log("error", "找不到 install-cert.bat（证书安装脚本）")
-            return
-        try:
-            subprocess.Popen(f'"{bat}"', shell=True, cwd=str(bat.parent))
-        except Exception as e:
-            self.push_log("error", f"无法启动证书安装向导: {e}")
-            return
-        self.push_log(
-            "info", "已打开证书安装向导（3 步）：按窗口提示操作，"
-                    "遇到 Windows 安全警告点【是】；完成后回来点【安装/检测】确认")
+        """装证书：**全程不显示命令窗口**，只用程序内的对话框反馈。
 
-    # ---------------- 下载目录 ----------------
+        ★ v2.2.18（2026-10-25 客户事故，2 位客户因此退款）：
+          客户报障「装证书时命令窗口闪退」「反复装不上」。
+          根因是 install-cert.bat 是 LF 换行，cmd 解析失败后 0.03 秒退出
+          → 窗口一闪就没，客户完全不知道发生了什么，只能退款。
+
+        **结论：批处理和命令行窗口本身就是交付风险源。**
+        哪怕换行符修好了，杀软拦截 / UAC / 中文路径 / 环境变量缺失
+        都可能让窗口一闪而过，客户永远看不到原因。
+
+        所以本版起：
+          · 只走**进程内 certutil**（CREATE_NO_WINDOW，零窗口）
+          · 成功/失败都用 messagebox 明确告知，附可复制的错误详情
+          · 提供「手动安装」引导（含复制路径按钮），客户自己能兜底
+          · **完全不再调用 .bat**（批处理只留在包里给高级用户手动用）
+        """
+        from . import ca_install
+
+        # ① 先看前提：CA 文件在不在（不在说明还没启动过嗅探）
+        ca = ca_install.find_ca_file()
+        if ca is None:
+            self.push_log("warn", "还没生成证书文件，先启动嗅探")
+            messagebox.showinfo(
+                "先启动一次嗅探",
+                "证书还没生成。\n\n"
+                "证书会在第一次【启动嗅探】时自动生成，请：\n"
+                "  1. 点【启动嗅探】\n"
+                "  2. 等 3~5 秒\n"
+                "  3. 再回来点【安装/检测】\n\n"
+                "如果已经启动过还是没有，请把下面这个文件夹截图发给发布方：\n"
+                f"{Path.home() / '.mitmproxy'}",
+                parent=self.root)
+            return
+
+        # ② 进程内安装（零窗口，不需要管理员权限）
+        try:
+            ok, msg = ca_install.install()
+        except Exception as e:                   # noqa: BLE001
+            ok, msg = False, f"{type(e).__name__}: {e}"
+
+        if ok:
+            self.push_log("ok", f"✅ {msg}")
+            try:
+                threading.Thread(target=self._check_ca, daemon=True).start()
+            except Exception:
+                pass
+            messagebox.showinfo("证书安装成功", msg, parent=self.root)
+            return
+
+        # ③ 失败 → 明确告知 + 给出手动方案（不让客户面对黑窗口）
+        self.push_log("error", f"证书自动安装失败：{msg}")
+        detail = msg
+        manual = (
+            "手动安装步骤（不需要命令行）：\n\n"
+            "1. 按 Win+R，输入 certmgr.msc 回车\n"
+            "2. 左侧展开「受信任的根证书颁发机构」\n"
+            "3. 右键「证书」→ 所有任务 → 导入\n"
+            "4. 选择这个文件：\n"
+            f"   {ca}\n"
+            "5. 一路「下一步」，遇到安全警告点【是】\n"
+            "6. 回到软件点【安装/检测】确认\n"
+        )
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(ca))
+        except Exception:
+            pass
+        messagebox.showwarning(
+            "证书没装上（已复制证书路径）",
+            f"自动安装没成功，原因：\n{detail}\n\n"
+            + manual
+            + "\n证书文件路径已复制到剪贴板，第 4 步直接 Ctrl+V 粘贴即可。",
+            parent=self.root)
     def _choose_dir(self):
         d = filedialog.askdirectory(initialdir=self.dir_var.get() or str(BASE_DIR),
                                     title="选择下载目录")

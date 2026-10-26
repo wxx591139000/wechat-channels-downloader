@@ -1,0 +1,26 @@
+# ★★★ 换行符红线（2026-10-25 客户事故固化）
+#
+# 事故：install-cert.bat / 诊断-双击我.bat 被存成 LF 换行，
+#   cmd 无法解析 → `cd /d "%~dp0"` 报「系统找不到指定的路径」
+#   → 脚本 0.03 秒退出 → 客户看到「命令窗口闪退」，CA 证书装不上。
+#   影响 v2.2.2 ~ v2.2.16 全部已发版本，3 个客户报障。
+#
+# 规则：Windows 批处理**必须** CRLF，git 检出/提交都保持 CRLF。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+*.vbs   text eol=crlf
+
+# 二进制/资源不要做换行转换
+*.pem   binary
+*.cer   binary
+*.crt   binary
+*.p12   binary
+*.zip   binary
+*.exe   binary
+*.dll   binary
+*.pyd   binary
+*.ico   binary
+*.png   binary
+*.jpg   binary
+*.mp4   binary

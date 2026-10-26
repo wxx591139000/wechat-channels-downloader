@@ -399,6 +399,30 @@ def make_share_zip(v: tuple, out_dir: Path, force: bool, edition_sfx: str = "",
             _why = _zip_forbidden(_PP(_rel))
             if _why:
                 _leak.append((_n, _why))
+    # ★★★ v2.2.17：批处理必须 CRLF —— 否则客户双击「命令窗口闪退」
+    #
+    #   客户事故（2026-10-25，3 个客户报障）：
+    #     install-cert.bat 被存成 LF 换行 → cmd 解析不了
+    #     → `cd /d "%~dp0"` 报「系统找不到指定的路径」→ 0.03 秒退出
+    #     → 客户看到窗口一闪就没了，CA 证书装不上。
+    #     v2.2.2 ~ v2.2.16 全部受影响。
+    _bat_bad = []
+    with zipfile.ZipFile(zip_path) as _z:
+        for _n in _z.namelist():
+            if not _n.lower().endswith((".bat", ".cmd")):
+                continue
+            _b = _z.read(_n)
+            if b"\r\n" not in _b:
+                _bat_bad.append((_n, "整份没有 CRLF（LF 换行）"))
+            elif _b.replace(b"\r\n", b"").count(b"\n") > 0:
+                _bat_bad.append((_n, "CRLF/LF 混排"))
+    if _bat_bad:
+        for _n, _why in _bat_bad:
+            log(f"  ❌ 批处理换行符错误: {_n}  ← {_why}")
+        sys.exit("❌ 打包自检失败：*.bat 必须全部是 CRLF 换行"
+                 "（LF 会导致客户双击闪退）")
+    log("  ✅ 批处理换行符检查通过（全部 CRLF）")
+
     if _leak:
         for _n, _why in _leak[:10]:
             log(f"  ❌ 分享包里发现敏感文件: {_n}  ← {_why}")
