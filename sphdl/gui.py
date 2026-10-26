@@ -3430,7 +3430,183 @@ class App:
         self.engine.stop()
         self.push_event(("engine_state", False))
 
+    def _start_capture_watchdog(self):
+        """启动「抓不到」看门狗（v2.2.23）。
+
+        ★ 客户痛点：「播放视频号视频发现抓取不到」且**没有任何提示**。
+          静默失败最伤人 —— 客户不知道是自己操作错、证书没生效、
+          还是软件坏了，只能退款。
+
+        看门狗每 5 秒读一次 addon 的统计，按情况给结论：
+
+        | 现象                               | 结论与提示                     |
+        |------------------------------------|--------------------------------|
+        | 微信页面有请求 + 抓到 0 个         | ① 微信没重启（装完证书必须重启）|
+        |                                    | ② 视频号页面在启动嗅探前就开了  |
+        | 微信域名 TLS 失败 > 0              | 证书没生效（重装 / 重启微信）   |
+        | 完全没有微信流量                   | 没接管代理 / 没打开视频号       |
+
+        只在嗅探运行中生效；判定一次后进入 3 分钟冷却，避免刷屏。
+        """
+        self._wd_last_warn = 0.0
+        self._wd_started = time.time()
+
+        def _tick():
+            try:
+                if not self.engine_running:
+                    return
+                if time.time() - getattr(self, "_wd_last_warn", 0) < 180:
+                    return
+                if time.time() - self._wd_started < 25:
+                    return          # 刚启动，给客户 25 秒操作时间
+                st = self.addon.sniff_diagnostics()
+                hits = st.get("channels_hits", 0)
+                fail = st.get("tls_fail", 0)
+                cap = st.get("captured", 0)
+                age = st.get("last_hit_age", -1)
+
+                # 已经抓到了 → 不打扰
+                if cap > 0:
+                    return
+
+                if fail > 0:
+                    self._wd_last_warn = time.time()
+                    self._warn_capture_failed(
+                        "tls", fail)
+                elif hits >= 3 and age >= 0 and age < 120:
+                    self._wd_last_warn = time.time()
+                    self._warn_capture_failed("nohook", hits)
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.root.after(5000, _tick)
+                except Exception:
+                    pass
+
+        try:
+            self.root.after(5000, _tick)
+        except Exception:
+            pass
+
+    def _warn_capture_failed(self, kind: str, n: int):
+        """（主线程）抓不到视频时的诊断提示。
+
+        kind:
+          "tls"    微信域名 TLS 握手失败 → 证书没生效 / 微信没重启
+          "nohook" 微信页面在活动但没抓到 → JS 未注入（页面开太早）或证书问题
+        """
+        self.push_log("warn", f"⚠ 诊断：微信页面活动 {n} 次但没有抓到视频"
+                              f"（kind={kind}）")
+
+        win = tk.Toplevel(self.root)
+        win.title("抓不到视频？")
+        win.transient(self.root)
+        win.configure(bg="#ffffff")
+
+        bar = tk.Frame(win, bg="#cf222e", height=44)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  检测到视频号在活动，但没抓到视频",
+                 bg="#cf222e", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 11, "bold"),
+                 anchor="w").pack(side="left", fill="both")
+
+        body = tk.Frame(win, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=24, pady=(16, 6))
+
+        if kind == "tls":
+            head = "⚠ 证书没生效：微信域名连接失败"
+            why = ("系统拒绝了本工具解密微信流量，通常是：\n"
+                   "  · 证书装了但**微信没有重启**（最常见）\n"
+                   "  · 证书没装进「受信任的根证书颁发机构」\n"
+                   "  · 杀毒软件拦截了证书\n\n")
+        else:
+            head = "⚠ 微信页面在活动，但抓不到视频"
+            why = ("页面已经打开了，但本工具的钩子没挂上，通常是：\n"
+                   "  · **视频号页面是在【启动嗅探】之前打开的**（最常见）\n"
+                   "  · 装完证书后微信没有重启\n"
+                   "  · 当前播放的是直播（直播不支持抓取）\n\n")
+
+        tk.Label(body, text=head, bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 18, "bold"),
+                 wraplength=560, justify="left", anchor="w"
+                 ).pack(fill="x")
+
+        steps = (
+            why
+            + "按顺序做一遍（1、2 步解决 90% 的情况）：\n"
+              "  1. 完全退出微信（托盘右键 → 退出），重新扫码登录\n"
+              "  2. 把视频号窗口整个关掉，重新打开视频号，再播放视频\n"
+              "  3. 仍不行：点【安装/检测】确认证书状态是「已安装」\n"
+              "  4. 仍不行：看压缩包里的 CA证书手动安装SOP.pdf 手动重装证书\n\n"
+              "说明：直播、以及部分「付费/私密」内容不提供可下载地址。"
+        )
+        txt = tk.Text(body, height=9, width=56, wrap="word",
+                      bg="#f6f8fa", fg="#1f2328", relief="flat",
+                      font=("Microsoft YaHei UI", 10), cursor="arrow")
+        txt.insert("1.0", steps)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True, pady=(10, 0))
+
+        btns = tk.Frame(win, bg="#ffffff")
+        btns.pack(fill="x", padx=24, pady=(8, 14))
+
+        def _kill_wechat():
+            names = ("WeChat.exe", "Weixin.exe", "WeChatAppEx.exe",
+                     "WeChatAppEx_new.exe")
+            done = []
+            for nm in names:
+                try:
+                    r = subprocess.run(["taskkill", "/IM", nm, "/F"],
+                                       capture_output=True, timeout=20,
+                                       creationflags=getattr(
+                                           subprocess, "CREATE_NO_WINDOW", 0))
+                    if r.returncode == 0:
+                        done.append(nm)
+                except Exception:
+                    pass
+            self.push_log("ok" if done else "info",
+                          f"已退出微信：{', '.join(done)}" if done
+                          else "没检测到运行中的微信")
+            win.destroy()
+
+        tk.Button(btns, text="帮我退出微信", command=_kill_wechat,
+                  bg="#cf222e", fg="#ffffff", relief="flat",
+                  font=("Microsoft YaHei UI", 12, "bold"),
+                  activebackground="#b01a26", activeforeground="#ffffff",
+                  cursor="hand2", padx=16, pady=8).pack(side="left")
+        tk.Button(btns, text="我知道了", command=win.destroy,
+                  bg="#f0f2f4", fg="#1f2328", relief="flat",
+                  font=("Microsoft YaHei UI", 11),
+                  activebackground="#e2e5e9", cursor="hand2",
+                  padx=16, pady=8).pack(side="right")
+
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{max(0, px + (pw - w) // 2)}+"
+                         f"{max(0, py + (ph - h) // 3)}")
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+
     def _apply_engine_state(self, running: bool):
+        # ★ v2.2.23：嗅探启动 → 开启「抓不到」看门狗
+        if running:
+            try:
+                self.engine_running = True
+                self._start_capture_watchdog()
+            except Exception:
+                pass
+        else:
+            try:
+                self.engine_running = False
+            except Exception:
+                pass
         self.btn_engine.config(state="normal",
                                text="■  停止嗅探" if running else "▶  启动嗅探")
         self.ent_port.config(state="disabled" if running else "normal")
@@ -3534,6 +3710,116 @@ class App:
         threading.Thread(target=self._check_ca, daemon=True).start()
         self._launch_cert_wizard()
 
+    def _confirm_cert_install(self) -> bool:
+        """安装证书前的确认框（自绘，不用 messagebox）。
+
+        ★ 客户反馈（2026-10-25）：
+          「『稍等 1~2 秒，Windows 会弹出安全警告，请点【是】』
+            要显眼颜色，加粗，放大，不然大部分用户根本不看提示」
+
+        messagebox 改不了字体/颜色，所以这里自绘一个：
+          · 关键提示：红色 / 加粗 / 20pt / 独占一行
+          · 辅助说明：灰色 / 11pt
+          · 按钮也放大，避免误点
+        """
+        win = tk.Toplevel(self.root)
+        win.title("安装证书")
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.configure(bg="#ffffff")
+
+        result = {"ok": False}
+
+        # ── 顶部标题条（蓝色，明确这是软件自己的提示）
+        bar = tk.Frame(win, bg="#0969da", height=44)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  安装证书", bg="#0969da", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 12, "bold"),
+                 anchor="w").pack(side="left", fill="both")
+
+        body = tk.Frame(win, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=26, pady=(20, 8))
+
+        # ① 最关键的一句：红色 + 加粗 + 大字号 + 独占
+        tk.Label(body,
+                 text="⚠ 稍等 1~2 秒",
+                 bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 20, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(body,
+                 text="Windows 会弹出「安全警告」，请点【是】",
+                 bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 17, "bold"),
+                 wraplength=520, justify="left", anchor="w"
+                 ).pack(fill="x", pady=(6, 0))
+
+        # ② 强调条（黄底，把"点是"再钉一次）
+        tip = tk.Frame(body, bg="#fff8c5", highlightthickness=1,
+                       highlightbackground="#d4a72c")
+        tip.pack(fill="x", pady=(14, 0))
+        tk.Label(tip, text="必须点【是】，点【否】就装不上",
+                 bg="#fff8c5", fg="#7a5c00",
+                 font=("Microsoft YaHei UI", 13, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=8)
+
+        # ③ 辅助说明（灰色小字，解释来源，减少恐慌）
+        tk.Label(body,
+                 text="这个警告是 Windows 系统弹出的，不是命令行窗口；"
+                      "装完不会再出现。",
+                 bg="#ffffff", fg="#6b7280",
+                 font=("Microsoft YaHei UI", 10),
+                 wraplength=520, justify="left", anchor="w"
+                 ).pack(fill="x", pady=(14, 0))
+
+        # ── 按钮区
+        btns = tk.Frame(win, bg="#ffffff")
+        btns.pack(fill="x", padx=26, pady=(14, 18))
+
+        def _ok():
+            result["ok"] = True
+            win.destroy()
+
+        def _cancel():
+            result["ok"] = False
+            win.destroy()
+
+        ok_btn = tk.Button(btns, text="好的，开始安装", command=_ok,
+                           bg="#0969da", fg="#ffffff", relief="flat",
+                           font=("Microsoft YaHei UI", 12, "bold"),
+                           activebackground="#0b5fca",
+                           activeforeground="#ffffff",
+                           cursor="hand2", padx=18, pady=8)
+        ok_btn.pack(side="right")
+        tk.Button(btns, text="取消", command=_cancel,
+                  bg="#f0f2f4", fg="#1f2328", relief="flat",
+                  font=("Microsoft YaHei UI", 11),
+                  activebackground="#e2e5e9", cursor="hand2",
+                  padx=16, pady=8).pack(side="right", padx=(0, 10))
+
+        win.bind("<Return>", lambda e: _ok())
+        win.bind("<Escape>", lambda e: _cancel())
+        win.update_idletasks()
+        # 居中到主窗口
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{max(0, px + (pw - w) // 2)}+"
+                         f"{max(0, py + (ph - h) // 3)}")
+        except Exception:
+            pass
+        # 置顶并阻塞（客户必须先处理这个框，避免被主窗口挡住忽略）
+        try:
+            win.grab_set()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+        ok_btn.focus_set()
+        self.root.wait_window(win)
+        return result["ok"]
+
     def _launch_cert_wizard(self):
         """装证书：零命令行窗口 + 引导客户点 Windows 的【安全警告】【是】。
 
@@ -3590,16 +3876,8 @@ class App:
         except Exception:
             pass
 
-        # 安装前预告：告诉客户"会弹一个 Windows 安全警告，请点是"
-        go = messagebox.askokcancel(
-            "安装证书（两步）",
-            "点【确定】后开始安装。\n\n"
-            "⚠️ 稍等 1~2 秒，Windows 会弹出「安全警告」窗口，\n"
-            "   请点**【是】**完成安装。\n\n"
-            "（这个警告是 Windows 系统自己的，不是命令行窗口；\n"
-            "  装完不会再出现）",
-            parent=self.root)
-        if not go:
+        # 安装前预告：自绘大字号红色提示（messagebox 改不了样式）
+        if not self._confirm_cert_install():
             return
 
         # 后台安装（UI 不卡），结果用事件队列回主线程
@@ -3615,16 +3893,14 @@ class App:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _on_ca_install_result(self, ok, msg, saw_dialog):
-        """（主线程）处理证书安装结果。"""
+        """（主线程）处理证书安装结果。成功/失败都用自绘大字提示。"""
         if ok:
             self.push_log("ok", f"✅ {msg}")
             try:
                 threading.Thread(target=self._check_ca, daemon=True).start()
             except Exception:
                 pass
-            messagebox.showinfo("证书安装成功",
-                                f"{msg}\n\n现在可以点【启动嗅探】使用了。",
-                                parent=self.root)
+            self._ca_success_dialog()
             return
 
         self.push_log("error", f"证书安装失败：{msg}")
@@ -3635,27 +3911,216 @@ class App:
             ca = str(f) if f else ""
         except Exception:
             pass
-        manual = (
-            "手动安装（不需要任何命令行）：\n\n"
-            "1. 按 Win+R，输入 certmgr.msc 回车\n"
-            "2. 左侧展开「受信任的根证书颁发机构」→ 点「证书」\n"
-            "3. 右侧空白处右键 → 所有任务 → 导入\n"
-            "4. 选择这个文件：\n"
-            f"   {ca}\n"
-            "5. 一路「下一步」，遇到安全警告点【是】\n"
-            "6. 回来点【安装/检测】确认\n\n"
-            "详细图文步骤见压缩包里的：CA证书手动安装SOP.pdf"
-        )
         if ca:
             try:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(ca)
             except Exception:
                 pass
-        messagebox.showwarning(
-            "证书没装上（证书路径已复制）",
-            f"原因：{msg}\n\n" + manual,
-            parent=self.root)
+        extra = (
+            "手动安装（不需要任何命令行）：\n"
+            "1. 按 Win+R，输入 certmgr.msc 回车\n"
+            "2. 左侧展开「受信任的根证书颁发机构」→ 点「证书」\n"
+            "3. 右侧空白处右键 → 所有任务 → 导入\n"
+            "4. 选择这个文件（已复制到剪贴板，可直接 Ctrl+V）：\n"
+            f"   {ca}\n"
+            "5. 一路「下一步」，遇到安全警告点【是】\n"
+            "6. 回来点【安装/检测】确认\n\n"
+            "详细图文步骤见压缩包里的：CA证书手动安装SOP.pdf"
+        )
+        self._toast_dialog(
+            "证书没装上", "⚠ 证书没装上",
+            f"{msg}\n\n" + extra,
+            headline_color="#cf222e", bar_color="#cf222e",
+            sub_color="#6b7280")
+
+    def _ca_success_dialog(self):
+        """证书安装成功后：必须让客户看到「退出微信重新登录」。
+
+        ★ 客户实测反馈（2026-10-25）：
+          「刚才安装成功后，我播放视频号视频发现抓取不到。
+            在证书安装成功后，你要提示用户退出微信，重新登录。」
+
+        原因：微信在**进程启动时**读取系统的证书信任链。
+        证书装好后，已在运行的微信进程不会重新读取 →
+        视频号请求仍走原来的不信任路径 → 抓不到任何东西。
+        必须**完全退出微信**（含托盘图标）再重新登录。
+
+        messagebox 的字号淹没重点，所以自绘：绿色成功 + 红色大字重启要求。
+        """
+        win = tk.Toplevel(self.root)
+        win.title("证书安装成功")
+        win.transient(self.root)
+        win.configure(bg="#ffffff")
+
+        bar = tk.Frame(win, bg="#1a7f37", height=44)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text="  证书安装成功", bg="#1a7f37", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 12, "bold"),
+                 anchor="w").pack(side="left", fill="both")
+
+        body = tk.Frame(win, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=26, pady=(18, 8))
+
+        tk.Label(body, text="✅ 第 1 步完成：证书已装好",
+                 bg="#ffffff", fg="#1a7f37",
+                 font=("Microsoft YaHei UI", 17, "bold"),
+                 anchor="w").pack(fill="x")
+
+        # ★ 最关键的动作，红色大字
+        tk.Frame(body, bg="#e5e7eb", height=1).pack(fill="x", pady=(14, 0))
+        tk.Label(body, text="⚠ 还必须做第 2 步",
+                 bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 19, "bold"),
+                 anchor="w").pack(fill="x", pady=(14, 0))
+        tk.Label(body, text="完全退出微信，再重新登录",
+                 bg="#ffffff", fg="#cf222e",
+                 font=("Microsoft YaHei UI", 22, "bold"),
+                 anchor="w").pack(fill="x", pady=(4, 0))
+
+        tip = tk.Frame(body, bg="#fff8c5", highlightthickness=1,
+                       highlightbackground="#d4a72c")
+        tip.pack(fill="x", pady=(12, 0))
+        tk.Label(tip,
+                 text="不做这一步，播放视频号仍然抓不到！",
+                 bg="#fff8c5", fg="#7a5c00",
+                 font=("Microsoft YaHei UI", 13, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=8)
+
+        steps = (
+            "怎么完全退出微信：\n"
+            "  1. 在屏幕右下角任务栏托盘找到微信图标\n"
+            "  2. 右键 → 退出（只关窗口不够，必须从托盘退出）\n"
+            "  3. 确认任务管理器里没有 WeChat.exe / Weixin.exe\n"
+            "  4. 重新打开微信并扫码登录\n"
+            "  5. 回到本软件点【启动嗅探】\n"
+            "  6. 打开视频号播放视频\n\n"
+            "为什么必须这样：\n"
+            "  微信在启动时才读取系统的证书信任，已在运行的微信\n"
+            "  进程不会重新读取，所以装完证书必须重启微信才生效。"
+        )
+        txt = tk.Text(body, height=9, width=58, wrap="word",
+                      bg="#f6f8fa", fg="#1f2328", relief="flat",
+                      font=("Microsoft YaHei UI", 10), cursor="arrow")
+        txt.insert("1.0", steps)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True, pady=(12, 0))
+
+        btns = tk.Frame(win, bg="#ffffff")
+        btns.pack(fill="x", padx=26, pady=(10, 16))
+
+        def _kill_wechat():
+            """帮客户一键结束微信进程（客户点了才做，不自动）。"""
+            names = ("WeChat.exe", "Weixin.exe", "WeChatAppEx.exe",
+                     "WeChatAppEx_new.exe")
+            done, failed = [], []
+            for nm in names:
+                try:
+                    r = subprocess.run(["taskkill", "/IM", nm, "/F"],
+                                       capture_output=True, timeout=20,
+                                       creationflags=getattr(
+                                           subprocess, "CREATE_NO_WINDOW", 0))
+                    if r.returncode == 0:
+                        done.append(nm)
+                except Exception:
+                    failed.append(nm)
+            if done:
+                self.push_log("ok", f"已退出微信进程：{', '.join(done)}")
+                messagebox.showinfo(
+                    "微信已退出",
+                    "微信进程已全部结束。\n\n"
+                    "请重新打开微信 → 扫码登录 → 回到本软件点【启动嗅探】。",
+                    parent=win)
+            else:
+                messagebox.showinfo(
+                    "没找到微信进程",
+                    "当前没有检测到运行中的微信，直接重新打开微信登录即可。",
+                    parent=win)
+
+        tk.Button(btns, text="帮我退出微信", command=_kill_wechat,
+                  bg="#cf222e", fg="#ffffff", relief="flat",
+                  font=("Microsoft YaHei UI", 12, "bold"),
+                  activebackground="#b01a26", activeforeground="#ffffff",
+                  cursor="hand2", padx=18, pady=9).pack(side="left")
+        tk.Button(btns, text="我自己去退出", command=win.destroy,
+                  bg="#f0f2f4", fg="#1f2328", relief="flat",
+                  font=("Microsoft YaHei UI", 11),
+                  activebackground="#e2e5e9", cursor="hand2",
+                  padx=16, pady=9).pack(side="right")
+
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{max(0, px + (pw - w) // 2)}+"
+                         f"{max(0, py + (ph - h) // 3)}")
+            win.grab_set()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+        return win
+
+    def _toast_dialog(self, title, headline, detail,
+                      headline_color="#cf222e", bar_color="#0969da",
+                      sub_color="#1f2328", ok_text="知道了"):
+        """自绘结果提示框（大字标题 + 明细 + 大按钮）。
+
+        ★ 为什么不用 messagebox：客户明确反馈「大部分用户根本不看提示」，
+          messagebox 的正文是同字号灰字，关键信息淹没在段落里。
+        """
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.transient(self.root)
+        win.configure(bg="#ffffff")
+
+        bar = tk.Frame(win, bg=bar_color, height=42)
+        bar.pack(fill="x")
+        bar.pack_propagate(False)
+        tk.Label(bar, text=f"  {title}", bg=bar_color, fg="#ffffff",
+                 font=("Microsoft YaHei UI", 11, "bold"),
+                 anchor="w").pack(side="left", fill="both")
+
+        body = tk.Frame(win, bg="#ffffff")
+        body.pack(fill="both", expand=True, padx=24, pady=(18, 6))
+
+        tk.Label(body, text=headline, bg="#ffffff", fg=headline_color,
+                 font=("Microsoft YaHei UI", 19, "bold"),
+                 wraplength=560, justify="left", anchor="w"
+                 ).pack(fill="x")
+
+        txt = tk.Text(body, height=11, width=62, wrap="word",
+                      bg="#ffffff", fg=sub_color, relief="flat",
+                      font=("Microsoft YaHei UI", 10), cursor="arrow")
+        txt.insert("1.0", detail)
+        txt.configure(state="disabled")
+        txt.pack(fill="both", expand=True, pady=(10, 0))
+
+        btns = tk.Frame(win, bg="#ffffff")
+        btns.pack(fill="x", padx=24, pady=(8, 16))
+        tk.Button(btns, text=ok_text, command=win.destroy,
+                  bg="#0969da", fg="#ffffff", relief="flat",
+                  font=("Microsoft YaHei UI", 12, "bold"),
+                  activebackground="#0b5fca", activeforeground="#ffffff",
+                  cursor="hand2", padx=22, pady=8).pack(side="right")
+
+        win.bind("<Return>", lambda e: win.destroy())
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.update_idletasks()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw, ph = self.root.winfo_width(), self.root.winfo_height()
+            w, h = win.winfo_width(), win.winfo_height()
+            win.geometry(f"+{max(0, px + (pw - w) // 2)}+"
+                         f"{max(0, py + (ph - h) // 3)}")
+            win.grab_set()
+            win.lift()
+            win.focus_force()
+        except Exception:
+            pass
+        return win
     def _choose_dir(self):
         d = filedialog.askdirectory(initialdir=self.dir_var.get() or str(BASE_DIR),
                                     title="选择下载目录")

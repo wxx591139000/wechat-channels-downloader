@@ -310,6 +310,12 @@ class SphAddon:
         #   根因：评论挂在「最后捕获的视频」，而不是 payload 自己所属的视频。
         #   兜底：一个 cid 只能属于一个视频，已归属的绝不重复挂到别处。
         self._cid_owner = {}
+        # ★ v2.2.23：静默失败诊断计数器（"抓不到"看门狗用）
+        self.stat_channels_hits = 0      # 微信页面请求数
+        self.stat_tls_fail = 0           # 微信域名连接/TLS 失败数
+        self.stat_captured = 0           # 本次会话捕获到的视频数
+        self.stat_comment_payloads = 0   # 收到的评论 payload 数
+        self.stat_last_hit_ts = 0.0      # 最近一次微信页面请求时间
         self.seen = set()          # 去重: (url, decode_key)
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
@@ -477,6 +483,15 @@ class SphAddon:
         payload 钩子耗时 ~4ms。无论 payload 多大、循环多忙，捕获链路
         都不可能再被本工具自己的代码堵死（24h 连续播放需求）。"""
         req = flow.request
+        # ★ v2.2.23：统计微信域名请求（供"抓不到"看门狗判断页面是否在活动）
+        try:
+            _h = (req.pretty_host or "").lower()
+            if ("weixin.qq.com" in _h or "qq.com" in _h
+                    or "weixinbridge.com" in _h):
+                self.stat_channels_hits += 1
+                self.stat_last_hit_ts = time.time()
+        except Exception:
+            pass
         # 顺带捕获微信 webview 的 UA：CDN 对含 MicroMessenger 的 UA 限速更宽，
         # 下载器复用（shared 同进程共享，无需回调）。
         if "wxhls" in req.host or req.host.endswith("wxapp.tc.qq.com") or "live" in req.host:
@@ -741,6 +756,38 @@ class SphAddon:
             self.bridge_count += 1
 
     # ---------- ② API 直嗅 + ③④ JS 注入 ----------
+    def error(self, flow: http.HTTPFlow):
+        """连接/TLS 错误统计（v2.2.23）。
+
+        ★ 用于"抓不到"看门狗判断证书是否生效：
+          微信域名出现 TLS 握手失败 → 证书没装、或装了但**微信没重启**
+          （微信在进程启动时读取系统证书信任，运行中不会重新读取）。
+        """
+        try:
+            h = (flow.request.pretty_host or "").lower()
+            if ("weixin.qq.com" in h or "qq.com" in h
+                    or "weixinbridge.com" in h):
+                self.stat_tls_fail += 1
+                logger.warn(f"微信域名连接失败 {h}: "
+                            f"{(flow.error or '')[:120]}")
+        except Exception:
+            pass
+
+    def sniff_diagnostics(self) -> dict:
+        """给 GUI 看门狗用的诊断快照（v2.2.23）。"""
+        import time as _t
+        age = (_t.time() - self.stat_last_hit_ts) if self.stat_last_hit_ts else -1
+        return {
+            "channels_hits": self.stat_channels_hits,
+            "tls_fail": self.stat_tls_fail,
+            "captured": self.stat_captured,
+            "comments": self.stat_comment_payloads,
+            "last_hit_age": age,
+            # 注：addon 本身没有 running 属性（由 engine 管），
+            #     这里只暴露统计，是否在嗅探由 GUI 自己判断
+            "sniffing": bool(getattr(self, "running", False)),
+        }
+
     def response(self, flow: http.HTTPFlow):
         resp = flow.response
         if resp is None:
@@ -903,6 +950,8 @@ class SphAddon:
         if self.on_capture:
             try:
                 accepted = self.on_capture(vd, source)
+                # ★ v2.2.23：捕获成功计数（供"抓不到"看门狗对比）
+                self.stat_captured += 1
             except Exception:
                 accepted = True
         if accepted is False:
