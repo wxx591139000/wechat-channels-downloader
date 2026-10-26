@@ -66,7 +66,9 @@ ZIP_SUFFIX = "-win64-portable.zip"
 
 # 分享 zip 白名单：只打包这些内容（其余一律不带，防本机数据泄漏）
 ZIP_INCLUDE = {"微信视频号下载器.exe", "_internal", "install-cert.bat",
-               "使用说明.txt", "诊断-双击我.bat"}
+               "使用说明.txt", "诊断-双击我.bat",
+               # ★ v2.2.19：CA 证书手动安装 SOP（客户要求随包提供）
+               "CA证书手动安装SOP.pdf"}
 
 # ★★★ v2.2.7 硬红线：这些文件名**永不进包**，与 ZIP_INCLUDE 无关
 #
@@ -326,6 +328,34 @@ def stage_user_scripts(out_dir: Path):
             log(f"  ⚠ 拷贝 {nm} 失败: {e}")
 
 
+def stage_ca_sop(out_dir: Path):
+    """把《CA 证书手动安装 SOP》PDF 放到解压目录顶层（v2.2.19）。
+
+    ★ 客户要求（2026-10-25）：「把这份 SOP 的 pdf 版放进打包里」。
+      起因：装证书闪退导致 2 位客户退款，需要有随包可见的自助文档。
+      放顶层而不是 _internal：客户解压后要能一眼看到、直接双击打开。
+
+    源文件：<项目根>/docs/CA证书手动安装SOP.pdf
+    （仓库根是 sphdl/，docs 在上一级，所以从 ROOT.parent 找）
+    """
+    cands = [
+        ROOT.parent / "docs" / "CA证书手动安装SOP.pdf",
+        ROOT / "docs" / "CA证书手动安装SOP.pdf",
+        ROOT / "CA证书手动安装SOP.pdf",
+    ]
+    src = next((c for c in cands if c.exists()), None)
+    if src is None:
+        log("  ⚠ 未找到 CA证书手动安装SOP.pdf（跳过，不影响出包）")
+        log("     生成方法：先产出 docs/CA证书手动安装SOP.pdf 再打包")
+        return
+    try:
+        shutil.copy2(src, out_dir / "CA证书手动安装SOP.pdf")
+        size = (out_dir / "CA证书手动安装SOP.pdf").stat().st_size
+        log(f"  ✅ 已放置 CA证书手动安装SOP.pdf（{size / 1024:.0f} KB）")
+    except Exception as e:                          # noqa: BLE001
+        log(f"  ⚠ 拷贝 SOP PDF 失败: {e}")
+
+
 def stage_usage_instructions(out_dir: Path, v: tuple):
     """把最新 usage_instructions_v*.txt 拷为 使用说明.txt，并更新版本号。"""
     cands = sorted(ROOT.glob("usage_instructions_v*.txt"))
@@ -554,6 +584,7 @@ def build_one_edition(v: tuple, force: bool, locked, args,
         verify_frozen(out_dir)
         verify_license_in_frozen(out_dir, expect=not args.no_license)
         stage_usage_instructions(out_dir, v)
+        stage_ca_sop(out_dir)             # ★ v2.2.19 SOP PDF 随包
         stage_user_scripts(out_dir)
         pii_scan(out_dir)
         zip_path = make_share_zip(v, out_dir, force, sfx,
