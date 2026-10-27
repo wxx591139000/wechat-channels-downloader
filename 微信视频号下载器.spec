@@ -8,6 +8,16 @@ hiddenimports = ['mitmproxy.addons.anticache', 'mitmproxy.addons.anticomp', 'mit
 tmp_ret = collect_all('mitmproxy_rs')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# ★ v2.4.1：抖音批量下载需要 playwright（驱动系统已装的 Edge/Chrome，
+#   **不打包 Chromium**，所以只多 playwright 自己的 driver ≈104MB）。
+#   用 collect_all 确保 driver/ 目录（含 node 可执行文件）被完整带上，
+#   否则打包后运行会报 "Executable doesn't exist"。
+try:
+    _pw = collect_all('playwright')
+    datas += _pw[0]; binaries += _pw[1]; hiddenimports += _pw[2]
+except Exception as _e:      # 没装 playwright 时不阻断构建
+    print('WARN: collect_all(playwright) 失败:', _e)
+
 
 a = Analysis(
     ['main.py'],

@@ -2721,6 +2721,18 @@ class App:
                                  style="MpLocked.TButton",
                                  command=self._on_mp_article)
         self.btn_mp.pack(side="left", padx=(16, 2))
+        # ★ v2.4.0：抖音批量下载（方案 A：粘贴链接）
+        self.btn_dy = ttk.Button(capf, text="🎵 抖音批量下载", width=16,
+                                 command=self._on_douyin)
+        self.btn_dy.pack(side="left", padx=(6, 2))
+        self._tt(self.btn_dy,
+                 "【抖音批量下载】粘贴抖音视频链接，批量下载。\n\n"
+                 "特点：\n"
+                 "  · 不需要安装证书（用自己的浏览器读页面数据）\n"
+                 "  · 支持多个链接一次粘贴，也可粘整段分享文案\n"
+                 "  · 下载的是 1080P 音视频合一的 MP4\n\n"
+                 "用法：粘贴链接 → 解析 → 勾选 → 下载\n"
+                 "（每条之间自动间隔 2~5 秒，避免抖音限流）")
         self._tt(self.btn_mp,
                  "【公众号文章视频】下载公众号文章里的视频（附加功能）。\n"
                  "\n"
@@ -4315,6 +4327,33 @@ class App:
         except Exception as e:
             self.push_log("error", f"设置下载目录失败: {e}")
 
+    def _on_douyin(self):
+        """打开「抖音批量下载」窗口（v2.4.0）。
+
+        ★ 为什么用独立窗口而不是并入主列表：
+          主链路（视频号嗅探 + 公众号解析）已经稳定，抖音是全新抓取方式
+          （自己的 Playwright 浏览器读页面响应，不走 MITM）。
+          独立窗口零回归风险，跑通后再考虑是否并入。
+        """
+        try:
+            w = getattr(self, "_dy_win", None)
+            if w is not None and w.win.winfo_exists():
+                w.win.deiconify()
+                w.win.lift()
+                w.win.focus_force()
+                return
+        except Exception:
+            pass
+        try:
+            from .douyin_ui import DouyinWindow
+            self._dy_win = DouyinWindow(self)
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("error", f"打开抖音窗口失败：{e}")
+            messagebox.showerror(
+                "打开失败",
+                f"抖音下载窗口启动失败：\n{e}\n\n"
+                "若提示缺少 playwright 组件，请重新安装本软件。")
+
     def _open_download_dir(self):
         d = self.dir_var.get()
         try:
@@ -5424,6 +5463,32 @@ class App:
             self._full_event_pending = False
             self._warn_full_once()
             self._update_status_bar()
+        elif kind in ("dy_item", "dy_parse_done", "dy_dl_start",
+                      "dy_dl_prog", "dy_dl_done", "dy_all_done",
+                      "dy_login_done"):
+            # ★ v2.4.0：抖音批量下载窗口的事件
+            w = getattr(self, "_dy_win", None)
+            if w is None:
+                return
+            try:
+                if kind == "dy_item":
+                    w.apply_item(item[1], item[2])
+                elif kind == "dy_parse_done":
+                    w.parse_done(item[1])
+                elif kind == "dy_dl_start":
+                    w.apply_dl_start(item[1], item[2], item[3])
+                elif kind == "dy_dl_prog":
+                    w.apply_dl_prog(item[1], item[2], item[3],
+                                    item[4], item[5])
+                elif kind == "dy_dl_done":
+                    w.apply_dl_done(item[1], item[2], item[3],
+                                    item[4], item[5])
+                elif kind == "dy_all_done":
+                    w.apply_all_done(item[1], item[2], item[3])
+                elif kind == "dy_login_done":
+                    w.apply_login_done(item[1], item[2])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"抖音窗口事件处理出错：{e}")
         elif kind == "revoke_result":
             # ★ v2.3.0：吊销名单校验结果
             try:

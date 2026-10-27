@@ -127,6 +127,104 @@ def run_selftest(args):
         sys.exit(1)
 
 
+def run_selftest_douyin(args):
+    """抖音模块自检（v2.4.1）。
+
+    ★ 这个自检存在的理由：PyInstaller 打包后 playwright 经常因为
+      driver 目录没被完整收集而报「Executable doesn't exist」。
+      打包机上测试通过 ≠ 客户机器能用，所以必须有这条自检，
+      而且要能在**装好的 exe 里**跑。
+    """
+    print("=" * 60)
+    print("抖音模块自检")
+    print("=" * 60)
+    ok_all = True
+
+    # ① 模块导入
+    try:
+        from sphdl import douyin as D
+        print("  ① 导入 sphdl.douyin           ✅")
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ① 导入 sphdl.douyin           ❌ {e}")
+        return 1
+
+    # ② playwright 能否 import
+    try:
+        import playwright
+        print(f"  ② import playwright           ✅ "
+              f"{getattr(playwright, '__version__', '')}")
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ② import playwright           ❌ {e}")
+        return 1
+
+    # ③ driver 可执行文件是否在
+    try:
+        from playwright._impl._driver import compute_driver_executable
+        drv = compute_driver_executable()
+        drv_path = drv[0] if isinstance(drv, (tuple, list)) else str(drv)
+        exists = Path(drv_path).exists()
+        print(f"  ③ driver 存在                {'✅' if exists else '❌'} "
+              f"{drv_path}")
+        ok_all &= exists
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ③ driver 检查                 ❌ {e}")
+        ok_all = False
+
+    # ④ 真的启动一次浏览器（用系统 Edge/Chrome）
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            b = None
+            which = ""
+            for kw in ({"channel": "msedge"}, {"channel": "chrome"}, {}):
+                try:
+                    b = pw.chromium.launch(headless=True, **kw)
+                    which = kw.get("channel") or "bundled-chromium"
+                    break
+                except Exception:
+                    continue
+            if b is None:
+                print("  ④ 启动浏览器                  ❌ 无可用浏览器")
+                return 1
+            ver = b.version
+            pg = b.new_page()
+            pg.set_content("<h1>ok</h1>")
+            txt = pg.text_content("h1")
+            b.close()
+        print(f"  ④ 启动浏览器                  ✅ {which} v{ver} "
+              f"(页面读取={txt})")
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ④ 启动浏览器                  ❌ {type(e).__name__}: {e}")
+        return 1
+
+    # ⑤ 配置与目录
+    try:
+        print(f"  ⑤ profile 目录                ✅ {D.profile_dir()}")
+        print(f"  ⑤ 缓存文件                    {D._cache_path()}")
+        print(f"  ⑤ 未登录节流                  {D.PACE_ANON} / "
+              f"单批 {D.BATCH_ANON}")
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ⑤ 配置检查                    ❌ {e}")
+        ok_all = False
+
+    # ⑥ 链接解析（纯逻辑）
+    try:
+        got = D.extract_urls("看这个 https://v.douyin.com/abc/ 和 "
+                             "https://www.douyin.com/video/123")
+        exp = ["https://v.douyin.com/abc/",
+               "https://www.douyin.com/video/123"]
+        good = got == exp
+        print(f"  ⑥ 链接解析                    {'✅' if good else '❌'} {got}")
+        ok_all &= good
+    except Exception as e:                          # noqa: BLE001
+        print(f"  ⑥ 链接解析                    ❌ {e}")
+        ok_all = False
+
+    print("=" * 60)
+    print("结果:", "✅ 自检通过" if ok_all else "❌ 自检未通过")
+    return 0 if ok_all else 1
+
+
 def run_selftest_license(args):
     """授权码自检（v2.0.17）：验证构建产物里授权密钥已正确注入，
     且 4 档往返生成/校验一致。release.py 构建后自动调用 —— 密钥注入
@@ -385,6 +483,8 @@ def main():
                     help="公众号视频自检：验证文章解析逻辑后退出")
     ap.add_argument("--online", action="store_true",
                     help="配合 --selftest-mp：联网用真实文章端到端验证")
+    ap.add_argument("--selftest-douyin", action="store_true",
+                    help="抖音模块自检：playwright 能否驱动系统浏览器")
     ap.add_argument("--selftest-telemetry", action="store_true",
                     help="埋点自检：显示总开关状态 + 设备指纹采集（不发网络请求）")
     ap.add_argument("-v", "--verbose", action="store_true", help="调试输出")
@@ -428,6 +528,8 @@ def main():
         return
 
     banner()
+    if getattr(args, "selftest_douyin", False):
+        sys.exit(run_selftest_douyin(args))
     if args.selftest:
         run_selftest(args)
     elif args.selftest_mp:
