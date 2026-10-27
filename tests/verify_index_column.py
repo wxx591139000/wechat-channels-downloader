@@ -47,10 +47,14 @@ print("=" * 74)
 cols = list(app.tree["columns"])
 print(f"  列: {cols}")
 check("N1a 首列是 no（序号）", cols[0] == "no", str(cols[0]))
-check("N1b 列数 = 8（原 7 + 序号）", len(cols) == 8, str(len(cols)))
+# ★ v2.2.18 起「序号」列被隐藏（客户要求），v2.5.0 又加了「点赞」列。
+#   列数会持续变化 → 动态校验：values 长度必须等于列数，且 no 仍在列表里。
+check("N1b no 列仍在（数据与排序要用）", "no" in cols, str(cols))
+# values 对齐由后面的 N7 用真实记录校验，这里不重复（此处的 rec 尚未创建）
 head_no = app.tree.heading("no", "text")
 print(f"  序号列表头文字: {head_no}")
-check("N1c 表头文字是「序号」", head_no == "序号", head_no)
+check("N1c 表头为空（v2.2.18 起隐藏）", str(head_no).strip() == "",
+      repr(head_no))
 
 print()
 print("=" * 74)
@@ -133,7 +137,7 @@ print("N6/N7 列宽与行值对齐")
 print("=" * 74)
 w = app.tree.column("no", "width")
 print(f"  序号列宽: {w}")
-check("N6a 序号列宽 >= 45（能显示 3 位数）", int(w) >= 45, str(w))
+check("N6a 序号列宽 = 0（已隐藏，width=0 手法）", int(w) == 0, str(w))
 
 # 用真实记录测 _row_values 长度
 if app.store.items:

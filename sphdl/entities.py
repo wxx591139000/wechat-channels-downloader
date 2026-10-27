@@ -12,6 +12,14 @@ class VideoData:
     description: str = ""
     is_image: bool = False
     cover_url: str = ""
+    # ★ v2.5.0：视频统计数据（客户需求：点赞/转发/推荐，并可按点赞排序）
+    #   字段名不固定（微信不同版本叫法不同），parser 里做容错提取；
+    #   提不到就是 0，界面显示「—」，绝不假装有数据。
+    like_count: int = 0        # 点赞
+    forward_count: int = 0     # 转发
+    recommend_count: int = 0   # 推荐
+    fav_count: int = 0         # 收藏（暂不展示，留作后续）
+    comment_count: int = 0     # 评论总数（视频自己的评论数，不是抓到的条数）
     # 稳定视频标识：media.md5sum（同一视频内容恒定，与 token/URL 无关）。
     # 用于去重——同一视频反复播放会产生新 token/URL，按 URL 去重会失效。
     video_id: str = ""

@@ -444,6 +444,13 @@ class Record:
     seq: int = 0
     # ★ v2.2.16：视频号对象 nonce（评论归属用）
     nonce_id: str = ""
+    # ★ v2.5.0：统计数据（客户需求：点赞/转发/推荐 + 按点赞排序）
+    #   0 = 没解析到（界面显示「—」），不编造数据
+    like_count: int = 0
+    forward_count: int = 0
+    recommend_count: int = 0
+    fav_count: int = 0
+    comment_count: int = 0
     # ★ v2.2.12：视频号评论（客户需求）
     #   "先在清单里点开看评论，跟视频号评论区一样的展示效果"
     #   结构：[{nick, content, likes, time, reply_to}]
@@ -491,6 +498,13 @@ class RecordStore:
                     kw["seq"] = int(d.get("seq") or 0)
                 except Exception:
                     kw["seq"] = 0
+                # ★ v2.5.0：统计字段（漏了就会重启后全变 0 —— seq 踩过这坑）
+                for _f in ("like_count", "forward_count",
+                           "recommend_count", "fav_count", "comment_count"):
+                    try:
+                        kw[_f] = int(d.get(_f) or 0)
+                    except Exception:
+                        kw[_f] = 0
                 # ★ v2.2.12：评论字段同样必须显式读回（seq 踩过这个坑）
                 kw["nonce_id"] = d.get("nonce_id") or ""
                 kw["comments"] = d.get("comments") or []
@@ -2009,6 +2023,26 @@ class App:
         except Exception:
             pass
 
+        # ★ v2.5.0：统计字段命中诊断（只打一次，方便确认真实字段名）
+        try:
+            if not getattr(self, "_stat_key_logged", False):
+                from .parser import last_stat_keys
+                k = last_stat_keys()
+                if k:
+                    self._stat_key_logged = True
+                    self.push_log(
+                        "info",
+                        "📊 统计字段已识别：" + "、".join(
+                            f"{v}={kk}" for kk, v in k.items()))
+                elif getattr(vd, "like_count", 0) == 0:
+                    self._stat_key_logged = True
+                    self.push_log(
+                        "warn",
+                        "⚠ 这个视频没解析到点赞/转发数（微信字段名可能变了）"
+                        "——如需要请反馈，我按真实字段名对齐")
+        except Exception:
+            pass
+
         # ★ v2.2.12：把「刚捕获的视频」记为当前播放视频，
         #   后续到达的评论 payload 会挂到它身上。
         try:
@@ -2859,7 +2893,13 @@ class App:
         #     配合 heading 文本置空。不能用 `displaycolumns`，
         #     因为那会让 _col_index() 算出来的索引与实际 values 错位
         #     （_row_values 仍按 8 个字段返回，索引必须一一对应）。
-        cols = ("no", "status", "title", "platform", "size", "source", "time", "file")
+        # ★ v2.5.0：新增「点赞」列（客户需求：先只显示点赞，转发/推荐暂不上）
+        #   点表头可按点赞排序（沿用原有 _on_tree_sort 机制）。
+        #   转发/推荐/收藏/评论数**照常解析并存进 records.json**，
+        #   只是不占界面 —— 以后要展示时把 "forward"/"recommend"
+        #   加回 cols + heads + _row_values 三处即可。
+        cols = ("no", "status", "title", "platform", "size", "source",
+                "like", "time", "file")
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
         # ★ v2.2.20：「大小」列也不再显示（客户要求）
@@ -2870,10 +2910,12 @@ class App:
         #   直接隐藏这一列，避免这个无解的争议。
         #   （数据仍保留在 Record.size 里，内部逻辑照常使用）
         heads = {"no": ("", 0),
-                 "status": ("状态", 120), "title": ("标题", 349),
+                 "status": ("状态", 115), "title": ("标题", 330),
                  "platform": ("来源", 92), "size": ("", 0),
-                 "source": ("捕获方式", 115), "time": ("时间", 85),
-                 "file": ("文件", 215)}
+                 "source": ("捕获方式", 110),
+                 "like": ("👍 点赞", 78),
+                 "time": ("时间", 85),
+                 "file": ("文件", 200)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
             self.tree.heading(c, text=heads[c][0],
@@ -2881,6 +2923,10 @@ class App:
             if c in ("no", "size"):
                 # 宽度 0 + 不拉伸 + 不可拖宽 = 彻底看不见
                 self.tree.column(c, width=0, minwidth=0, stretch=False)
+            elif c == "like":
+                # 统计列：固定宽度、居中、不拉伸（数字对齐才好看）
+                self.tree.column(c, width=heads[c][1], minwidth=heads[c][1],
+                                 stretch=False, anchor="center")
             else:
                 self.tree.column(c, width=heads[c][1],
                                  stretch=(c in ("title", "file")))
@@ -5119,9 +5165,25 @@ class App:
                     fname = fname[:20] + "…"
         # ★ v2.2.0：序号列先留空，插入后由 _renumber_rows() 按显示顺序填。
         #   （不能在 _row_values 里算：那时还不知道会插到第几行）
+        # ★ v2.5.0：统计列。0 显示「—」而不是 0，避免误以为"真的没人点赞"
         return ("", st, title, plat_cell,
                 self._display_size(r),
-                r.source, r.created[5:], fname)
+                r.source,
+                self._num_cell(getattr(r, "like_count", 0)),
+                r.created[5:], fname)
+
+    @staticmethod
+    def _num_cell(n) -> str:
+        """统计数字转显示文本：0 → 「—」；≥1万 → 「1.2万」。"""
+        try:
+            n = int(n or 0)
+        except Exception:
+            n = 0
+        if n <= 0:
+            return "—"
+        if n >= 10000:
+            return f"{n / 10000:.1f}万".replace(".0万", "万")
+        return str(n)
 
     def _update_row(self, rid):
         r = self.store.items.get(rid)
@@ -5412,6 +5474,14 @@ class App:
             return ((r.source or "").casefold(), r.created, r.id)
         if col == "file":
             return ((r.file or "").casefold(), r.created, r.id)
+        # ★ v2.5.0：按统计数排序（客户需求：按点赞数排序）
+        #   排序键用原始整数，不用显示文本（"1.2万" 按字符串排会错）
+        if col == "like":
+            return (int(getattr(r, "like_count", 0) or 0), r.created, r.id)
+        if col == "forward":
+            return (int(getattr(r, "forward_count", 0) or 0), r.created, r.id)
+        if col == "recommend":
+            return (int(getattr(r, "recommend_count", 0) or 0), r.created, r.id)
         return (0, "", "")
 
     def _apply_sort(self):
@@ -5542,6 +5612,12 @@ class App:
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
                 nonce_id=getattr(vd, "nonce_id", "") or "",
+                # ★ v2.5.0：统计数据（点赞/转发/推荐/收藏/评论数）
+                like_count=int(getattr(vd, "like_count", 0) or 0),
+                forward_count=int(getattr(vd, "forward_count", 0) or 0),
+                recommend_count=int(getattr(vd, "recommend_count", 0) or 0),
+                fav_count=int(getattr(vd, "fav_count", 0) or 0),
+                comment_count=int(getattr(vd, "comment_count", 0) or 0),
                 renditions=vd.renditions or [], quality_note=vd.quality_note or "",
                 seq=self._next_seq())
             if not self.store.add(rec):

@@ -79,12 +79,21 @@ print(f"  values[4]（大小）= {vals[4]!r}  ← 数据仍在，只是不显示
 check("Z3 values 数与列数一致", len(vals) == len(cols), f"{len(vals)}/{len(cols)}")
 check("Z3b 大小值仍在 values 里（≈ 前缀）",
       str(vals[4]).startswith("≈"), str(vals[4]))
-expect = {"no": 0, "status": 1, "title": 2, "platform": 3,
-          "size": 4, "source": 5, "time": 6, "file": 7}
-bad = {k: (app._col_index(k), v) for k, v in expect.items()
-       if app._col_index(k) != v}
+# ★ v2.5.0：不要硬编码索引 —— 每加一列（如「点赞」）就会全体偏移。
+#   正确判据：_col_index(name) 必须等于该 name 在 cols 里的真实位置。
+bad = {}
+for i, cname in enumerate(cols):
+    got = app._col_index(cname)
+    if got != i:
+        bad[cname] = (got, i)
 print(f"  索引核对: {'全部正确' if not bad else bad}")
-check("Z4 所有 _col_index 正确", not bad, str(bad))
+check("Z4 所有 _col_index 与列顺序一致", not bad, str(bad))
+# 关键几列单独点名，便于回归时看懂
+for key in ("size", "time", "file"):
+    i_real = cols.index(key)
+    check(f"Z4b _col_index({key}) == {i_real}",
+          app._col_index(key) == i_real,
+          f"{app._col_index(key)} vs {i_real}")
 
 print()
 print("=" * 74)

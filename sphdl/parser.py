@@ -94,6 +94,101 @@ def _pick(mapping: dict, *names):
     return None
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ★ v2.5.0 视频统计数据提取（点赞 / 转发 / 推荐 / 收藏 / 评论数）
+#
+#   客户需求：「能抓取视频的点赞数、转发数、推荐数，并支持按点赞数排序」
+#
+#   ★ 为什么必须容错：微信不同版本 / 不同接口里，这些字段的**名字不一样**，
+#     我们还不能确定当前客户端用哪个（需要真实 payload 才能定死）。
+#     所以策略是「广撒网 + 结构兜底」：
+#       1. 先按已知别名列表在 objectDesc 顶层找
+#       2. 再递归到 "stat"/"stats"/"counts"/"extInfo" 这类子对象里找
+#       3. 都找不到就是 0（界面显示「—」），**绝不编造**
+#   找到哪些键会记进 _last_stat_keys，方便诊断真实字段名。
+# ═══════════════════════════════════════════════════════════════════
+
+_STAT_ALIASES = {
+    "like_count": ("likeCount", "like_count", "likeNum", "like_num",
+                   "diggCount", "digg_count", "praiseCount", "praise_count",
+                   "favLikeCount", "thumbUpCount", "thumb_up_count"),
+    "forward_count": ("forwardCount", "forward_count", "shareCount",
+                      "share_count", "transmitCount", "transmit_count",
+                      "forwardNum", "forward_num"),
+    "recommend_count": ("recommendCount", "recommend_count", "recCount",
+                        "rec_count", "recommendNum", "recommend_num"),
+    "fav_count": ("favCount", "fav_count", "collectCount", "collect_count",
+                  "favoriteCount", "favorite_count", "favNum", "fav_num"),
+    "comment_count": ("commentCount", "comment_count", "commentNum",
+                      "comment_num", "commentsCount"),
+}
+
+# 统计字段常常挂在这些子对象里
+_STAT_CONTAINERS = ("stat", "stats", "statistics", "counts", "counter",
+                    "extInfo", "ext_info", "baseInfo", "base_info")
+
+_last_stat_keys: dict = {}       # 诊断用：最近一次实际命中的键名
+
+
+def _as_int(v):
+    try:
+        if isinstance(v, bool):
+            return 0
+        return max(0, int(v))
+    except Exception:
+        return 0
+
+
+def extract_stats(obj: Any) -> dict:
+    """从 objectDesc 里容错提取统计数据，返回 5 个 int 字段。"""
+    global _last_stat_keys
+    out = {k: 0 for k in _STAT_ALIASES}
+    found = {}
+
+    def _scan(d):
+        if not isinstance(d, dict):
+            return
+        for field, aliases in _STAT_ALIASES.items():
+            if out[field]:
+                continue
+            for a in aliases:
+                if a in d:
+                    n = _as_int(d.get(a))
+                    if n > 0:
+                        out[field] = n
+                        found[field] = a
+                        break
+
+    _scan(obj)
+    # 子容器里再找一遍
+    if isinstance(obj, dict):
+        for ck in _STAT_CONTAINERS:
+            sub = obj.get(ck)
+            if isinstance(sub, dict):
+                _scan(sub)
+            elif isinstance(sub, str) and sub.strip()[:1] == "{":
+                try:
+                    _scan(json.loads(sub))
+                except Exception:
+                    pass
+
+    _last_stat_keys = found
+    return out
+
+
+def last_stat_keys() -> dict:
+    """最近一次提取命中的键名（诊断真实字段名用）。"""
+    return dict(_last_stat_keys)
+
+
+def _extract_stats_kwargs(obj) -> dict:
+    """extract_stats 的薄包装，供 VideoData(...) 展开用。"""
+    try:
+        return extract_stats(obj)
+    except Exception:
+        return {}
+
+
 def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[VideoData]:
     """
     从 object_desc（dict 含 media 列表）或 media 列表本身中提取视频信息。
@@ -181,6 +276,7 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
             cover_url=str(_pick(first, "coverUrl", "cover_url") or ""),
             video_id=video_id,
             nonce_id=nonce_id,
+            **_extract_stats_kwargs(obj),
             renditions=renditions,
             quality_note=_quality_note(media_list),
             raw=obj,
