@@ -32,11 +32,20 @@ class DouyinWindow:
 
         self.win = tk.Toplevel(self.root)
         self.win.title("抖音批量下载")
-        self.win.transient(self.root)
+        # ★ v2.5.1：不能用 transient —— Windows 上 transient 窗口是「工具窗口」，
+        #   标题栏会**没有最小化/最大化按钮**（客户报障）。
+        #   去掉后就是普通窗口，三个系统按钮齐全，且可自由缩放。
         self.win.geometry("980x720")
         self.win.minsize(820, 600)
+        self.win.resizable(True, True)
         self._build()
         self._refresh_login_state()
+        # ★ v2.5.2（客户要求）：点 ✕ 只隐藏，**不中断**解析/下载。
+        #   拦截系统标题栏的关闭按钮，统一走 _hide_window。
+        try:
+            self.win.protocol("WM_DELETE_WINDOW", self._hide_window)
+        except Exception:
+            pass
 
     # ────────────────── UI ──────────────────
     def _build(self):
@@ -48,6 +57,22 @@ class DouyinWindow:
         tk.Label(top, text="无需安装证书 · 粘贴链接即可  ",
                  bg="#111827", fg="#9ca3af",
                  font=(FONT, 9)).pack(side="right")
+
+        # ★ v2.5.1：显式窗口按钮（客户要求「页面上要能最小化/最大化」）
+        #   系统标题栏也有，这里再给一套，鼠标不用去右上角找。
+        def _btn(txt, cmd, tip):
+            b = tk.Button(top, text=txt, command=cmd, bg="#1f2937",
+                          fg="#e5e7eb", relief="flat", bd=0,
+                          font=(FONT, 11, "bold"), padx=10, pady=0,
+                          cursor="hand2", activebackground="#374151",
+                          activeforeground="#ffffff", width=3)
+            b.pack(side="right", padx=(0, 2), pady=6)
+            self._tt(b, tip)
+            return b
+
+        _btn("✕", self._hide_window, "隐藏窗口（解析/下载会在后台继续）")
+        self.btn_max = _btn("□", self._toggle_max, "最大化 / 还原窗口")
+        _btn("—", self.win.iconify, "最小化到任务栏")
 
         # ★ 登录状态条（限流对策核心）
         self.loginbar = tk.Frame(self.win, bg="#fff8c5", height=38)
@@ -200,6 +225,79 @@ class DouyinWindow:
             vals[0] = want
             self.tree.item(i, values=vals)
 
+    # ────────────────── 窗口按钮 ──────────────────
+    def _alive(self) -> bool:
+        """窗口是否还存在（被摧毁后回填要静默跳过，不能抛异常）。"""
+        try:
+            return bool(self.win.winfo_exists())
+        except Exception:
+            return False
+
+    def _hide_window(self):
+        """隐藏窗口，**不中断**正在进行的解析/下载。
+
+        ★ 客户要求（2026-10-27）：
+          「点 X 关闭抖音批量下载界面后，不应该影响解析、下载中的抖音任务」
+
+        做法：withdraw 而不是 destroy ——
+          · 后台线程照常跑，结果照常回填到（隐藏的）表格里
+          · 再点主界面【🎵 抖音批量下载】就 deiconify，能看到真实进度
+          · 真想停任务用界面里的【停止】按钮（明确、可控）
+        """
+        try:
+            busy = self._busy
+            self.win.withdraw()
+            if busy:
+                self._log("info", "抖音窗口已隐藏 —— 解析/下载仍在后台继续，"
+                                  "再点【抖音批量下载】可看进度")
+            else:
+                self._log("info", "抖音窗口已隐藏（再点【抖音批量下载】可打开）")
+        except Exception:
+            pass
+
+    def _toggle_max(self):
+        """最大化 / 还原窗口，并同步按钮图标。"""
+        try:
+            if self.win.state() == "zoomed":
+                self.win.state("normal")
+                self.btn_max.config(text="□")
+            else:
+                self.win.state("zoomed")
+                self.btn_max.config(text="❐")
+        except Exception:
+            # 某些 Tk 版本不支持 state("zoomed")，退回几何最大化
+            try:
+                import tkinter as _tk
+                sw = self.win.winfo_screenwidth()
+                sh = self.win.winfo_screenheight()
+                self.win.geometry(f"{sw}x{sh - 60}+0+0")
+            except Exception:
+                pass
+
+    def _tt(self, widget, text: str):
+        """简单悬停提示（主窗口有同名方法，这里自己实现一份）。"""
+        tip = tk.Toplevel(widget)
+        tip.withdraw()
+        tip.overrideredirect(True)
+        lbl = tk.Label(tip, text=text, bg="#1f2328", fg="#ffffff",
+                       font=(FONT, 9), justify="left", padx=8, pady=5)
+        lbl.pack()
+
+        def enter(_e=None):
+            tip.deiconify()
+            tip.update_idletasks()
+            x = widget.winfo_rootx() + 12
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+            tip.geometry(f"+{x}+{y}")
+            tip.lift()
+
+        def leave(_e=None):
+            tip.withdraw()
+
+        widget.bind("<Enter>", enter, add="+")
+        widget.bind("<Leave>", leave, add="+")
+        widget.bind("<Destroy>", lambda _e: tip.destroy(), add="+")
+
     # ────────────────── 登录态（限流对策） ──────────────────
     def _refresh_login_state(self):
         """显示当前登录状态 + 对应的批量上限。"""
@@ -253,8 +351,18 @@ class DouyinWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def apply_login_done(self, ok: bool, msg: str):
+        if not self._alive():
+            return
         self._set_busy(False, "登录成功" if ok else f"登录未完成：{msg}")
         self.btn_login.config(state="normal")
+        # ★ v2.5.1：登录流程自己已经确认成功（浏览器里检测到 sessionid），
+        #   就不要再让 is_logged_in() 的二次判定把它否掉 ——
+        #   客户报障「登录成功后界面仍显示未登录」就是这个原因之一。
+        if ok:
+            try:
+                self._force_logged_in_ui()
+            except Exception:
+                pass
         self._refresh_login_state()
         if ok:
             messagebox.showinfo(
@@ -266,6 +374,20 @@ class DouyinWindow:
             messagebox.showwarning(
                 "没有登录成功", f"{msg}\n\n可再点一次「登录抖音」重试。",
                 parent=self.win)
+
+    def _force_logged_in_ui(self):
+        """把界面强制切成「已登录」样式（登录流程已确认成功时用）。"""
+        try:
+            from .douyin import BATCH_AUTH
+        except Exception:
+            BATCH_AUTH = 50
+        self.lbl_login.config(
+            text=f"✅ 已登录抖音（单批最多 {BATCH_AUTH} 条，速度快）",
+            fg="#1a7f37")
+        self.loginbar.config(bg="#dafbe1")
+        self.lbl_login.config(bg="#dafbe1")
+        self.btn_login.config(text="重新登录", bg="#e5e7eb", fg="#1f2328")
+        self.btn_logout.pack(side="left", padx=6)
 
     def _on_logout(self):
         if not messagebox.askyesno(
@@ -329,6 +451,8 @@ class DouyinWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def apply_item(self, i: int, v):
+        if not self._alive():
+            return
         """（主线程）回填一条解析结果。"""
         if i >= len(self.videos):
             return
@@ -351,6 +475,8 @@ class DouyinWindow:
                 (v.error or "解析失败")[:26]))
 
     def parse_done(self, n: int):
+        if not self._alive():
+            return
         ok = sum(1 for _, v in self.videos if v and v.ok)
         self._set_busy(False, f"解析完成：成功 {ok} / {n} 条")
         self.lbl_count.config(text=f"共 {n} 条，可下载 {ok} 条")
@@ -431,6 +557,8 @@ class DouyinWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def apply_dl_start(self, idx, n, total):
+        if not self._alive():
+            return
         iid = self._iid_of(idx)
         if iid:
             v = list(self.tree.item(iid, "values"))
@@ -439,6 +567,8 @@ class DouyinWindow:
         self._set_busy(True, f"正在下载 {n}/{total}")
 
     def apply_dl_prog(self, idx, got, tot, n, total):
+        if not self._alive():
+            return
         iid = self._iid_of(idx)
         if not iid:
             return
@@ -455,6 +585,8 @@ class DouyinWindow:
                  + (f" / {tot/1048576:.1f} MB" if tot else ""))
 
     def apply_dl_done(self, idx, ok, info, n, total):
+        if not self._alive():
+            return
         iid = self._iid_of(idx)
         # ★ 下载函数可能返回 "路径|WARN|说明" —— 表示文件下下来了但不完美
         warn = ""
@@ -480,6 +612,8 @@ class DouyinWindow:
             self.pbar["value"] = n * 100.0 / total
 
     def apply_all_done(self, done, failed, total):
+        if not self._alive():
+            return
         # 统计「完成但无声」的条数，必须让用户知道
         silent = 0
         for iid in self.tree.get_children():

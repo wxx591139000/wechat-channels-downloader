@@ -2040,6 +2040,25 @@ class App:
                         "warn",
                         "⚠ 这个视频没解析到点赞/转发数（微信字段名可能变了）"
                         "——如需要请反馈，我按真实字段名对齐")
+                    # ★ v2.5.1：把真实存在的「像统计数」的字段路径打进日志，
+                    #   一眼就能看出该补哪个名字（不用再让客户抓包）
+                    try:
+                        from .parser import stat_schema_report
+                        rep = stat_schema_report(getattr(vd, "raw", None))
+                        if rep:
+                            self.push_log(
+                                "info",
+                                "🔍 发现这些可能的统计字段（前 12 个）："
+                                + " ｜ ".join(rep[:12]))
+                            Path(BASE_DIR, "stat_schema.txt").write_text(
+                                "\n".join(rep), encoding="utf-8")
+                        else:
+                            self.push_log(
+                                "info",
+                                "🔍 objectDesc 里没有任何像统计数的字段"
+                                "（点赞数可能来自另一个接口）")
+                    except Exception:
+                        pass
         except Exception:
             pass
 

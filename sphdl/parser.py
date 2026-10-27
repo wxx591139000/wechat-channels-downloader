@@ -176,6 +176,52 @@ def extract_stats(obj: Any) -> dict:
     return out
 
 
+# 名字里带这些词的数值字段，很可能是统计数（诊断用）
+_STAT_HINT = ("like", "fav", "forward", "share", "comment", "count",
+              "num", "digg", "praise", "rec", "thumb", "stat", "view",
+              "play", "collect", "transmit")
+
+
+def stat_schema_report(obj, limit: int = 40) -> list:
+    """扫出 objectDesc 里「看起来像统计数」的字段，返回 ["路径=值", ...]。
+
+    ★ 用途（2026-10-27 客户报障：点赞列全是「—」）：
+      微信的字段名和我们的别名列表对不上时，光猜没用。
+      这个函数把真实存在的**数值字段路径**列出来，一眼就能看出该补哪个名字。
+
+    只做诊断，不改任何解析行为。
+    """
+    out = []
+
+    def _walk(node, path="", depth=0):
+        if len(out) >= limit or depth > 4 or not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            kp = f"{path}.{k}" if path else str(k)
+            kl = str(k).lower()
+            if isinstance(v, bool):
+                continue
+            if isinstance(v, (int, float)):
+                if any(h in kl for h in _STAT_HINT):
+                    out.append(f"{kp}={v}")
+            elif isinstance(v, str):
+                vs = v.strip()
+                if vs.isdigit() and any(h in kl for h in _STAT_HINT):
+                    out.append(f"{kp}={vs}(str)")
+                elif vs[:1] == "{" and len(vs) < 4000:
+                    try:
+                        _walk(json.loads(vs), kp, depth + 1)
+                    except Exception:
+                        pass
+            elif isinstance(v, dict):
+                _walk(v, kp, depth + 1)
+            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                _walk(v[0], f"{kp}[0]", depth + 1)
+
+    _walk(obj)
+    return out
+
+
 def last_stat_keys() -> dict:
     """最近一次提取命中的键名（诊断真实字段名用）。"""
     return dict(_last_stat_keys)

@@ -72,7 +72,7 @@ BATCH_AUTH = 50             # 已登录：单次最多解析 50 条
 COOL_AFTER_FAILS = 2
 COOL_SECONDS = 60
 
-MAX_TRY = 3          # 单个链接最多重试次数
+MAX_TRY = 2          # ★ v2.5.1：3 → 2（每次 14 秒，3 次就 40 秒太慢）
 CACHE_TTL = 6 * 3600  # 解析结果缓存有效期
 
 # 浏览器 profile（持久化 = 登录态长期有效）
@@ -290,15 +290,40 @@ def _parse_detail(data: dict) -> DouyinVideo:
     )
 
 
+def _login_marker() -> Path:
+    """登录成功标记文件（比猜 cookie 路径可靠）。"""
+    return profile_dir() / "login_ok.json"
+
+
 def is_logged_in() -> bool:
-    """判断 profile 里是否有抖音登录态（看是否有 sessionid 类 cookie）。"""
+    """判断 profile 里是否有抖音登录态。
+
+    ★ v2.5.1 修复（客户报障：登录成功后界面仍显示「未登录」）：
+      原实现只查 <profile>/Cookies 和 <profile>/Network/Cookies，
+      但 Chromium/Edge 的持久化 profile 结构是：
+          <profile>/Default/Network/Cookies      ← 实际位置
+          <profile>/Profile 1/Network/Cookies    （多用户时）
+      少了一层 Default/ → 永远查不到 → 登录成功也显示未登录。
+
+      现在改成：
+        1. 递归找任意 */Cookies 且大小 > 4KB
+        2. 且存在 login_ok.json 标记（登录时写入，退出登录时删除）
+      两个条件都满足才算已登录 —— 避免「浏览器里手动登出后本地还显示已登录」。
+    """
     pdir = profile_dir()
-    # 只要 profile 目录里有 Cookies 数据库且不太小，就认为可能登录过；
-    # 真正的判定在浏览器里做（见 login_check）
-    for name in ("Cookies", "Network/Cookies"):
-        f = pdir / name
-        if f.exists() and f.stat().st_size > 4096:
-            return True
+    # ① 标记文件（登录成功时由 login_interactive 写入）
+    if not _login_marker().exists():
+        return False
+    # ② profile 里确实有 cookie 数据库
+    try:
+        for f in pdir.rglob("Cookies"):
+            try:
+                if f.is_file() and f.stat().st_size > 4096:
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
     return False
 
 
@@ -378,6 +403,12 @@ def login_interactive(on_log=None, timeout: int = 240) -> tuple[bool, str]:
                 pass
 
             if _douyin_login_cookies(ctx):
+                try:
+                    _login_marker().write_text(
+                        json.dumps({"ts": int(time.time())}),
+                        encoding="utf-8")
+                except Exception:
+                    pass
                 ctx.close()
                 _log("ok", "检测到已登录状态的抖音账号")
                 return True, "已登录"
@@ -400,6 +431,15 @@ def login_interactive(on_log=None, timeout: int = 240) -> tuple[bool, str]:
             except Exception:
                 pass
             if ok:
+                # ★ 写标记，供 is_logged_in() 判定（界面据此显示已登录）
+                try:
+                    _login_marker().write_text(
+                        json.dumps({"ts": int(time.time()),
+                                    "cookie_count": len(
+                                        ctx.cookies() if ctx else [])}),
+                        encoding="utf-8")
+                except Exception:
+                    pass
                 _log("ok", "抖音登录成功，登录态已保存到本机")
                 return True, "登录成功"
             return False, "没有检测到登录（超时或窗口被关闭）"
@@ -416,6 +456,11 @@ def logout() -> bool:
     """删除本地登录态（profile 目录）。"""
     import shutil
     try:
+        # 先删标记（即使 rmtree 部分失败，也不会误显示已登录）
+        try:
+            _login_marker().unlink(missing_ok=True)
+        except Exception:
+            pass
         shutil.rmtree(profile_dir(), ignore_errors=True)
         return True
     except Exception:
@@ -537,6 +582,7 @@ def resolve_many(urls: list[str], on_item=None, on_log=None,
                 break
 
             _log("info", f"抖音 [{n+1}/{len(todo)}] 解析：{url[:60]}")
+            t_item = time.time()
             video = None
             for attempt in range(1, MAX_TRY + 1):
                 video, src = _resolve_one(ctx, url)
@@ -545,7 +591,8 @@ def resolve_many(urls: list[str], on_item=None, on_log=None,
                         _log("info", "  （detail 接口没给数据，已从页面媒体流获取）")
                     break
                 if attempt < MAX_TRY:
-                    wait = 5 * attempt if logged else 8 * attempt
+                    # ★ v2.5.1：等待从 8/16 秒缩到 2/4 秒（限流不会因几秒就恢复）
+                    wait = 2 * attempt if logged else 3 * attempt
                     _log("warn", f"  第 {attempt} 次失败（{video.error[:30]}），"
                                  f"{wait} 秒后重试…")
                     time.sleep(wait)
@@ -561,7 +608,8 @@ def resolve_many(urls: list[str], on_item=None, on_log=None,
                 fails = 0
                 _cache_put(_aweme_id_from_url(url) or url, video)
                 _log("ok", f"  ✓ {video.title[:34]} | {video.duration_text}"
-                           f" | {video.size_text}")
+                           f" | {video.size_text}"
+                           f"  （{time.time() - t_item:.1f}s）")
             else:
                 fails += 1
                 _log("error", f"  ✗ {video.error}")
@@ -630,14 +678,31 @@ def _resolve_one(ctx, url: str):
 
     page.on("response", _on_resp)
     page.on("request", _on_req)
+    t0 = time.time()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        page.goto(url, wait_until="domcontentloaded", timeout=20000)
     except Exception:
-        pass
-    for _ in range(20):
+        pass                      # 超时不致命，接口可能已经在路上
+
+    # ★ v2.5.1（客户报障：解析要近 1 分钟）：
+    #   原实现干等 detail 接口 20 × 1.5s = 30 秒，再重试 3 次 → 最坏 ~100 秒。
+    #   现在分两条快速通道：
+    #     · detail 接口 1~4 秒就回 → 立即用（正常路径）
+    #     · 已经抓到 media 流（含音轨）→ 最多等 8 秒 detail，
+    #       等不到就用兜底，不再死等 30 秒
+    #     · 什么都没抓到 → 最多等 14 秒（原 30 秒）
+    deadline_detail = t0 + 14
+    deadline_fallback = t0 + 8
+    while True:
+        now = time.time()
         if box["json"] is not None:
             break
-        time.sleep(1.5)
+        if box["media"] and now >= deadline_fallback:
+            # 有兜底素材了，别为 detail 白等
+            break
+        if now >= deadline_detail:
+            break
+        time.sleep(0.4)
 
     try:
         page.close()
