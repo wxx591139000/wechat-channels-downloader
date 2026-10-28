@@ -54,7 +54,13 @@ ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 PAYLOAD_LEN_V1, MAC_LEN, V1, V2, V3, V4 = 5, 10, 1, 2, 3, 4
 V2_PAYLOAD_LEN, V3_PAYLOAD_LEN, V4_PAYLOAD_LEN = 6, 10, 7
 MSG_V1, MSG_V2, MSG_V3, MSG_V4 = b"SPHDLv1", b"SPHDLv2", b"SPHDLv3", b"SPHDLv4"
+MSG_V5 = b"SPHDLv5"          # ★ v2.6.0：能力位码型
 PRODUCT_VIDEO, PRODUCT_MP = 1, 2
+# ★ v2.6.0：抖音独立产品线 + 点赞增强能力位
+PRODUCT_DOUYIN = 3
+V5 = 5                       # ver=5：带能力位（caps）的码型
+CAP_LIKE_STATS = 1 << 0      # 点赞增强包
+CAP_LABELS = {CAP_LIKE_STATS: "点赞增强包"}
 TIER_TO_CODE = {500: 1, 1000: 2, 2000: 3, 20000: 4}
 CODE_TO_TIER = {v: k for k, v in TIER_TO_CODE.items()}
 TIER_LABEL = {500: "轻量（500 条）", 1000: "标准（1000 条）",
@@ -74,7 +80,7 @@ def _mac(payload: bytes, ver: int) -> bytes:
     sec = _secret()
     if not sec:
         return b"\x00" * MAC_LEN
-    pre = (MSG_V4 if ver == V4 else MSG_V3 if ver == V3
+    pre = (MSG_V5 if ver == V5 else MSG_V4 if ver == V4 else MSG_V3 if ver == V3
            else MSG_V2 if ver == V2 else MSG_V1)
     return hmac.new(sec, pre + payload, hashlib.sha256).digest()[:MAC_LEN]
 
@@ -91,8 +97,41 @@ def _group(code: str) -> str:
     return "-".join(body[i:i + 4] for i in range(0, len(body), 4))
 
 
+def code_label(tier: int, product: int, caps: int = 0,
+               max_devices=None) -> str:
+    """生成「复制用」的码说明文案（★ v2.6.0 客户需求）。
+
+    客户原话：
+      「发码里点复制授权码时，应该是『轻量版2台授权码：XXXX』
+        『公众号视频授权码：XXXX』『点赞增强包授权码：XXXX』格式，
+        这样我粘贴时方便」
+
+    返回形如：
+        「点赞增强包授权码：」
+        「轻量版2台授权码：」
+        「公众号视频授权码：」
+        「抖音批量下载授权码：」
+    """
+    if product == PRODUCT_DOUYIN:
+        return "抖音批量下载授权码："
+    if product == PRODUCT_MP:
+        return "公众号视频授权码："
+    # 视频号：档位 + 台数
+    tier_txt = TIER_LABEL.get(tier, f"{tier}条")
+    short = (tier_txt.split("（")[0].split("(")[0].strip()
+             or f"{tier}条")
+    if caps:
+        # 带能力位 → 以能力名为主（客户买的是增值功能）
+        cap_txt = "、".join(n for b, n in CAP_LABELS.items() if caps & b) \
+            or "增值功能"
+        return f"{cap_txt}授权码："
+    if max_devices:
+        return f"{short}{int(max_devices)}台授权码："
+    return f"{short}授权码："
+
+
 def make_code(tier: int, product: int = PRODUCT_VIDEO, days: int = 0,
-              device: str = "", max_devices=None) -> str:
+              device: str = "", max_devices=None, caps: int = 0) -> str:
     """生成授权码。
 
     device 非空 → ver=3 绑定码（死绑单机）
@@ -118,6 +157,16 @@ def make_code(tier: int, product: int = PRODUCT_VIDEO, days: int = 0,
     tier_code = TIER_TO_CODE.get(tier, 0) if product == PRODUCT_VIDEO else 0
     days_step = min(255, max(0, int(days) // 8))
     rand = secrets.token_bytes(2)
+    # ★ v2.6.0：能力位（点赞增强包）→ 走 ver=5
+    #   载荷: ver(5) | tier | days//8 | product | caps | maxdev | rand(2)
+    if caps:
+        if device:
+            raise ValueError(
+                "暂不支持「设备绑定码 + 点赞增强」组合，请改用台数限制")
+        md = min(255, max(0, int(max_devices or 0)))
+        payload = bytes([V5, tier_code, days_step, product, int(caps), md]) + rand
+        blob = payload + _mac(payload, V5)
+        return f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + _b32enc(blob))}"
     if device:
         dev4 = _bind4_from_token(device)
         # 绑定码保持 ver=3 不变（载荷结构与台数码不同，不能混）
@@ -908,16 +957,27 @@ class H(BaseHTTPRequestHandler):
   <a href="/snippets">去添加版本和网盘链接</a></div>
 </div>"""
 
+            # ★ v2.6.0：复制时带「XX授权码：」前缀，作者粘贴更顺
+            _lbl = code_label(tier, product, caps, md)
             flash = (f"<div class='card'><div class='ok'>✅ 已生成并登记台账</div>"
                      f"<label style='margin-top:10px'>① 授权码</label>"
                      f"<div class='code' id='c'>{html.escape(code)}</div>"
-                     f"<button type='button' onclick=\"cp(document.getElementById('c')"
+                     f"<button type='button' onclick=\"cp(document.getElementById('lbl')"
                      f".innerText,this)\">复制授权码</button>"
+                     f"<div class='code' id='lbl' style='font-size:13px;"
+                     f"background:#f1f5f9;color:#0f172a;margin-top:6px;"
+                     f"padding:8px 10px;border-radius:8px;word-break:break-all'>"
+                     f"{html.escape(_lbl + code)}</div>"
+                     f"<p class='meta'>↑ 上面这行是「带说明的完整文案」，点复制就发这个"
+                     f"（也可以只发下面那行纯码）</p>"
+                     f"<div class='code' id='c2' style='font-size:12px;"
+                     f"background:#f8fafc;color:#475569'>{html.escape(code)}</div>"
                      f"<p class='meta'>把码发给客户，在软件「🔑 授权管理」粘贴激活</p>"
                      f"{snip_block}"
                      f"</div>"
                      f"<script>{JS_COPY}"
                      f"const CODE={json.dumps(code)};"
+                     f"const LBL={json.dumps(_lbl)};"
                      f"const SNIPS={json.dumps({(v['ver'] + '||' + v.get('channel','')): snippet_text(v['ver'], v.get('channel','')) for v in vers}, ensure_ascii=False)};"
                      f"const NOTES={json.dumps({v['ver']: (v.get('notes') or changelog_notes(v['ver'])) for v in vers}, ensure_ascii=False)};"
                      f"function notesUpd(){{var v=document.getElementById('ver').value.split('||')[0];"
@@ -931,7 +991,7 @@ class H(BaseHTTPRequestHandler):
                      f"function copySnip(){{var v=document.getElementById('ver').value;"
                      f"cp(SNIPS[v]||'','');}}"
                      f"function copyBoth(){{var v=document.getElementById('ver').value;"
-                     f"cp((SNIPS[v]||'')+'\\n\\n授权码：'+CODE,'');}}"
+                     f"cp((SNIPS[v]||'')+'\\n\\n'+LBL+CODE,'');}}"
                      f"try{{notesUpd();}}catch(e){{}}"
                      f"</script>")
         opts = "".join(f"<option value={t}>{l}</option>"
@@ -943,7 +1003,17 @@ class H(BaseHTTPRequestHandler):
 <select name="product">
 <option value="1">视频号下载（4 档）</option>
 <option value="2">公众号文章视频（不分档）</option>
+<option value="3">抖音批量下载（不分档）</option>
 </select>
+<label>增值功能（可多选，★会生成 ver=5 码）</label>
+<label style="display:block;font-weight:400;margin:2px 0 8px">
+  <input type="checkbox" name="cap_like" value="1"
+         style="width:auto;margin-right:6px">
+  点赞增强包（点赞/转发/推荐展示 + 按点赞排序）
+</label>
+<p class="meta" style="margin-top:-4px">
+勾选后与视频号基础授权**叠加使用**（客户可以同时激活两个码）。<br>
+⚠️ 与「设备码死绑」二选一：能力位码只支持台数限制。</p>
 <label>档位（仅视频号有效）</label>
 <select name="tier">{opts}</select>
 <label>客户昵称 *</label><input name="customer" required
@@ -977,7 +1047,7 @@ class H(BaseHTTPRequestHandler):
         try:
             product = int(form.get("product") or PRODUCT_VIDEO)
             tier = int(form.get("tier") or 20000)
-            if product == PRODUCT_MP:
+            if product in (PRODUCT_MP, PRODUCT_DOUYIN):
                 tier = 0
             dev = form.get("device", "").strip()
             md_raw = (form.get("max_devices") or "").strip()
@@ -985,8 +1055,16 @@ class H(BaseHTTPRequestHandler):
             md = None
             if not dev and md_raw:
                 md = int(md_raw)
+            # ★ v2.6.0：增值能力位（点赞增强包）
+            caps = 0
+            if form.get("cap_like"):
+                caps |= CAP_LIKE_STATS
+            if caps and dev:
+                raise ValueError(
+                    "「设备码死绑」与「增值功能（能力位）」不能同时使用，"
+                    "请改用台数限制")
             code = make_code(tier, product=product, device=dev,
-                             max_devices=md)
+                             max_devices=md, caps=caps)
         except Exception as e:                              # noqa: BLE001
             return self._send(200, page("发码", f"<div class='card'>"
                 f"<div class='err'>生成失败：{html.escape(str(e))}</div>"
@@ -994,9 +1072,13 @@ class H(BaseHTTPRequestHandler):
         rec = {
             "code": code,
             "tier": tier,
-            "tier_label": (TIER_LABEL.get(tier, "公众号视频版（不分档）")
-                           if product == PRODUCT_VIDEO
-                           else "公众号视频版（不分档）"),
+            "tier_label": (
+                TIER_LABEL.get(tier, "视频号")
+                if product == PRODUCT_VIDEO and not caps
+                else ("点赞增强包" if caps
+                      else ("抖音批量下载" if product == PRODUCT_DOUYIN
+                            else "公众号视频版（不分档）"))),
+            "caps": caps,
             "product": product,
             "days": 0,
             "customer": form.get("customer", "").strip(),
