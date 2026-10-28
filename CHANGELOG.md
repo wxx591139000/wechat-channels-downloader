@@ -3,6 +3,60 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.5.4] - 2026-10-27
+
+- v2.5.4 完整body转储
+### 诊断升级：转储「含 objectDesc 的完整 body」
+
+**v2.5.3 实测结论（客户机器真实数据）**：
+
+1. `bridge_calls.jsonl` 只记录到 2 类调用：
+   `finderH5ExtTransfer`（5 次）和 `hideMenuItems`（1 次）。
+2. 其中 33KB 那条是**评论**数据（含 `like_count`，我们已在抓评论赞）。
+3. `diag_object_desc` 里 objectDesc 只有 **12 个字段**：
+   ```
+   description / media / media_type / location / ext_reading / topic /
+   mentioned_user / feed_location / mentioned_musics / short_title /
+   finder_newlife_desc / mod_feed_info
+   ```
+   **一个统计数都没有。**
+
+**关键判断**：视频点赞数**不在 objectDesc 里**，而在**同一响应体的兄弟字段**里。
+而旧的 bridge 诊断只记录「不含 objectDesc」的调用（因为含 objectDesc 的会被
+预检放行到解析队列），正好把最需要看的那条跳过了。
+
+#### 新增 `_dump_full_body()`
+
+诊断模式下，把**含 objectDesc 的完整 body** 也存一份：
+
+```
+diag_full_body/<时间戳>_<字节数>.json   （最多 20 个，>4MB 跳过）
+```
+
+并在日志打一行：
+```
+🧾 完整body已存 092815_45231.json｜顶层字段=['cmdName','arguments','result']
+📊 完整body里的疑似统计字段：result.objectStat.likeCount=8888 ｜ ...
+```
+
+#### 顺带修一个误报
+
+`_STAT_HINT` 里的 `"rec"` 会把 `direction` 误判成「推荐数」——
+实测日志里真出现过 `arguments.req_json.direction=2`。
+改为 `"recom"`；`"stat"` 收窄为 `"stat_"`/`"stats"`/`"statis"`，避免 `status` 命中。
+
+验证：
+```
+{'direction':2,'like_count':5}   → ['like_count=5']        ✅ 不再误报
+{'status':8,'read_count':99}     → ['read_count=99']       ✅ 不再误报
+{'likeCount':1234, ...}          → 正确识别 3 个            ✅
+```
+
+### 下一步
+
+客户装 v2.5.4 → 播 2~3 个视频 → 看
+`diag_full_body/*.json` 顶层字段和 `📊 完整body里的疑似统计字段` 那行
+→ 按真实字段名接上 `extract_stats` 的数据源。
 ## [2.5.3] - 2026-10-27
 
 - v2.5.3 统计字段定位诊断

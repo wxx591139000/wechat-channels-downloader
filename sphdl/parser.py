@@ -177,9 +177,13 @@ def extract_stats(obj: Any) -> dict:
 
 
 # 名字里带这些词的数值字段，很可能是统计数（诊断用）
+# ★ v2.5.4：去掉 "rec"（会把 direction 这类字段误判为"推荐数"，
+#   实测日志就出现过 `arguments.req_json.direction=2` 的假命中）。
+#   "stat" 也收窄为 "stat_" / "stats" / "statis"，避免 status 命中。
 _STAT_HINT = ("like", "fav", "forward", "share", "comment", "count",
-              "num", "digg", "praise", "rec", "thumb", "stat", "view",
-              "play", "collect", "transmit")
+              "num", "digg", "praise", "recom", "thumb",
+              "stat_", "stats", "statis", "view", "play", "collect",
+              "transmit")
 
 
 def stat_schema_report(obj, limit: int = 40) -> list:

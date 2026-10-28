@@ -461,6 +461,45 @@ class SphAddon:
         except Exception:
             pass
 
+    def _dump_full_body(self, body: bytes):
+        """把含 objectDesc 的完整 bridge body 存一份（仅诊断模式，v2.5.4）。
+
+        目的：看清 objectDesc **之外**的兄弟字段里有没有点赞/转发数。
+
+        落盘：diag_full_body/<时间戳>_<字节数>.json（最多 20 个，超了不写）
+        日志：每条打一行「顶层字段 + 疑似统计字段」，一眼定位。
+        """
+        try:
+            if len(body) > 4 * 1024 * 1024:      # 超大 body 跳过
+                return
+            base = Path(config.BASE_DIR) if hasattr(config, "BASE_DIR") else Path(".")
+            d = base / "diag_full_body"
+            if not d.exists():
+                d.mkdir(parents=True, exist_ok=True)
+            if len(list(d.glob("*.json"))) >= 20:
+                return
+            # 先看结构（诊断要的是字段名，不是内容）
+            try:
+                obj = json.loads(body.decode("utf-8", "replace"))
+            except Exception:
+                obj = None
+            keys = list(obj.keys())[:12] if isinstance(obj, dict) else []
+            hits = _scan_stat_hits(obj, limit=20) if isinstance(obj, dict) else []
+            fn = d / f"{time.strftime('%H%M%S')}_{len(body)}.json"
+            fn.write_bytes(body)
+            if not getattr(self, "_full_body_logged", False):
+                self._full_body_logged = True
+                logger.info(
+                    f"🧾 完整body已存 {fn.name}｜顶层字段={keys}")
+                if hits:
+                    logger.info("📊 完整body里的疑似统计字段："
+                                + " ｜ ".join(hits[:12]))
+                else:
+                    logger.info("📊 完整body里也没扫到像统计数的字段"
+                                "（点赞可能来自别的接口，需再抓）")
+        except Exception:
+            pass
+
     # ---------- ⓿ TLS 握手前：非微信域名一律裸透传（v2.2.4）----------
     def tls_clienthello(self, data: _tls.ClientHelloData):
         """在 MITM 接管 TLS 之前决定「拦还是透」。
@@ -623,6 +662,20 @@ class SphAddon:
                 flow.response = http.Response.make(
                     200, b"OK", {"Content-Type": "text/plain"})
                 return
+        # ★ v2.5.4：诊断模式下把**含 objectDesc 的完整 body** 也存一份。
+        #   为什么（2026-10-27 实测结论）：
+        #     客户要的点赞数**不在 objectDesc 里**（objectDesc 只有 12 个字段：
+        #     description/media/media_type/location/ext_reading/topic/
+        #     mentioned_user/feed_location/mentioned_musics/short_title/
+        #     finder_newlife_desc/mod_feed_info —— 没有一个统计数）。
+        #     所以点赞必然在**同一响应体的兄弟字段**里，
+        #     必须存完整 body 才能看到（旧的 bridge 诊断只记录"不含 objectDesc"
+        #     的调用，正好把这条跳过了）。
+        if self._bridge_diag and is_bridge:
+            try:
+                self._dump_full_body(body)
+            except Exception:
+                pass
         # 先回 OK（微信侧不受任何延迟影响），再把 body 交给工作线程解析。
         # 钩子全程 O(1)：预检 + 回包 + 入队，无 json.loads、无递归扫描。
         flow.response = http.Response.make(200, b"OK", {"Content-Type": "text/plain"})
