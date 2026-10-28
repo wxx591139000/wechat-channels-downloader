@@ -3,6 +3,81 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.5.5] - 2026-10-27
+
+- v2.5.5 点赞数修复
+### ★ 修复：点赞/转发/评论数终于取到了（真实数据验证）
+
+客户报障「点赞列都是「—」，但真实视频有点赞数」—— 经过 5 轮定位，找到根因。
+
+#### 根因（客户机器真实 payload 实测）
+
+**① 统计数不在 `object_desc` 里，在它的「兄弟键」上**
+
+```
+{
+  "id": "15042040784711457411",
+  "object_desc": { description/media/media_type/location/ext_reading/
+                   topic/mentioned_user/feed_location/mentioned_musics/
+                   short_title/finder_newlife_desc/mod_feed_info },  ← 12个字段，无统计数
+  "like_count": 135,          ← ★ 点赞在这里
+  "forward_count": 94,        ← 转发
+  "comment_count": 0,         ← 评论数
+  "fav_count": 527,           ← 收藏
+  "createtime": 1793150995
+}
+```
+
+之前 5 轮全部在 `object_desc` 内部找别名（likeCount/diggCount/praiseCount…），
+方向就是错的 —— 那里永远找不到。
+
+**② 数据藏在两层 JSON 字符串里**
+
+```
+obj["result"]  → str → jsapi_resp["resp_json"] → str → 真正的 object 列表
+```
+
+不穿透字符串，一个 objectDesc 都找不到（实测 0 个）。
+
+**③ `object` 是 list，迭代器必须处理「顶层是 list」**
+
+原来的 `iter_object_desc_entries` 只在 `isinstance(obj, dict)` 分支里递归，
+传进来一个 list 就直接返回 0 个（这是第二个坑）。
+
+#### 修复
+
+1. `extract_stats(obj, entry=None)`：优先从 **entry（含 object_desc 的条目）** 取
+   `like_count` / `forward_count` / `comment_count` / `fav_count`
+2. 新增 `iter_object_desc_entries()`：递归返回 `(object_desc, 所属条目)` 对，
+   **穿透 JSON 字符串** + **支持顶层 list**
+3. `iter_object_descs()` 同步修好这两个坑（它原本也没穿字符串）
+4. `addon.py` 4 个调用点全部传入 `entry`（含 `_capture_anchor` /
+   `_buffer_pending` 这两条主路径）
+5. `extract_from_object_desc(obj, hint, entry=None)` 保持向后兼容
+   （不传 entry 时统计为 0，但视频/地址/清晰度照常解析）
+
+#### 验证（用客户机器的真实数据）
+
+从 314KB 真实 payload 解出 15 条视频，**13 条有点赞数**，逐值核对：
+
+| 标题 | 赞 | 转发 | 评论 | 收藏 |
+|---|---|---|---|---|
+| 及时语｜不翻译，就是最重的翻译 懂球帝深夜声明 | 135 | 94 | 0 | 527 |
+| #媒体原创 出生仅450克！曾让全网牵挂的超早产儿 | 88 | 24 | 13 | 149 |
+| 这就是爱人如养花 广东一大叔苦练拍照技术 | 57 | 103 | 9 | 96 |
+| #越南一货车行驶途中突然"掉头" | 51 | 38 | 11 | 111 |
+
+`tests/verify_stats_real_sample.py`（19 项）：固件
+`tests/fixtures/v2514_real_stats.json` 是从真实 payload 提取的 3 条视频，
+防止以后改坏。
+
+### 现在的列表
+
+```
+状态 | 标题 | 来源 | 捕获方式 | 👍 点赞 | 时间 | 文件
+```
+
+点「👍 点赞」表头排序。转发/推荐/收藏/评论数已存进 records.json（只是不显示）。
 ## [2.5.4] - 2026-10-27
 
 - v2.5.4 完整body转储

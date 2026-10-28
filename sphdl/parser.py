@@ -139,11 +139,46 @@ def _as_int(v):
         return 0
 
 
-def extract_stats(obj: Any) -> dict:
-    """从 objectDesc 里容错提取统计数据，返回 5 个 int 字段。"""
+def extract_stats(obj: Any, entry: Any = None) -> dict:
+    """容错提取统计数据，返回 5 个 int 字段。
+
+    ★★★ 2026-10-27 真机实测结论（重要，别再改回去）★★★
+
+    视频号的点赞/转发/评论/收藏数**不在 objectDesc 里**！
+    objectDesc 只有 12 个字段（description/media/media_type/location/
+    ext_reading/topic/mentioned_user/feed_location/mentioned_musics/
+    short_title/finder_newlife_desc/mod_feed_info），一个统计数都没有。
+
+    它们在 objectDesc 的**兄弟位置** —— 也就是同一个视频条目对象上：
+
+        {
+          "id": "15042040784711457411",
+          "object_desc": { ...12 个字段... },
+          "like_count": 135,        ← 点赞
+          "forward_count": 94,      ← 转发
+          "comment_count": 0,       ← 评论数
+          "fav_count": 527,         ← 收藏
+          "createtime": 1793150995,
+          ...
+        }
+
+    所以必须传 entry（含 objectDesc 的那个条目），从它身上取。
+    不传 entry 时退回旧行为（只在 obj 及子容器里找），保持兼容。
+    """
     global _last_stat_keys
     out = {k: 0 for k in _STAT_ALIASES}
     found = {}
+
+    # ★ 优先从条目层取（真机验证过的正确位置）
+    if isinstance(entry, dict):
+        for field, aliases in _STAT_ALIASES.items():
+            for a in aliases:
+                if a in entry:
+                    n = _as_int(entry.get(a))
+                    if n > 0:
+                        out[field] = n
+                        found[field] = f"entry.{a}"
+                        break
 
     def _scan(d):
         if not isinstance(d, dict):
@@ -231,15 +266,59 @@ def last_stat_keys() -> dict:
     return dict(_last_stat_keys)
 
 
-def _extract_stats_kwargs(obj) -> dict:
+def _extract_stats_kwargs(obj, entry=None) -> dict:
     """extract_stats 的薄包装，供 VideoData(...) 展开用。"""
     try:
-        return extract_stats(obj)
+        return extract_stats(obj, entry)
     except Exception:
         return {}
 
 
-def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[VideoData]:
+def iter_object_desc_entries(obj: Any, depth: int = 0):
+    """递归找出 (objectDesc, 所属条目) 对（生成器）。
+
+    ★ 为什么需要（2026-10-27）：
+      统计数据（like_count 等）在 objectDesc 的**兄弟位置**，
+      只拿 objectDesc 本体永远取不到。必须把「父条目」一起带出来。
+
+    yields: (desc_dict, entry_dict)
+      desc_dict  = 具体的 object_desc
+      entry_dict = 含 object_desc 的那一层（其中可能有 like_count 等）
+    """
+    if depth > 12 or obj is None:
+        return
+    # ★ 顶层/中间层是 list 时也要走（视频号的 object 就是 list）
+    if isinstance(obj, list):
+        for it in obj:
+            yield from iter_object_desc_entries(it, depth + 1)
+        return
+    if isinstance(obj, dict):
+        for key in ("object_desc", "objectDesc"):
+            v = obj.get(key)
+            if isinstance(v, dict) and v:
+                yield v, obj
+            elif isinstance(v, str) and v.strip()[:1] == "{":
+                dv = _try_json(v)
+                if isinstance(dv, dict) and dv:
+                    yield dv, obj
+            elif isinstance(v, list) and v:
+                for it in v:
+                    if isinstance(it, dict) and it:
+                        yield it, obj
+        for k, v in obj.items():
+            # ★ 视频号 bridge 的坑：真正的数据在**两层 JSON 字符串**里
+            #   obj["result"] -> str -> jsapi_resp["resp_json"] -> str -> 真数据
+            #   不穿透字符串就一个 objectDesc 都找不到（实测 0 个）。
+            if isinstance(v, str) and v.strip()[:1] in ("{", "["):
+                dv = _try_json(v)
+                if dv is not None:
+                    yield from iter_object_desc_entries(dv, depth + 1)
+            else:
+                yield from iter_object_desc_entries(v, depth + 1)
+
+
+def extract_from_object_desc(obj: Any, description_hint: str = "",
+    entry: Any = None,) -> Optional[VideoData]:
     """
     从 object_desc（dict 含 media 列表）或 media 列表本身中提取视频信息。
     """
@@ -326,7 +405,7 @@ def extract_from_object_desc(obj: Any, description_hint: str = "") -> Optional[V
             cover_url=str(_pick(first, "coverUrl", "cover_url") or ""),
             video_id=video_id,
             nonce_id=nonce_id,
-            **_extract_stats_kwargs(obj),
+            **_extract_stats_kwargs(obj, entry),
             renditions=renditions,
             quality_note=_quality_note(media_list),
             raw=obj,
@@ -384,6 +463,11 @@ def iter_object_descs(obj: Any, depth: int = 0):
     """
     if depth > 12 or obj is None:
         return
+    # ★ 顶层/中间层是 list 时也要走（视频号的 object 就是 list）
+    if isinstance(obj, list):
+        for it in obj:
+            yield from iter_object_descs(it, depth + 1)
+        return
     if isinstance(obj, dict):
         for key in ("object_desc", "objectDesc"):
             v = obj.get(key)
@@ -393,8 +477,14 @@ def iter_object_descs(obj: Any, depth: int = 0):
                 dv = _try_json(v)
                 if isinstance(dv, (dict, list)) and dv:
                     yield dv
-        for v in obj.values():
-            yield from iter_object_descs(v, depth + 1)
+        for k, v in obj.items():
+            # 同 iter_object_desc_entries：穿透 JSON 字符串
+            if isinstance(v, str) and v.strip()[:1] in ("{", "["):
+                dv = _try_json(v)
+                if dv is not None:
+                    yield from iter_object_descs(dv, depth + 1)
+            else:
+                yield from iter_object_descs(v, depth + 1)
     elif isinstance(obj, list):
         for v in obj:
             yield from iter_object_descs(v, depth + 1)

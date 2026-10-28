@@ -28,7 +28,7 @@ from . import config
 from . import shared
 from .logger import logger
 from .parser import (extract_from_object_desc, iter_object_descs,
-                     extract_comments)
+                     iter_object_desc_entries, extract_comments)
 from .util import mask_url, describe_capture
 
 # ④ 注入到 HTML 的 JS：包装 WeixinJSBridge.invoke，
@@ -800,9 +800,17 @@ class SphAddon:
                     self._handle_comment_payload(body)
                     continue
                 obj = json.loads(body)
-                odes = list(iter_object_descs(obj))
-                if not odes:
+                # ★ v2.5.5（真机实测修正）：统计数据在 objectDesc 的**兄弟位置**
+                #   （like_count / forward_count / comment_count / fav_count
+                #    都在含 object_desc 的那个条目对象上）。
+                #   所以必须用「带条目」的迭代器，把 entry 一起传下去。
+                _entries = list(iter_object_desc_entries(obj))
+                if _entries:
+                    odes = [d for d, _e in _entries]
+                    _entries_map = {id(d): e for d, e in _entries}
+                else:
                     odes = [obj]  # 可能直接就是 object_desc 本体 / media 列表
+                    _entries_map = {}
                 if len(odes) > 1 and not self._multi_payload_logged:
                     # 诊断（一次）：bridge 回传的列表数据含多个视频 objectDesc。
                     # v2.0.6 逐个处理；v2.0.7 自然捕获模式下只缓存为候选。
@@ -813,13 +821,14 @@ class SphAddon:
                 if len(odes) > 1 and self.natural_capture:
                     # 自然捕获：整页只缓存为候选，置顶锚点先入列，
                     # 其余等播放器请求到对应流/封面时再捕获
-                    self._capture_anchor(odes, source)
-                    self._buffer_pending(odes, source)
+                    self._capture_anchor(odes, source, _entries_map)
+                    self._buffer_pending(odes, source, _entries_map)
                     found_any = True
                 else:
                     handled = set()
                     for od in odes:
-                        vd = extract_from_object_desc(od)
+                        vd = extract_from_object_desc(
+                            od, entry=_entries_map.get(id(od)))
                         if not vd:
                             continue
                         key = vd.video_id or (vd.url, vd.decode_key)
@@ -925,12 +934,13 @@ class SphAddon:
             return
         source = f"API直嗅({host})"
         if len(odes) > 1 and self.natural_capture:
-            self._capture_anchor(odes, source)
-            self._buffer_pending(odes, source)
+            self._capture_anchor(odes, source, _entries_map)
+            self._buffer_pending(odes, source, _entries_map)
         else:
             handled = set()
             for od in odes:
-                vd = extract_from_object_desc(od)
+                vd = extract_from_object_desc(
+                    od, entry=_entries_map.get(id(od)))
                 if not vd:
                     continue
                 key = vd.video_id or (vd.url, vd.decode_key)
@@ -940,7 +950,7 @@ class SphAddon:
                 self._handle(vd, source=source)
 
     # ---------- 自然捕获：候选缓存 / 置顶锚点 / 播放命中 ----------
-    def _buffer_pending(self, odes, source: str):
+    def _buffer_pending(self, odes, source: str, entries_map=None):
         """列表数据缓存为候选（自然捕获）。不显示、不下载，
         等播放器请求到对应流/封面时由 _maybe_capture_from_stream 捕获。"""
         now = time.time()
@@ -950,7 +960,8 @@ class SphAddon:
                              if now - p["ts"] < self.PENDING_EXPIRE]
             seen = {p["key"] for p in self._pending}
             for od in odes:
-                vd = extract_from_object_desc(od)
+                vd = extract_from_object_desc(
+                    od, entry=_entries_map.get(id(od)))
                 if not vd:
                     continue
                 key = vd.video_id or (vd.url, vd.decode_key)
@@ -969,14 +980,15 @@ class SphAddon:
             logger.info(f"🧲 自然捕获：已缓存 {added} 条候选"
                         "（播放到哪条才捕获哪条）")
 
-    def _capture_anchor(self, odes, source: str):
+    def _capture_anchor(self, odes, source: str, entries_map=None):
         """置顶锚点：新列表数据的前 ANCHOR 条先入列表
         （对应「当前浏览 + 随后的几个缓存」，保证有可见反馈）。"""
         grabbed = 0
         for od in odes:
             if grabbed >= self.ANCHOR:
                 break
-            vd = extract_from_object_desc(od)
+            vd = extract_from_object_desc(
+                od, entry=(entries_map or {}).get(id(od)))
             if not vd:
                 continue
             key = vd.video_id or (vd.url, vd.decode_key)
