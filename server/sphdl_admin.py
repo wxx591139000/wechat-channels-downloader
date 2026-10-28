@@ -529,6 +529,30 @@ def snippet_text(ver: str, channel: str = "") -> str:
     return "\n".join([x for x in lines if x])
 
 
+def label_from_ledger(code: str) -> str:
+    """按授权码反查台账，得出「XX授权码：」前缀（v2.6.4）。
+
+    ★ 为什么需要（2026-10-28 事故）：
+      `/?code=XXX` 这个结果页（_page_new）只拿到 code 字符串，
+      **拿不到 tier/product/caps**（那是 _do_gen 的局部变量）。
+      我上一版直接在 _page_new 里写 `code_label(tier, product, caps, md)`
+      → `NameError: name 'tier' is not defined` → 页面 500
+      → Cloudflare 报 502 Bad Gateway（手机端最明显）。
+      正确做法：按 code 去台账查它当初是用什么参数发的。
+    """
+    try:
+        for r in ledger_all():
+            if r.get("code") == code:
+                return code_label(
+                    int(r.get("tier") or 0),
+                    int(r.get("product") or PRODUCT_VIDEO),
+                    int(r.get("caps") or 0),
+                    r.get("max_devices"))
+    except Exception:
+        pass
+    return "授权码："          # 查不到就退回最朴素的写法，不能崩
+
+
 def ledger_all() -> list:
     if not LEDGER.exists():
         return []
@@ -979,7 +1003,9 @@ class H(BaseHTTPRequestHandler):
 </div>"""
 
             # ★ v2.6.0：复制时带「XX授权码：」前缀，作者粘贴更顺
-            _lbl = code_label(tier, product, caps, md)
+            # ★ v2.6.4：这里**没有** tier/product/caps 局部变量 ——
+            #   必须按 code 去台账反查，否则 NameError → 500 → CF 502
+            _lbl = label_from_ledger(code)
             flash = (f"<div class='card'><div class='ok'>✅ 已生成并登记台账</div>"
                      f"<label style='margin-top:10px'>① 授权码</label>"
                      f"<div class='code' id='c'>{html.escape(code)}</div>"
