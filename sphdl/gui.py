@@ -1344,22 +1344,78 @@ class App:
         ttk.Label(pad, text=source, foreground="#374151").grid(
             row=1, column=1, columnspan=3, sticky="w", pady=(0, 2))
 
-        # ---- 功能授权（v2.0.19）：视频号 / 公众号文章视频 ----
-        # 公众号视频是**附加模块**，默认关闭，需专门授权码开启。
+        # ---- 功能授权（v2.0.19 起；★ v2.6.3 加抖音 + 点赞增强包）----
+        # 四个能力各自独立授权，这里一次性列出客户到底买了哪些：
+        #   视频号 ✓/✗ · 公众号视频 ✓/✗ · 抖音 ✓/✗ · 点赞增强包 ✓/✗
         _has_vc = lic.has_feature(info, lic.FLAG_VIDEO_CHANNEL) or info is None
         _has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
+        # ★ 抖音、点赞增强包：能力位/产品线可能存在于**另一个码**里
+        #   （方案 A 叠加售卖），所以要遍历所有已激活的码，不能只看 info。
+        _has_dy = _has_like = False
+        try:
+            for _c in self._all_license_codes():
+                _i = lic.verify_code(_c)
+                if not _i:
+                    continue
+                if lic.is_douyin_product(_i):
+                    _has_dy = True
+                if lic.has_capability(_i, lic.CAP_LIKE_STATS):
+                    _has_like = True
+        except Exception:
+            pass
         feat_row = ttk.Frame(pad)
         feat_row.grid(row=1, column=2, columnspan=2, sticky="w",
                       padx=(12, 0), pady=(0, 2))
         ttk.Label(feat_row, text="功能：", foreground="#6b7280",
                   font=("Microsoft YaHei UI", 8)).pack(side="left")
-        ttk.Label(feat_row, text="视频号✓",
+
+        def _feat(txt, on, tip, buy=None):
+            lb = ttk.Label(
+                feat_row, text=txt + ("✓" if on else "✗"),
+                foreground="#0f766e" if on else "#b91c1c",
+                font=("Microsoft YaHei UI", 8, "bold" if not on else "normal"))
+            lb.pack(side="left", padx=(6, 0))
+            self._tt(lb, tip)
+            # ★ v2.6.3：未授权的功能点一下就出购买引导（客户不用回主界面找）
+            if not on and buy:
+                def _click(_e=None, _t=txt, _b=buy):
+                    try:
+                        messagebox.showinfo(
+                            f"{_t}（未授权）",
+                            _b + "\n\n激活方法：\n"
+                            "  在本页下方输入框粘贴授权码 → 点【激活】，立即生效。\n"
+                            "  （可与已有授权码共存，不会覆盖）")
+                    except Exception:
+                        pass
+                lb.configure(cursor="hand2")
+                lb.bind("<Button-1>", _click)
+            return lb
+
+        ttk.Label(feat_row, text="视频号" + ("✓" if _has_vc else "✗"),
                   foreground="#0f766e" if _has_vc else "#9ca3af",
                   font=("Microsoft YaHei UI", 8)).pack(side="left")
-        ttk.Label(feat_row, text="公众号视频" + ("✓" if _has_mp else "✗"),
-                  foreground="#0f766e" if _has_mp else "#b91c1c",
-                  font=("Microsoft YaHei UI", 8, "bold")
-                  ).pack(side="left", padx=(6, 0))
+        _feat("公众号视频", _has_mp,
+              "公众号文章正文里的视频下载（独立授权，与视频号分开）",
+              "「公众号视频」是独立产品，与视频号分开销售。\n\n"
+              "如需使用，请联系发布方购买「公众号视频」授权码。")
+        _feat("抖音", _has_dy,
+              "抖音批量下载（独立授权）\n未授权请联系发布方购买「抖音批量下载版」授权码",
+              "「抖音批量下载」是独立产品，需专用授权码\n"
+              "（视频号码不能下抖音，抖音码也不能抓视频号）。\n\n"
+              "支持：粘贴链接批量下载、1080P 音视频合一、\n"
+              "      登录后可提高限额、不需要装证书。\n\n"
+              "如需使用，请联系发布方购买「抖音批量下载版」授权码。")
+        _feat("点赞增强包", _has_like,
+              "点赞/转发/推荐数展示 + 按点赞排序（增值功能）\n"
+              "未授权请联系发布方购买「点赞增强包」授权码\n"
+              "（与视频号授权叠加使用，不冲突）",
+              "「点赞增强包」是增值功能，需单独授权码。\n\n"
+              "作用：\n"
+              "  · 列表显示每条视频的点赞 / 转发 / 推荐数\n"
+              "  · 点「👍 点赞」表头即可按点赞数排序\n"
+              "  · 用途：一眼挑出高赞视频优先下载，判断选题价值\n\n"
+              "与视频号基础授权**叠加使用**，不会覆盖、不冲突。\n\n"
+              "如需使用，请联系发布方购买「点赞增强包」授权码。")
 
         # ---- 本机设备码（v2.0.19 设备绑定）----
         # 客户买绑定版时，需要把这个码发给作者，作者据此生成绑定码。

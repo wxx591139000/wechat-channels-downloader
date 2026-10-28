@@ -591,6 +591,27 @@ label{display:block;font-size:13px;color:#6b7280;margin:10px 0 4px}
 input,select{width:100%;padding:11px 12px;border:1px solid #d1d5db;border-radius:9px;
        font-size:15px;background:#fff;-webkit-appearance:none}
 input:focus,select:focus{outline:none;border-color:#1e3a5f}
+/* ★ v2.6.2：复选框必须单独恢复原生外观 ——
+   上面那条 `input{...-webkit-appearance:none}` 会把 checkbox 的**勾选标记**
+   一起干掉，导致点上去看不到 ✓（客户报障）。
+   属性选择器 (0,1,1) 优先级高于元素选择器 (0,0,1)，覆盖生效。
+   accent-color 让勾用品牌色。 */
+input[type=checkbox]{
+  -webkit-appearance:auto;appearance:auto;
+  width:22px;height:22px;min-width:22px;padding:0;margin:0;
+  border:none;border-radius:5px;background:transparent;
+  accent-color:#1e3a5f;vertical-align:middle;cursor:pointer;
+  flex:0 0 auto;
+}
+/* 增值功能勾选卡：整行可点，选中后高亮 */
+.capbox{display:flex;align-items:center;gap:10px;
+  padding:11px 12px;border:1px solid #d1d5db;border-radius:9px;
+  background:#fff;cursor:pointer;margin:6px 0 8px;
+  font-size:14px;color:#111827;font-weight:500;line-height:1.35}
+.capbox:active{background:#f8fafc}
+.capbox .capdesc{color:#6b7280;font-size:12.5px;font-weight:400}
+.capbox:has(input:checked){border-color:#0f766e;background:#f0fdfa;
+  box-shadow:0 0 0 3px rgba(15,118,110,.10)}
 button{width:100%;padding:13px;border:none;border-radius:10px;background:#1e3a5f;
        color:#fff;font-size:16px;font-weight:600;margin-top:14px;cursor:pointer}
 button:active{background:#152a46}
@@ -1006,10 +1027,9 @@ class H(BaseHTTPRequestHandler):
 <option value="3">抖音批量下载（不分档）</option>
 </select>
 <label>增值功能（可多选，★会生成 ver=5 码）</label>
-<label style="display:block;font-weight:400;margin:2px 0 8px">
-  <input type="checkbox" name="cap_like" value="1"
-         style="width:auto;margin-right:6px">
-  点赞增强包（点赞/转发/推荐展示 + 按点赞排序）
+<label class="capbox">
+  <input type="checkbox" name="cap_like" value="1">
+  <span>点赞增强包<br><span class="capdesc">点赞/转发/推荐展示 + 按点赞排序</span></span>
 </label>
 <p class="meta" style="margin-top:-4px">
 勾选后与视频号基础授权**叠加使用**（客户可以同时激活两个码）。<br>
