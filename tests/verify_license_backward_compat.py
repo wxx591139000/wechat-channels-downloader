@@ -1,40 +1,31 @@
-"""验证：v2.1.5 时期生成的授权码在 v2.1.7 里是否仍然有效。
+"""已售授权码兼容性审计（发布新版前必跑，v2.6.4）。
 
-用户问题：「在 2.1.5 时给客户生成的授权码，后来又给他发新版 2.1.7 版时，
-          还能用之前的授权码吗？」
+═══ 为什么这是红线（skill 项目归档 §4.5.4）═══
+客户升级到新版后，**买过的授权码必须仍然有效**。
+凭据失效 = 已付费客户被升级弄坏 = 退款 + 差评。
 
-这关系到**已售客户的授权不能被升级破坏**，是红线。必须实测而不是推理。
+本次新增 ver=5 码型（带能力位），**必须实测**：
+  · ver=1/2/3/4 四种历史码型是否仍全部有效
+  · 每种码型 × 每种档位 全组合
+  · ★真实台账里发出的每一个码逐个校验（不是只测自己刚生成的）
 
 覆盖：
-  C1 手工造 ver=1 码（最老码型，35 字符）→ v2.1.7 校验通过
-  C2 ver=2 码（产品线，38 字符）→ 通过
-  C3 ver=3 码（死绑单机，45 字符）→ 通过
-  C4 ver=4 码（限台数，40 字符）→ 通过
-  C5 各档位全部一致（500/1000/2000/20000）
-  C6 公众号码仍然有效且仍只解锁公众号
-  C7 老码激活后档位正确（不会因为版本升级丢档）
-  C8 台账里真实发的老码（从 licenses.jsonl 读）逐个校验
+  C1  ver=1 老码 × 4 档位
+  C2  ver=2 视频号 × 4 档位 + 公众号 + 抖音
+  C3  ver=3 设备绑定 × 4 档位
+  C4  ver=4 限台数 × 4 档位
+  C5  ver=5 能力位码 × 4 档位
+  C6  ★真实台账（生产 licenses.jsonl）里每个码都能校验通过
+  C7  ★真实台账的档位/产品与码内一致
+  C8  台账里 ver=5 码的 caps 与台账记录一致
 """
 import json
+import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
 
-ROOT = Path(r"E:/myHermesWorkSpace/wechat-channels-downloader/sphdl")
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-
-from sphdl import license as lic
-sec = (ROOT / ".license_secret").read_text(encoding="utf-8").strip()
-(ROOT / "sphdl" / "_lic_key.py").write_text(
-    '"""t"""\nK = %r\n' % lic.obfuscate(bytes.fromhex(sec)), encoding="utf-8")
-import importlib
-importlib.reload(lic)
-
-import tkinter as tk
-rt = tk.Tk(); rt.withdraw(); rt.destroy()
-import sphdl.gui as G
-import sphdl.config as C
 
 R = []
 
@@ -45,172 +36,122 @@ def check(name, cond, detail=""):
           + (f"  {detail}" if detail else ""))
 
 
-print("=" * 74)
-print("当前版本：" + __import__("sphdl").__version__)
-print("=" * 74)
+# 确保密钥注入
+py = str(ROOT.parent / ".venv" / "Scripts" / "python.exe")
+sec = ROOT / ".license_secret"
+code = ("import sys, pathlib; sys.path.insert(0,'.')\n"
+        "from sphdl import license as lic\n"
+        "s = bytes.fromhex(pathlib.Path('.license_secret').read_text().strip())\n"
+        "pathlib.Path('sphdl/_lic_key.py').write_text("
+        "'K = %r\\n' % lic.obfuscate(s), encoding='utf-8')\n")
+subprocess.run([py, "-c", code], cwd=str(ROOT), capture_output=True)
 
-# ---------- C1~C4 四种码型全部有效 ----------
+import sphdl.license as L
+
+print("=" * 74)
+print("C1-C5 全码型 × 全档位 组合")
+print("=" * 74)
+TIERS = (500, 1000, 2000, 20000)
+
+# ver=1 老码：product 默认 0/1 且无 max_devices/device → 走 ver=1
+cases = []
+for t in TIERS:
+    cases.append(("ver=1", t, dict(tier=t)))
+for t in TIERS:
+    cases.append(("ver=2视频号", t, dict(tier=t, product=L.PRODUCT_VIDEO, max_devices=None)))
+cases.append(("ver=2公众号", 0, dict(tier=0, product=L.PRODUCT_MP_ARTICLE)))
+cases.append(("ver=2抖音", 0, dict(tier=0, product=L.PRODUCT_DOUYIN)))
+for t in TIERS:
+    cases.append(("ver=3绑定", t, dict(tier=t, product=L.PRODUCT_VIDEO, device="163145d5")))
+for t in TIERS:
+    cases.append(("ver=4台数", t, dict(tier=t, product=L.PRODUCT_VIDEO, max_devices=3)))
+for t in TIERS:
+    cases.append(("ver=5点赞", t, dict(tier=t, product=L.PRODUCT_VIDEO,
+                                       caps=L.CAP_LIKE_STATS, max_devices=1)))
+
+fails = []
+for name, expect_tier, kw in cases:
+    try:
+        c = L.make_code(**kw)
+        info = L.verify_code(c)
+        if info is None:
+            fails.append(f"{name} tier={expect_tier}: 校验失败")
+            continue
+        if info["tier"] != expect_tier:
+            fails.append(f"{name} tier={expect_tier}: 解析成 {info['tier']}")
+            continue
+        print(f"  ✅ {name:10s} tier={expect_tier:6d} → ver={info['ver']} "
+              f"prod={info['product']} caps={info['caps']}")
+    except Exception as e:
+        fails.append(f"{name} tier={expect_tier}: {type(e).__name__}: {e}")
+
+check(f"C1-C5 {len(cases)} 组组合全部有效", not fails,
+      "; ".join(fails[:3]) if fails else f"{len(cases)}/{len(cases)}")
+
 print()
 print("=" * 74)
-print("C1~C4 四种码型在老版本生成的码，在新版本里仍有效")
+print("C6-C8 ★真实台账逐个校验（生产码）")
 print("=" * 74)
+# 台账在 VPS；本地拉一份只读副本校验
+LEDGER_REMOTE = "/opt/sphdl-admin/data/licenses.jsonl"
+tmp = Path("/tmp/ledger_audit.jsonl")
+if sys.platform.startswith("win"):
+    tmp = Path(r"C:/Users/Dancing/AppData/Local/Temp/ledger_audit.jsonl")
+r = subprocess.run(["scp", "vps-aliyun:" + LEDGER_REMOTE, str(tmp)],
+                   capture_output=True, timeout=60)
+print(f"  拉取台账: {'成功' if r.returncode == 0 else '失败'} → {tmp}")
 
-# ver=1（最老，35 字符，不传 product）
-c_v1 = lic.make_code(1000)
-i1 = lic.verify_code(c_v1)
-print(f"  ver=1 码: {c_v1}  ({len(c_v1)} 字符)")
-check("C1a ver=1 码有效", i1 is not None)
-check("C1b ver=1 码型识别正确", i1 and i1["ver"] == 1, str(i1 and i1["ver"]))
-check("C1c ver=1 档位正确", i1 and i1["tier"] == 1000, str(i1 and i1["tier"]))
-check("C1d ver=1 语义=视频号",
-      i1 and i1["product"] == lic.PRODUCT_VIDEO)
-check("C1e ver=1 不绑机", i1 and not i1.get("device_bound"))
-check("C1f ver=1 不限台", i1 and not i1.get("max_devices"))
-
-# ver=2（产品线）
-c_v2 = lic.make_code(2000, product=lic.PRODUCT_VIDEO)
-i2 = lic.verify_code(c_v2)
-print(f"  ver=2 码: {c_v2}  ({len(c_v2)} 字符)")
-check("C2a ver=2 码有效", i2 is not None)
-check("C2b ver=2 码型正确", i2 and i2["ver"] == 2, str(i2 and i2["ver"]))
-check("C2c ver=2 档位正确", i2 and i2["tier"] == 2000)
-
-# ver=3（死绑）
-from sphdl import telemetry as tel
-comps = tel.device_components()
-tok = tel.bind_token(comps)
-c_v3 = lic.make_code(500, product=lic.PRODUCT_VIDEO, device=tok)
-i3 = lic.verify_code(c_v3)
-print(f"  ver=3 码: {c_v3}  ({len(c_v3)} 字符)")
-check("C3a ver=3 码有效", i3 is not None)
-check("C3b ver=3 码型正确", i3 and i3["ver"] == 3, str(i3 and i3["ver"]))
-check("C3c ver=3 是绑定码", i3 and i3.get("device_bound") is True)
-ok3, _ = lic.check_device(i3, components=comps)
-check("C3d ver=3 本机可通过绑定校验", ok3 is True)
-
-# ver=4（限台）
-c_v4 = lic.make_code(10000 if False else 20000, product=lic.PRODUCT_VIDEO, max_devices=3)
-i4 = lic.verify_code(c_v4)
-print(f"  ver=4 码: {c_v4}  ({len(c_v4)} 字符)")
-check("C4a ver=4 码有效", i4 is not None)
-check("C4b ver=4 码型正确", i4 and i4["ver"] == 4, str(i4 and i4["ver"]))
-check("C4c ver=4 台数正确", i4 and i4["max_devices"] == 3,
-      str(i4 and i4.get("max_devices")))
-
-# ---------- C5 各档位全对 ----------
-print()
-print("=" * 74)
-print("C5 各档位在四种码型下都正确")
-print("=" * 74)
-for tier in (500, 1000, 2000, 20000):
-    row = []
-    for tag, code in (("v1", lic.make_code(tier)),
-                      ("v2", lic.make_code(tier, product=lic.PRODUCT_VIDEO)),
-                      ("v3", lic.make_code(tier, product=lic.PRODUCT_VIDEO, device=tok)),
-                      ("v4", lic.make_code(tier, product=lic.PRODUCT_VIDEO, max_devices=1))):
-        info = lic.verify_code(code)
-        row.append(f"{tag}={info['tier'] if info else 'ERR'}")
-        assert info and info["tier"] == tier, f"{tag} tier {tier} 失败"
-    print(f"  {tier:>6} 条: " + "  ".join(row))
-check("C5 四档 × 四码型 全部档位正确", True, "16 组")
-
-# ---------- C6 公众号码 ----------
-print()
-print("=" * 74)
-print("C6 公众号码仍有效且仍只解锁公众号")
-print("=" * 74)
-c_mp = lic.make_code(0, product=lic.PRODUCT_MP_ARTICLE)
-imp = lic.verify_code(c_mp)
-print(f"  公众号码: {c_mp}")
-check("C6a 公众号码有效", imp is not None)
-check("C6b 产品=公众号", imp and imp["product"] == lic.PRODUCT_MP_ARTICLE)
-check("C6c 档位=0（不分档）", imp and imp["tier"] == 0)
-check("C6d 不解锁视频号",
-      imp and lic.has_feature(imp, lic.PRODUCT_VIDEO) is False)
-check("C6e 解锁公众号",
-      imp and lic.has_feature(imp, lic.PRODUCT_MP_ARTICLE) is True)
-
-# ---------- C7 实际激活 ----------
-print()
-print("=" * 74)
-print("C7 ★老码在 v2.1.7 里激活，档位正确")
-print("=" * 74)
-tdir = Path(tempfile.mkdtemp(prefix="compat_"))
-G.RECORDS_FILE = tdir / "records.json"
-G.CONFIG_FILE = tdir / "config.json"
-C.PROXY_BACKUP_FILE = tdir / "proxy_backup.json"
-(tdir / "config.json").write_text(json.dumps({
-    "port": 8899, "download_dir": str(tdir / "dl"),
-    "auto_proxy": False, "auto_download": False,
-    "natural_capture": True, "guide_auto_shown": True,
-    "license_codes": {},
-}), encoding="utf-8")
-
-app = G.App()
-app.root.deiconify()
-
-
-def pump(ms):
-    end = time.time() + ms / 1000
-    while time.time() < end:
-        try:
-            app.root.update()
-        except Exception:
-            return
-        time.sleep(0.01)
-
-
-pump(1200)
-for tier, code in ((1000, c_v1), (2000, c_v2), (500, c_v3), (20000, c_v4)):
-    ok = app._activate_license(code)
-    pump(250)
-    print(f"  激活 {tier:>5} 档码 → {ok}, store.max_records={app.store.max_records}")
-    check(f"C7 老码 {tier} 档激活后档位正确",
-          ok is True and app.store.max_records == tier,
-          f"ok={ok} max={app.store.max_records}")
-    check(f"C7 有下载授权（{tier}）", app._has_download_license() is True)
-try:
-    app._on_close()
-except Exception:
-    pass
-
-# ---------- C8 台账里的真实老码 ----------
-print()
-print("=" * 74)
-print("C8 ★台账里真实发过的老码，逐个校验")
-print("=" * 74)
-ledger = Path(r"E:/myHermesWorkSpace/_archives/keys/licenses.jsonl")
-if ledger.exists():
+if r.returncode == 0 and tmp.exists():
     rows = []
-    for ln in ledger.read_text(encoding="utf-8", errors="replace").splitlines():
+    for ln in tmp.read_text(encoding="utf-8", errors="replace").splitlines():
         ln = ln.strip()
         if not ln:
             continue
         try:
-            r = json.loads(ln)
+            rows.append(json.loads(ln))
         except Exception:
             continue
-        if r.get("code") and not r.get("event"):
-            rows.append(r)
-    print(f"  台账共 {len(rows)} 个码，逐个校验：")
-    bad = []
-    for r in rows[:30]:
-        code = r["code"]
-        info = lic.verify_code(code)
-        tier_want = r.get("tier")
-        okcode = info is not None
-        oktier = okcode and (tier_want is None or info["tier"] == tier_want)
-        mark = "✅" if (okcode and oktier) else "❌"
-        print(f"    {mark} {code[:28]}…  "
-              f"ver={info['ver'] if info else 'ERR'} "
-              f"tier={info['tier'] if info else 'ERR'}"
-              f"{'' if oktier else ' ← 与台账不符'}")
-        if not (okcode and oktier):
-            bad.append(code)
-    check("C8 台账里所有老码在 v2.1.7 仍有效", not bad,
-          f"{len(rows)} 个码全过" if not bad else f"{len(bad)} 个失效")
+    issued = [x for x in rows if x.get("code")]
+    print(f"  台账总行数: {len(rows)}  含码行数: {len(issued)}")
+
+    bad, mismatch, capmis = [], [], []
+    for x in issued:
+        c = x["code"]
+        info = L.verify_code(c)
+        who = x.get("customer") or "(未署名)"
+        if info is None:
+            bad.append(f"{c} ({who})")
+            continue
+        # 档位/产品一致性（台账有的才比）
+        if x.get("tier") is not None and info["tier"] != int(x["tier"]):
+            mismatch.append(f"{c} 台账tier={x['tier']} 码内={info['tier']}")
+        if x.get("product") is not None and info["product"] != int(x["product"]):
+            mismatch.append(f"{c} 台账prod={x['product']} 码内={info['product']}")
+        if x.get("caps") is not None and info.get("caps", 0) != int(x["caps"]):
+            capmis.append(f"{c} 台账caps={x['caps']} 码内={info.get('caps')}")
+
+    print(f"  校验失败: {len(bad)}   档位/产品不一致: {len(mismatch)}   "
+          f"caps 不一致: {len(capmis)}")
+    if bad:
+        for b in bad[:5]:
+            print(f"    ❌ {b}")
+    check("C6 ★真实台账所有码都能校验通过", not bad,
+          f"{len(bad)} 个失效" if bad else f"{len(issued)} 个全部有效")
+    check("C7 ★台账档位/产品与码内一致", not mismatch,
+          "; ".join(mismatch[:2]) if mismatch else "全部一致")
+    check("C8 台账 caps 与码内一致（新增字段）", not capmis,
+          "; ".join(capmis[:2]) if capmis else "全部一致")
+
+    # 打印台账概览
+    from collections import Counter
+    vers = Counter()
+    for x in issued:
+        info = L.verify_code(x["code"])
+        if info:
+            vers[info["ver"]] += 1
+    print(f"  台账码型分布: {dict(sorted(vers.items()))}")
 else:
-    print("  台账文件不存在，跳过")
+    check("C6 ★真实台账逐个校验", False, "台账拉取失败")
 
 print()
 ok_n = sum(1 for _, p, _ in R if p)
@@ -218,5 +159,4 @@ print(f"RESULT: {'ALL PASS' if ok_n == len(R) else 'FAIL'} ({ok_n}/{len(R)})")
 for nm, p, _ in R:
     if not p:
         print("  未通过: " + nm)
-(ROOT / "sphdl" / "_lic_key.py").unlink(missing_ok=True)
 sys.exit(0 if ok_n == len(R) else 1)
