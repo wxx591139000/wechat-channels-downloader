@@ -1299,6 +1299,9 @@ class App:
         self._apply_tier(self._resolve_tier(), reason="清除授权")
         try:
             self._refresh_mp_button()
+            self._refresh_dy_button()
+            self._like_stats_ok = self._has_like_stats()
+            self._refresh_like_column()
             self._refresh_watermark()
         except Exception:
             pass
@@ -1622,6 +1625,9 @@ class App:
         # 换码后刷新公众号按钮（可能新解锁/失去该功能）+ 顶部防盗横幅
         try:
             self._refresh_mp_button()
+            self._refresh_dy_button()
+            self._like_stats_ok = self._has_like_stats()
+            self._refresh_like_column()
             self._refresh_watermark()
         except Exception:
             pass
@@ -2768,6 +2774,16 @@ class App:
                          foreground="#78909c")
             st.map("MpLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v2.6.0：抖音按钮专属底色（深青，与公众号橙色区分开）
+            st.configure("Dy.TButton", background="#26a69a",
+                         foreground="#ffffff")
+            st.map("Dy.TButton",
+                   background=[("active", "#4db6ac"),
+                               ("pressed", "#00897b")])
+            st.configure("DyLocked.TButton", background="#eceff1",
+                         foreground="#78909c")
+            st.map("DyLocked.TButton",
+                   background=[("active", "#e0e4e7")])
         except Exception:
             pass
         self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=16,
@@ -2775,11 +2791,14 @@ class App:
                                  command=self._on_mp_article)
         self.btn_mp.pack(side="left", padx=(16, 2))
         # ★ v2.4.0：抖音批量下载（方案 A：粘贴链接）
-        self.btn_dy = ttk.Button(capf, text="🎵 抖音批量下载", width=16,
+        # 抖音按钮：未授权显示 🔒（仍可点 → 给购买引导）
+        self.btn_dy = ttk.Button(capf, text="🎵 抖音批量下载 🔒", width=17,
+                                 style="DyLocked.TButton",
                                  command=self._on_douyin)
         self.btn_dy.pack(side="left", padx=(6, 2))
         self._tt(self.btn_dy,
-                 "【抖音批量下载】粘贴抖音视频链接，批量下载。\n\n"
+                 "【抖音批量下载】**独立产品**，需专用授权码（与视频号/公众号分开）。\n"
+                 "未授权时点它会提示购买方式。\n\n"
                  "特点：\n"
                  "  · 不需要安装证书（用自己的浏览器读页面数据）\n"
                  "  · 支持多个链接一次粘贴，也可粘整段分享文案\n"
@@ -2798,6 +2817,9 @@ class App:
                  "\n"
                  "此功能需专用授权码开启；未授权时点它会提示如何解锁。")
         self._refresh_mp_button()
+        self._refresh_dy_button()
+        self._like_stats_ok = self._has_like_stats()
+        self._refresh_like_column()
 
         # ===== ②-b 列表上限档位（v2.0.17：档位由发布方掌控，客户端不可自配） =====
         limf = ttk.Frame(main)
@@ -2919,6 +2941,7 @@ class App:
         #   加回 cols + heads + _row_values 三处即可。
         cols = ("no", "status", "title", "platform", "size", "source",
                 "like", "time", "file")
+        self._like_stats_ok = False
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
                                  selectmode="extended")
         # ★ v2.2.20：「大小」列也不再显示（客户要求）
@@ -3604,6 +3627,9 @@ class App:
             self._stop_all_downloads(silent=True)
             try:
                 self._refresh_mp_button()
+                self._refresh_dy_button()
+                self._like_stats_ok = self._has_like_stats()
+                self._refresh_like_column()
                 self._refresh_watermark()
             except Exception:
                 pass
@@ -4392,14 +4418,138 @@ class App:
         except Exception as e:
             self.push_log("error", f"设置下载目录失败: {e}")
 
-    def _on_douyin(self):
-        """打开「抖音批量下载」窗口（v2.4.0）。
+    # ────────────────── 点赞增强包（v2.6.0 增值功能）──────────────────
+    def _all_license_codes(self) -> list:
+        """取出所有已激活的授权码（去重、大写）。
 
-        ★ 为什么用独立窗口而不是并入主列表：
-          主链路（视频号嗅探 + 公众号解析）已经稳定，抖音是全新抓取方式
-          （自己的 Playwright 浏览器读页面响应，不走 MITM）。
-          独立窗口零回归风险，跑通后再考虑是否并入。
+        ★ 存储格式很关键（2026-10-27 踩坑）：
+          config.license_codes 实际是 **dict**，键=产品线，值=码：
+            {"1": "SPHDL-...", "2": "SPHDL-..."}
+          我第一版按 list 遍历 → 一个都取不到 → 已授权的客户仍显示未授权。
+          这里同时兼容 dict / list / 单字符串三种形态。
         """
+        out = []
+
+        def _add(v):
+            if not v:
+                return
+            sv = str(v).strip().upper()
+            if sv.startswith("SPHDL") and sv not in out:
+                out.append(sv)
+
+        try:
+            raw = getattr(self.cfg, "license_codes", None)
+            if isinstance(raw, dict):
+                for v in raw.values():
+                    _add(v)
+            elif isinstance(raw, (list, tuple)):
+                for it in raw:
+                    if isinstance(it, dict):
+                        _add(it.get("code"))
+                    else:
+                        _add(it)
+            else:
+                _add(raw)
+            # 兼容旧单码字段
+            _add(getattr(self.cfg, "license_code", ""))
+        except Exception:
+            pass
+        return out
+
+    def _has_like_stats(self) -> bool:
+        """是否已购买「点赞增强包」（能力位 CAP_LIKE_STATS）。
+
+        ★ 叠加语义（客户选定方案 A）：
+          客户可以同时激活「视频号码」+「点赞增强码」，
+          所以必须**遍历所有已激活的码**，任一含该能力位即为 True。
+        """
+        try:
+            for c in self._all_license_codes():
+                info = lic.verify_code(c)
+                if info and lic.has_capability(info, lic.CAP_LIKE_STATS):
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _refresh_like_column(self):
+        """按授权刷新「👍 点赞」列表头（未授权显示 🔒 并降低视觉重量）。"""
+        try:
+            has = self._has_like_stats()
+            txt = "👍 点赞" if has else "👍 点赞 🔒"
+            col = "like"
+            if col in self.tree["columns"]:
+                self.tree.heading(col, text=txt)
+                self._head_text[col] = txt
+        except Exception:
+            pass
+
+    def _on_like_header_denied(self):
+        """点「点赞 🔒」表头 → 购买引导（v2.6.0）。"""
+        if messagebox.askyesno(
+                "点赞数据（未授权）",
+                "「点赞数据展示 + 按点赞排序」是**增值功能**，需要单独的\n"
+                "「点赞增强包」授权码（与视频号基础授权叠加使用，不冲突）。\n\n"
+                "作用：\n"
+                "  · 列表显示每条视频的点赞 / 转发 / 推荐数\n"
+                "  · 点「👍 点赞」表头即可按点赞数排序\n"
+                "  · 用途：一眼挑出高赞视频优先下载，判断选题价值\n\n"
+                "说明：视频抓取与下载**不受影响**，只是看不到点赞数字。\n\n"
+                "如需使用，**请联系发布方购买「点赞增强包」授权码**，\n"
+                "拿到后在「🔑 授权管理」粘贴激活即可（立即生效，可与原码共存）。\n\n"
+                "要去「🔑 授权管理」查看当前授权吗？"):
+            self._on_license_input()
+
+    def _refresh_dy_button(self) -> bool:
+        """刷新「🎵 抖音批量下载」按钮外观，返回是否有授权。
+
+        ★ v2.6.0（客户要求）：「把抖音跟公众号一样做成单独授权，
+          并提示用户联系购买抖音授权」
+
+        授权了 → 正常样式；未授权 → 显示 🔒 但**仍可点**
+        （点了给购买引导，比禁用更利于成交 —— 与公众号按钮一致）。
+        """
+        if getattr(self, "btn_dy", None) is None:
+            return False
+        try:
+            has_dy = lic.is_douyin_product(
+                self._license_info(lic.PRODUCT_DOUYIN))
+        except Exception:
+            has_dy = False
+        # 被作废的码不给用（与视频号/公众号一致）
+        if getattr(self, "_revoked_reason", ""):
+            has_dy = False
+        try:
+            self.btn_dy.config(
+                text="🎵 抖音批量下载" if has_dy else "🎵 抖音批量下载 🔒",
+                style="Dy.TButton" if has_dy else "DyLocked.TButton",
+                state="normal")
+        except Exception:
+            pass
+        return has_dy
+
+    def _on_douyin(self):
+        """「🎵 抖音批量下载」入口：未授权给购买引导，已授权开窗口。
+
+        ★ v2.6.0：抖音是**独立产品**，需要专用授权码
+          （PRODUCT_DOUYIN=3），与视频号、公众号完全分开。
+        """
+        if not self._refresh_dy_button():
+            if messagebox.askyesno(
+                    "抖音批量下载（未授权）",
+                    "「抖音批量下载」是**独立产品**，与视频号、公众号分开销售。\n\n"
+                    "区别：\n"
+                    "  · 视频号：微信「发现 → 视频号」里的视频（嗅探捕获）\n"
+                    "  · 公众号：公众号文章正文里的视频（粘贴链接解析）\n"
+                    "  · 抖音：抖音视频（粘贴链接批量下载，支持 1080P）\n"
+                    "  三者授权码完全独立：视频号码不能下抖音，\n"
+                    "  抖音码也不能抓视频号。\n\n"
+                    "如需使用本功能，**请联系发布方购买「抖音批量下载版」授权码**，\n"
+                    "拿到后在「🔑 授权管理」粘贴激活即可（立即生效，无需重启）。\n\n"
+                    "要去「🔑 授权管理」查看当前授权吗？"):
+                self._on_license_input()
+            return
+        # 已授权 → 开窗口
         try:
             w = getattr(self, "_dy_win", None)
             if w is not None and w.win.winfo_exists():
@@ -5188,12 +5338,30 @@ class App:
         return ("", st, title, plat_cell,
                 self._display_size(r),
                 r.source,
-                self._num_cell(getattr(r, "like_count", 0)),
+                self._stat_cell(getattr(r, "like_count", 0)),
                 r.created[5:], fname)
+
+    def _stat_cell(self, n) -> str:
+        """统计数字转显示文本（★ v2.6.0 受「点赞增强包」授权控制）。
+
+        未授权 → 一律「—」（不泄露数据，也不假装"没人点赞"）
+        已授权 → 0 显示「—」，≥1万显示「1.2万」
+        """
+        if not getattr(self, "_like_stats_ok", False):
+            return "—"
+        try:
+            n = int(n or 0)
+        except Exception:
+            n = 0
+        if n <= 0:
+            return "—"
+        if n >= 10000:
+            return f"{n / 10000:.1f}万".replace(".0万", "万")
+        return str(n)
 
     @staticmethod
     def _num_cell(n) -> str:
-        """统计数字转显示文本：0 → 「—」；≥1万 → 「1.2万」。"""
+        """纯格式化（不带授权判定）—— 保留给内部/测试用。"""
         try:
             n = int(n or 0)
         except Exception:
@@ -5457,6 +5625,10 @@ class App:
 
     # ---------------- 表头排序（v2.0.12） ----------------
     def _on_tree_sort(self, col):
+        # ★ v2.6.0：点赞列未授权 → 不排序，直接给购买引导
+        if col == "like" and not getattr(self, "_like_stats_ok", False):
+            self._on_like_header_denied()
+            return
         """点击表头：按该列升降序排列（再点一次切换方向）。"""
         if self._sort_col == col:
             self._sort_desc = not self._sort_desc
@@ -6271,6 +6443,12 @@ class App:
         self.root.destroy()
 
     def run(self):
+        # 启动时按授权决定点赞列是否解锁
+        try:
+            self._like_stats_ok = self._has_like_stats()
+            self._refresh_like_column()
+        except Exception:
+            pass
         # ★ v2.3.0：启动授权码吊销校验（方案 B）
         #   作废后客户端才会知道 → 立即降档 + 停下载 + 醒目提示
         try:

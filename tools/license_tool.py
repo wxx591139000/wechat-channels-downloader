@@ -105,6 +105,19 @@ def _same() -> bool:
         return False
 
 
+def lib_caps_txt(caps: int) -> str:
+    """能力位转中文（v2.6.0）。"""
+    try:
+        from sphdl import license as _L
+        names = []
+        for bit, name in _L.CAP_LABELS.items():
+            if caps & bit:
+                names.append(name)
+        return "、".join(names) or f"未知({caps})"
+    except Exception:
+        return str(caps)
+
+
 def cmd_gen(args):
     # 先解析产品线（v2.0.19：视频号 4 档 / 公众号 1 个不分档）
     flags = 0
@@ -141,11 +154,22 @@ def cmd_gen(args):
     if args.note:
         log(f"# 客户/备注: {args.note}")
 
+    # ★ v2.6.0：能力位（增值功能）—— like=点赞增强包
+    #   ★ 必须在 for 循环**外面**算一次（放循环里会破坏循环体缩进 —— 踩过）
+    caps = 0
+    _CAP_MAP = {"like": lic.CAP_LIKE_STATS}
+    for c in (getattr(args, "caps", None) or []):
+        key = str(c).strip().lower()
+        if key not in _CAP_MAP:
+            raise SystemExit(f"未知能力位: {c}（可选 {sorted(_CAP_MAP)}）")
+        caps |= _CAP_MAP[key]
+
     codes = []
     for _ in range(max(1, args.count)):
         code = lic.make_code(tier, days=args.days, product=flags,
                              device=(args.device or ""),
-                             max_devices=args.max_devices)
+                             max_devices=args.max_devices,
+                             caps=caps)
         codes.append(code)
         log(code)
     # 台账登记（作者侧追溯，见 tools/ledger.py）
@@ -164,7 +188,9 @@ def cmd_gen(args):
             log("   ⚠️ 未填 --customer/--note：建议补上，否则出事查不到是谁")
     feat_txt = lic.PRODUCT_LABELS.get(flags, "视频号下载")
     # ★ v2.0.19：码型说明要准确反映实际生成的码（ver=1/2/3/4）
-    if args.device:
+    if caps:
+        ver_txt = (f"ver=5（含能力位：{lib_caps_txt(caps)}）")
+    elif args.device:
         ver_txt = "ver=3（死绑单机）"
     elif args.max_devices is not None:
         ver_txt = (f"ver=4（限 {args.max_devices} 台）"
@@ -486,6 +512,9 @@ def main():
     p.add_argument("--feature", action="append", metavar="F",
                    help="功能位（可多次）：vc=视频号 / mp=公众号文章视频 / "
                         "all=两者。★不传则生成 ver=1 老码（仅视频号）")
+    p.add_argument("--caps", action="append", metavar="C",
+                   help="★v2.6.0 增值能力位（可多次）：like=点赞增强包。"
+                        "传了就生成 ver=5 码，可与视频号码叠加使用")
     p.set_defaults(func=cmd_gen)
 
     p = sub.add_parser("ledger", help="查台账（追溯谁泄露了码）")

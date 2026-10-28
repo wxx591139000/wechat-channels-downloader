@@ -103,21 +103,52 @@ _V4_PAYLOAD_LEN = 7
 _V4_MSG_PREFIX = b"SPHDLv4"
 MAX_DEV_UNLIMITED = 0           # maxdev=0 表示不限台数
 
+# ★ v2.6.0：ver=5 码型 —— 在视频号产品上叠加「能力位（caps）」
+#
+#   为什么不用产品线（product=4）：
+#     产品线是**互斥**的（v2.0.19 规则：一个码只解锁一条产品线）。
+#     如果把"点赞"做成 product=4，客户买了它就**不能再用视频号** —— 卖不出去。
+#     点赞是视频号的**增强能力**，不是并列功能。
+#
+#   载荷: ver(1) | tier(1) | days//8(1) | product(1) | caps(1) | maxdev(1) | rand(2)
+#   共 8 字节 + 10 字节 MAC
+#
+#   ★ 老码（ver=1/2/3/4）完全不受影响：靠首字节 ver 分流，caps 默认 0。
+_VERSION5 = 5
+_V5_PAYLOAD_LEN = 8
+_V5_MSG_PREFIX = b"SPHDLv5"
+
+# 能力位（caps 字节）—— 增值功能开关
+CAP_NONE = 0
+CAP_LIKE_STATS = 1 << 0     # 点赞/转发/推荐数展示 + 按点赞排序（增值功能）
+CAP_ALL_KNOWN = CAP_LIKE_STATS
+
+CAP_LABELS = {
+    CAP_LIKE_STATS: "点赞增强包",
+}
+
 VERSION_BOUND = _VERSION3      # 对外暴露：设备绑定型
 
 # 产品线（v2.0.19：视频号 4 档 + 公众号 1 个，共 5 个独立产品）
 PRODUCT_VIDEO = 1          # 视频号下载（基础产品，4 档位）
 PRODUCT_MP_ARTICLE = 2     # 公众号文章视频下载（不分档）
+# ★ v2.6.0：抖音批量下载（独立产品，不分档）
+#   客户要求：「把抖音跟公众号一样做成单独授权，并提示用户联系购买抖音授权」
+PRODUCT_DOUYIN = 3         # 抖音批量下载（不分档）
 
 PRODUCT_LABELS = {
     PRODUCT_VIDEO: "视频号下载",
     PRODUCT_MP_ARTICLE: "公众号文章视频下载",
+    PRODUCT_DOUYIN: "抖音批量下载",
 }
 
 # 兼容旧代码：把「产品」映射成「功能位」（内部判定仍用位掩码，便于扩展）
 FLAG_VIDEO_CHANNEL = PRODUCT_VIDEO            # 1
 FLAG_MP_ARTICLE_VIDEO = PRODUCT_MP_ARTICLE    # 2
-FLAG_ALL = 3
+FLAG_DOUYIN = PRODUCT_DOUYIN                  # 3
+# 注意：一个码只解锁一条产品线（v2.0.19 起的规则），
+# FLAG_ALL 仅作历史兼容，不代表"全产品"
+FLAG_ALL = 7
 
 FEATURE_LABELS = PRODUCT_LABELS
 
@@ -190,7 +221,9 @@ def _mac(payload: bytes, ver: int = 1) -> bytes:
     secret = get_secret()
     if not secret:
         return b"\x00" * _MAC_LEN
-    if ver == _VERSION4:
+    if ver == _VERSION5:
+        prefix = _V5_MSG_PREFIX
+    elif ver == _VERSION4:
         prefix = _V4_MSG_PREFIX
     elif ver == _VERSION3:
         prefix = _V3_MSG_PREFIX
@@ -291,7 +324,7 @@ def _group(code: str) -> str:
 # ---------------------------------------------------------------- 生成（作者侧）
 def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
               product: int = 0, device: str = "",
-              max_devices: int = None) -> str:
+              max_devices: int = None, caps: int = 0) -> str:
     """生成授权码（**仅作者侧使用**，依赖内置密钥；客户拿不到密钥）。
 
     tier: 视频号档位 500/1000/2000/20000；公众号产品传 0（不分档）
@@ -325,12 +358,22 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
             raise ValueError(f"不支持的档位: {tier}（可选 {sorted(TIER_TO_CODE)}）")
         prod = PRODUCT_VIDEO
         tier_code = TIER_TO_CODE[tier]
-    elif prod == PRODUCT_MP_ARTICLE:
-        # 公众号产品不分档：tier 固定为 0，忽略调用方传入的档位
+    elif prod in (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN):
+        # 公众号 / 抖音 不分档：tier 固定为 0，忽略调用方传入的档位
         tier = 0
         tier_code = 0
     else:
-        raise ValueError(f"不支持的产品线: {prod}（可选 1=视频号 / 2=公众号）")
+        raise ValueError(
+            f"不支持的产品线: {prod}（可选 1=视频号 / 2=公众号 / 3=抖音）")
+
+    # ---- ★ v2.6.0：能力位（caps）----
+    # caps>0 时强制走 ver=5 码型（能力位只能写在 ver=5 里）
+    caps = int(caps or 0)
+    if caps < 0 or caps > 255:
+        raise ValueError(f"caps 超出范围: {caps}")
+    if caps & ~CAP_ALL_KNOWN:
+        raise ValueError(f"caps 含未知位: {caps:#04x}"
+                         f"（已知 {CAP_ALL_KNOWN:#04x}）")
 
     if not get_secret():
         raise RuntimeError("未注入授权密钥（sphdl/_lic_key.py 缺失）→ 无法生成授权码")
@@ -347,7 +390,18 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
         else:
             dev_bind = device_bind_bytes(_components_from_display(str(device)))
 
-    if dev_bind is not None:
+    if caps > 0:
+        # ---- ver=5（能力位码，v2.6.0）----
+        # 载荷: ver(5) | tier(1) | days//8(1) | product(1) | caps(1) | maxdev(1) | rand(2)
+        # ★ 与设备绑定码互斥：设备绑定 + 能力位需要 ver=6，当前不支持（明确报错）
+        if dev_bind is not None:
+            raise ValueError(
+                "暂不支持「设备绑定码 + 能力位」组合；"
+                "请用限台数（max_devices）代替设备绑定")
+        md = min(255, max(0, int(max_devices or 0)))
+        payload = bytes([_VERSION5, tier_code, days_step, prod, caps, md]) + rand[:2]
+        blob = payload + _mac(payload, ver=_VERSION5)
+    elif dev_bind is not None:
         # ---- ver=3（设备绑定码，v2.0.19）----
         # 载荷: ver(3) | tier(1) | days//8(1) | product(1) | dev4(4) | rand(2)
         payload = (bytes([_VERSION3, tier_code, days_step, prod])
@@ -440,6 +494,19 @@ def verify_code(code: str) -> Optional[dict]:
         if product not in PRODUCT_LABELS:
             return None
         max_dev = int(payload[4])
+    elif ver == _VERSION5:
+        # ---- ver=5（能力位码，8B 载荷 + 10B MAC）★ v2.6.0 ----
+        if len(blob) < _V5_PAYLOAD_LEN + _MAC_LEN:
+            return None
+        payload = blob[:_V5_PAYLOAD_LEN]
+        mac = blob[_V5_PAYLOAD_LEN:_V5_PAYLOAD_LEN + _MAC_LEN]
+        if not hmac.compare_digest(mac, _mac(payload, ver=_VERSION5)):
+            return None
+        tier_code, days_step, product = payload[1], payload[2], payload[3]
+        if product not in PRODUCT_LABELS:
+            return None
+        caps = int(payload[4])
+        max_dev = int(payload[5])
     else:
         return None                          # 未知码型
 
@@ -456,8 +523,10 @@ def verify_code(code: str) -> Optional[dict]:
     days = days_step * 8
     info = {"tier": tier, "days": days, "ok": True, "ver": ver,
             "product": product,
+            # ★ v2.6.0：能力位（老码型恒为 0）
+            "caps": int(caps) if ver == _VERSION5 else 0,
             "flags": product,                # 兼容旧字段名
-            "features": [PRODUCT_LABELS[product]],
+            "features": [PRODUCT_LABELS.get(product, f"产品{product}")],
             "code": f"{CODE_PREFIX}-{_group(f'{CODE_PREFIX}-' + b32encode(blob))}"}
     if ver == _VERSION3:
         info["device_bound"] = True
@@ -466,7 +535,7 @@ def verify_code(code: str) -> Optional[dict]:
         info["device_bound"] = False
 
     # ★ v2.0.19：允许台数（ver=4 才有；其他码型为 None=不限制）
-    if ver == _VERSION4:
+    if ver in (_VERSION4, _VERSION5):
         info["max_devices"] = max_dev if max_dev > 0 else None
         info["device_limited"] = max_dev > 0
     else:
@@ -532,6 +601,43 @@ def is_mp_product(info: Optional[dict]) -> bool:
     return has_feature(info, PRODUCT_MP_ARTICLE)
 
 
+def has_capability(info: Optional[dict], cap: int) -> bool:
+    """判断授权是否含某个能力位（v2.6.0）。
+
+    ★ 能力位是**叠加**语义：客户可以同时激活「视频号码」+「点赞增强码」，
+      两码合并判断 —— 所以调用方应该遍历所有已激活的码，任一含该位即为 True。
+    """
+    if not info or not info.get("ok"):
+        return False
+    try:
+        return bool(int(info.get("caps") or 0) & int(cap))
+    except Exception:
+        return False
+
+
+def caps_labels(info: Optional[dict]) -> list:
+    """该授权含有的能力位名称列表（展示用）。"""
+    out = []
+    try:
+        c = int((info or {}).get("caps") or 0)
+    except Exception:
+        c = 0
+    for bit, name in CAP_LABELS.items():
+        if c & bit:
+            out.append(name)
+    return out
+
+
+def is_like_stats_product(info: Optional[dict]) -> bool:
+    """是否含「点赞增强包」能力（v2.6.0）。"""
+    return has_capability(info, CAP_LIKE_STATS)
+
+
+def is_douyin_product(info: Optional[dict]) -> bool:
+    """是否抖音产品（不分档）。★ v2.6.0"""
+    return has_feature(info, PRODUCT_DOUYIN)
+
+
 def label_of_product(info: Optional[dict]) -> str:
     """产品展示名（给界面用）。"""
     if not info:
@@ -539,6 +645,8 @@ def label_of_product(info: Optional[dict]) -> str:
     p = int(info.get("product") or 0)
     if p == PRODUCT_MP_ARTICLE:
         return "公众号视频版（不分档）"
+    if p == PRODUCT_DOUYIN:
+        return "抖音批量下载版（不分档）"
     return label_of_tier(info.get("tier") or 0)
 
 

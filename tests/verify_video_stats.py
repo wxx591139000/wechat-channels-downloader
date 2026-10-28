@@ -247,6 +247,15 @@ check("S11f ★转发数据仍解析并存盘（只是不显示）",
 check("S11g ★推荐数据仍解析并存盘（只是不显示）",
       getattr(r_b, "recommend_count", 0) == 9, str(getattr(r_b, "recommend_count", 0)))
 
+# ★ v2.6.0：「点赞增强包」是增值功能，未授权时统计列一律显示「—」。
+#   本测试验的是**显示格式**（万级换算），所以先打开授权开关。
+app2._like_stats_ok = True
+app2._refresh_like_column()
+# ★ 关键：行值只在 _add_row 时生成过一次，改授权状态后必须**重绘所有行**
+for _rid in list(app2._row_of.keys()):
+    app2._update_row(_rid)
+app2.root.update()
+
 # 单元格显示
 for rid in ("r1", "b", "c"):
     iid = app2._row_of.get(rid)
@@ -259,6 +268,18 @@ check("S11h 高赞显示为万级",
 check("S11i 零赞显示「—」",
       app2.tree.item(app2._row_of["c"], "values")[6] == "—",
       str(app2.tree.item(app2._row_of["c"], "values")[6]))
+
+# ★ v2.6.0：未授权（增值功能未购买）时点赞列一律「—」
+app2._like_stats_ok = False
+app2._update_row("b")
+app2.root.update()
+locked = app2.tree.item(app2._row_of["b"], "values")[6]
+print(f"  未授权时高赞行: {locked!r}")
+check("S11j ★未授权时点赞列显示「—」（增值功能锁住）",
+      locked == "—", str(locked))
+app2._like_stats_ok = True
+app2._update_row("b")
+app2.root.update()
 
 # S12 按点赞排序
 app2._sort_col = "like"
