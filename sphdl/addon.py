@@ -212,6 +212,19 @@ def _extract_encfilekey(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _scan_stat_hits(obj, limit: int = 15) -> list:
+    """扫出 payload 里像统计数的字段路径（诊断用，容错、不抛异常）。
+
+    复用 parser.stat_schema_report 的判据（键名含 like/forward/share/
+    fav/comment/count/num/stat/praise/digg/rec/thumb/view/play/collect）。
+    """
+    try:
+        from .parser import stat_schema_report
+        return stat_schema_report(obj, limit=limit)
+    except Exception:
+        return []
+
+
 class SphAddon:
     # ★ v2.2.4：只拦截微信域名，其余流量**原样透传**（不 MITM）
     #
@@ -408,6 +421,13 @@ class SphAddon:
                 "result_len": len(str(res)),
                 "args_head": str(args)[:400],
                 "result_head": str(res)[:1200],
+                # ★ v2.5.3：扫描**完整请求体**里所有像统计数的字段。
+                #   背景（2026-10-27）：客户报「点赞列全是「—」」，
+                #   实测 objectDesc 里根本没有点赞字段（只有 video_play_len
+                #   这类技术字段）→ 说明点赞数来自**另一个接口**。
+                #   有了这个字段，扫一遍 bridge_calls.jsonl 就能定位是哪个
+                #   cmdName 携带点赞数，不用再猜。
+                "stat_hits": _scan_stat_hits(obj),
             }
             with (self._bridge_diag_dir / "bridge_calls.jsonl").open(
                     "a", encoding="utf-8") as f:
@@ -424,6 +444,22 @@ class SphAddon:
                     f"(args={len(str(args))}B result={len(str(res))}B)")
             except Exception:
                 pass
+        # ★ v2.5.3：只要某条命令带疑似统计字段，立刻打一条显眼日志
+        #   （客户报「点赞列全是—」，需要定位点赞数到底来自哪个接口）
+        try:
+            _hits = _scan_stat_hits(obj, limit=6)
+            if _hits:
+                seen = getattr(self, "_stat_cmd_logged", None)
+                if seen is None:
+                    self._stat_cmd_logged = set()
+                    seen = self._stat_cmd_logged
+                if cmd not in seen:
+                    seen.add(cmd)
+                    logger.info(
+                        f"📊 【找到疑似统计字段】cmdName={cmd} → "
+                        + " ｜ ".join(_hits))
+        except Exception:
+            pass
 
     # ---------- ⓿ TLS 握手前：非微信域名一律裸透传（v2.2.4）----------
     def tls_clienthello(self, data: _tls.ClientHelloData):

@@ -3,6 +3,55 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.5.3] - 2026-10-27
+
+- v2.5.3 统计字段定位诊断
+### 诊断增强：定位「点赞数到底来自哪个接口」
+
+客户报障（延续 v2.5.0）：「点赞列都是「—」，但真实视频有点赞数」
+
+**v2.5.2 的自动诊断给出了决定性线索**：
+
+```
+stat_schema.txt 内容（真实捕获）：
+  media[0].video_play_len=23
+  media[0].codec_info.thumb_score=0.0
+  media[0].media_cdn_info.pcdn_timeout_retry_count=1
+  mod_feed_info.modify_button_status=0
+```
+
+**结论：`objectDesc` 里根本没有点赞/转发字段**，只有播放时长、缩略图评分
+这类技术字段 —— 说明点赞数**来自另一个 bridge 接口**，不在 objectDesc 里。
+所以再怎么往 `object_desc` 里找都找不到，必须换方向。
+
+#### 新增：全量 bridge 体扫描
+
+`_dump_bridge_diag` 增加 `stat_hits` 字段：
+对每条 bridge 调用的**完整 body**（不只是 objectDesc）扫出所有像统计数的
+字段路径，写进 `diag_bridge/bridge_calls.jsonl`。
+
+同时日志里会出现醒目的一行（每种 cmdName 只报一次）：
+
+```
+📊 【找到疑似统计字段】cmdName=xxx → likeCount=8888 ｜ forwardCount=99
+```
+
+**用法**：建 `开启原始数据记录.txt` → 重启 → 播几个视频 → 看日志那行，
+就能知道点赞数由哪个 cmdName 携带，然后按真实字段名接上。
+
+#### 扫描判据（已验证）
+
+键名含以下词之一的数值字段会被列出：
+`like / fav / forward / share / comment / count / num / digg / praise /
+rec / thumb / stat / view / play / collect / transmit`
+
+本机已用 4 种模拟结构验证（扁平 / 嵌套 2 层 / JSON 字符串 / 无统计），
+均能正确定位或正确判定"无"。
+
+### 待办
+
+拿到真实 `cmdName` 后，需要在 `extract_stats` 里补上对应的数据源
+（目前只从 objectDesc 提取，而 objectDesc 里没有点赞）。
 ## [2.5.2] - 2026-10-27
 
 - v2.5.2 窗口/登录/提速/诊断
