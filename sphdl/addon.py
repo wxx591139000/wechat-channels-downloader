@@ -350,6 +350,7 @@ class SphAddon:
         self._pending_lock = _threading.Lock()
         # ---- ⚡ 批量拉取（v2.0.8）----
         self.batch_mode = False       # GUI「⚡ 批量拉取」开关
+        self.scroll_height = 0        # ★ v2.7.4 页面上报的 scrollHeight
         self.batch_count = 0          # 批量期间新增捕获数
         self.rejected_count = 0       # 列表满档被 GUI 拒收（未加载）的视频数（v2.0.17）
         self._batch_active = False    # 页面滚动驱动是否在跑
@@ -622,6 +623,14 @@ class SphAddon:
                 q = parse_qs(urlparse(req.path).query)
                 pid = (q.get("id") or [""])[0]
                 focused = (q.get("f") or [""])[0] == "1"
+                # ★ v2.7.4：记录页面上报的 scrollHeight（h 参数）。
+                #   判「到底」用它比「有没有新捕获」可靠得多：
+                #   页面还在变长 = 还在加载；高度不再增长 = 真到底了。
+                try:
+                    _h = (q.get("h") or ["0"])[0]
+                    self.scroll_height = int(_h)
+                except Exception:
+                    pass
                 if self.batch_mode:
                     if focused and pid:
                         self._batch_page = pid

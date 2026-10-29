@@ -3377,8 +3377,12 @@ class App:
         def _loop():
             last_count = -1
             last_change = time.time()
-            idle_rounds = 0          # 连续多少次兜底滚动后仍无新增
-            MAX_IDLE_ROUNDS = 5      # 5 次 × 12 秒 = 60 秒无新增 → 停
+            idle_rounds = 0          # 连续多少次「页面高度不变」
+            MAX_IDLE_ROUNDS = 8      # 8 次 × ~13 秒 ≈ 100 秒高度不变 → 才判到底
+            # ★ v2.7.4：从 5 提到 8。实测 5 次太激进 ——
+            #   回放列表的分页是「滚到接近底部才加载」，单发滚轮推进慢，
+            #   5 次（60 秒）可能还没滚到触发点就被判到底（客户 118 条即被误停）。
+            grew_at_least_once = False
             while not self._bw_stop.is_set():
                 self._bw_stop.wait(4.0)
                 if self._bw_stop.is_set():
@@ -3409,26 +3413,60 @@ class App:
                         return
 
                     idle_rounds += 1
-                    if idle_rounds > MAX_IDLE_ROUNDS:
-                        self.push_log("ok",
-                            f"⚡ 连续 {MAX_IDLE_ROUNDS} 次兜底滚动都没有新内容，"
-                            f"判定已拉到底，自动停止。本次共抓 "
-                            f"{getattr(self.addon, 'batch_count', 0)} 条")
-                        self.ui_q.put(("batch_autostop", "到底"))
-                        return
 
+                    # ★ v2.7.4 关键修正：判「到底」不能只看「有没有新捕获」。
+                    #   实测（客户 2026-10-29）：连续 5 次兜底无新增就被判到底（118 条），
+                    #   但客户手动一翻**还有内容**。
+                    #   原因：单发滚轮只滚一小段，可能还没滚到触发加载的位置；
+                    #         也可能这一屏全是已抓过的重复条目。
+                    #   正确判据 = **滚动位置不再变化**（真的滚不动了才叫到底）。
+                    #   还滚得动 → 继续滚，绝不提前停。
                     from .autopage import find_video_window, post_wheel
                     hwnd, rect = find_video_window()
                     if not hwnd or not rect:
                         continue
+                    # ★ 用页面自己上报的 scrollHeight 判「还长不长」
+                    pos_before = getattr(self.addon, "scroll_height", 0)
                     cx = (rect[0] + rect[2]) // 2
                     cy = (rect[1] + rect[3]) // 2
-                    post_wheel(hwnd, -120 * 3, cx, cy)
+                    # 滚大一点（一次 6 格），少滚几轮就能到位
+                    post_wheel(hwnd, -120 * 6, cx, cy)
+                    time.sleep(0.8)
+                    pos_after = getattr(self.addon, "scroll_height", 0)
+
+                    moved = (pos_before is None or pos_after is None
+                             or pos_after != pos_before)
+                    if moved:
+                        # 滚动位置变了 → 页面还有内容，继续滚，计数清零
+                        idle_rounds = 0
+                        grew_at_least_once = True
+                        if not getattr(self, "_bw_no_grow_warned", False) and \
+                                time.time() - last_change > 60:
+                            self._bw_no_grow_warned = True
+                            self.push_log("warn",
+                                "⚠ 页面滚动了 60 秒但没有新的回放数据进来。\n"
+                                "可能这一屏都是已抓过的条目，也可能该栏目需要"
+                                "点击「加载更多」。\n"
+                                "若你手动能看到更多内容，请把日志发给我排查。")
+                        last_change = time.time()
+                        self.push_log("info",
+                                      "⚡ 页面脚本未滚动，已用滚轮兜底推进"
+                                      "（页面还有内容，继续）")
+                        continue
+
+                    # 滚不动了 → 才是真的到底
+                    # 曾增长过的页面，再多等 3 轮确认（分页可能有延迟）
+                    need = MAX_IDLE_ROUNDS + (3 if grew_at_least_once else 0)
+                    if idle_rounds >= need:
+                        self.push_log("ok",
+                            f"⚡ 连续 {need} 次滚动页面高度都没变化，"
+                            f"判定已拉到底，自动停止。本次共抓 "
+                            f"{getattr(self.addon, 'batch_count', 0)} 条")
+                        self.ui_q.put(("batch_autostop", "到底"))
+                        return
                     self.push_log("info",
-                                  f"⚡ 页面脚本 12 秒无进展，滚轮兜底第 "
-                                  f"{idle_rounds}/{MAX_IDLE_ROUNDS} 次"
-                                  "（不会把窗口顶到最前）")
-                    last_change = time.time()   # 给 JS 一轮反应时间
+                                  f"⚡ 页面高度未变（{idle_rounds}/{need}），"
+                                  "再试一次")
                 except Exception:
                     continue
 
