@@ -461,6 +461,25 @@ class SphAddon:
         except Exception:
             pass
 
+    def _diag_on(self) -> bool:
+        """诊断开关是否开启（★动态读取，改文件即时生效，不用重启）。
+
+        v2.6.5：原来 `_bridge_diag` 在 GUI 初始化时读一次，
+        客户每次都要重启程序才能开/关诊断 —— 实测太折腾。
+        这里按 3 秒 TTL 重新读开关文件，兼顾即时性与开销。
+        """
+        now = time.time()
+        cached = getattr(self, "_diag_cache", None)
+        if cached and now - cached[0] < 3.0:
+            return cached[1]
+        try:
+            base = Path(config.BASE_DIR) if hasattr(config, "BASE_DIR") else Path(".")
+            on = (base / "开启原始数据记录.txt").exists()
+        except Exception:
+            on = False
+        self._diag_cache = (now, on)
+        return on
+
     def _dump_full_body(self, body: bytes):
         """把含 objectDesc 的完整 bridge body 存一份（仅诊断模式，v2.5.4）。
 
@@ -657,7 +676,7 @@ class SphAddon:
                         and self.comments_enabled:
                     self._parse_q.put((body, "__comment__"))
                 # ★ v2.2.11：诊断模式下记录「非视频」的 bridge 调用
-                if self._bridge_diag:
+                if self._bridge_diag or self._diag_on():
                     self._dump_bridge_diag(body)
                 flow.response = http.Response.make(
                     200, b"OK", {"Content-Type": "text/plain"})
@@ -671,9 +690,14 @@ class SphAddon:
         #     所以点赞必然在**同一响应体的兄弟字段**里，
         #     必须存完整 body 才能看到（旧的 bridge 诊断只记录"不含 objectDesc"
         #     的调用，正好把这条跳过了）。
-        if self._bridge_diag and is_bridge:
+        # ★ v2.6.5：诊断范围扩大
+        #   原来只存「含 objectDesc」的 body，但**直播回放列表不含 objectDesc**
+        #   （它是 pc_finderinit + scope=finderLive，23KB），正好被跳过。
+        #   现在：含 objectDesc 的存，**或者** body > 8KB 的也存（大响应基本都是数据）。
+        if (self._bridge_diag or self._diag_on()) and is_bridge:
             try:
-                self._dump_full_body(body)
+                if len(body) > 8000 or b"object_desc" in body or b"objectDesc" in body:
+                    self._dump_full_body(body)
             except Exception:
                 pass
         # 先回 OK（微信侧不受任何延迟影响），再把 body 交给工作线程解析。
