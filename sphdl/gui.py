@@ -2801,8 +2801,10 @@ class App:
                                     command=self._on_batch_toggle)
         self.btn_batch.pack(side="left", padx=(16, 2))
         self._tt(self.btn_batch,
-                 "批量拉取整个视频号：整页入库，并让当前选中的视频号窗口"
-                 "自动滚动加载全部视频。\n"
+                 "批量拉取整个视频号／直播回放：整页入库，并让当前选中的"
+                 "视频号窗口自动滚动加载全部内容。\n"
+                 "★ 短视频和直播回放都用这一个按钮，自动识别，不用分开点。\n"
+                 "★ 只滚「当前聚焦」的窗口，不会把它顶到最前、不抢焦点。\n"
                  "拉到底自动停止；再点一次提前停止。\n"
                  "注意：被其他窗口遮挡时仍持续滚动；切换拉取对象需"
                  "点击目标视频号窗口。")
@@ -2852,16 +2854,6 @@ class App:
                                  style="DyLocked.TButton",
                                  command=self._on_douyin)
         self.btn_dy.pack(side="left", padx=(6, 2))
-        # ★ v2.7.0：直播回放自动翻页（帮用户滑列表，逐页抓回放）
-        self.btn_autopage = ttk.Button(capf, text="🔁 自动翻页", width=13,
-                                      command=self._on_autopage)
-        self.btn_autopage.pack(side="left", padx=(6, 2))
-        self._tt(self.btn_autopage,
-                 "自动帮你在「微信视频号」窗口里往下滑，把回放列表逐页抓进清单。\n"
-                 "用途：博主直播回放有几百条、一页只显示 8 条时，不用手动滑 30 多次。\n\n"
-                 "使用前：先把视频号窗口打开、停在回放列表上。\n"
-                 "判定到底：连续 3 轮没新增就自动停。\n"
-                 "随时可点【停止】，不影响已抓到的条目。")
         self._tt(self.btn_dy,
                  "【抖音批量下载】**独立产品**，需专用授权码（与视频号/公众号分开）。\n"
                  "未授权时点它会提示购买方式。\n\n"
@@ -3349,6 +3341,70 @@ class App:
         """「⚡ 批量拉取」按钮（v2.0.8）：开/关一次。"""
         self._set_batch(not self.addon.batch_mode)
 
+    # ────────── 批量拉取的滚轮兜底（v2.7.2）──────────
+    def _start_batch_wheel_fallback(self):
+        """批量拉取期间，若页面内 JS 滚动长时间没进展，就用滚轮兜底。
+
+        ★ 为什么需要（2026-10-29）：
+          批量拉取的滚动靠**页面内 JS**（`el.scrollTop = scrollHeight`）。
+          短视频流用这套很稳，但**直播回放列表是另一种布局**
+          （卡片式/可能是嵌套滚动容器），JS 可能找不到正确的滚动元素 → 不翻页。
+          实测客户手动滚轮能让回放列表动，所以加一路滚轮兜底。
+
+        ★ 为什么不抢焦点：
+          只用 PostMessage(WM_MOUSEWHEEL) 直接投递给窗口，
+          **不调 SetForegroundWindow / 不移动光标** ——
+          客户明确要求「翻动时不要自动把回放窗口顶到最前」。
+        """
+        if getattr(self, "_bw_stop", None) is not None:
+            return
+        import threading as _th
+        self._bw_stop = _th.Event()
+
+        def _loop():
+            last_count = -1
+            last_change = time.time()
+            while not self._bw_stop.is_set():
+                self._bw_stop.wait(4.0)
+                if self._bw_stop.is_set():
+                    break
+                try:
+                    if not getattr(self.addon, "batch_mode", False):
+                        break
+                    n = self.addon.capture_count
+                    if n != last_count:
+                        last_count = n
+                        last_change = time.time()
+                        continue
+                    # 超过 12 秒没有任何新捕获 → JS 可能没在滚，兜底滚一次
+                    if time.time() - last_change < 12:
+                        continue
+                    from .autopage import find_video_window, post_wheel
+                    hwnd, rect = find_video_window()
+                    if not hwnd or not rect:
+                        continue
+                    cx = (rect[0] + rect[2]) // 2
+                    cy = (rect[1] + rect[3]) // 2
+                    post_wheel(hwnd, -120 * 3, cx, cy)
+                    self.push_log("info",
+                                  "⚡ 页面脚本 12 秒无进展，已用滚轮兜底滚动一次"
+                                  "（不会把窗口顶到最前）")
+                    last_change = time.time()   # 给 JS 一轮反应时间
+                except Exception:
+                    continue
+
+        self._bw_thread = _th.Thread(target=_loop, daemon=True)
+        self._bw_thread.start()
+
+    def _stop_batch_wheel_fallback(self):
+        ev = getattr(self, "_bw_stop", None)
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+            self._bw_stop = None
+
     def _set_batch(self, on: bool, auto: str = ""):
         """批量拉取开关（v2.0.8；v2.0.17 抽出以便「满档自动停止」复用）。
 
@@ -3365,18 +3421,22 @@ class App:
             self.natural_var.set(False)
             self.addon._batch_active = True
             self.btn_batch.config(text="■ 停止批量")
+            self._start_batch_wheel_fallback()
             self.push_log("ok",
                 "⚡ 批量拉取已开启：列表数据将整页入库。\n"
-                "只滚动「当前选中」的视频号窗口（最近点击/获得焦点者）；"
-                "即使被 Excel 等窗口遮挡也持续滚动，直到点『停止拉取』"
-                "或拉到底自动停止。\n"
-                "若要切换拉取对象，点击/选中目标视频号窗口即可。\n"
-                "（若页面是旧版本注入的未带驱动，请重新打开一次视频号页面）")
+                "【短视频】和【直播回放】都用这一个按钮，会自动识别：\n"
+                "  · 短视频：整页入库 + 逐屏往下滚\n"
+                "  · 直播回放（≥10 分钟）：整页全部入库 + 滚到底\n"
+                "滚动只作用于「当前选中」的视频号窗口，"
+                "**不会把窗口顶到最前、不抢焦点**；\n"
+                "被其他窗口遮挡也继续滚；拉到底或点『停止批量』才停。\n"
+                "若要切换拉取对象，点一下目标视频号窗口即可。")
         else:
             self.addon.natural_capture = self.cfg.natural_capture
             self.natural_var.set(self.cfg.natural_capture)
             self.addon._batch_active = False
             self.btn_batch.config(text="⚡ 批量拉取")
+            self._stop_batch_wheel_fallback()
             if auto:
                 pass          # 自动停止的提示由调用方（满档）给出，避免重复
             else:
@@ -4593,23 +4653,6 @@ class App:
         except Exception:
             pass
         return has_dy
-
-    # ────────────────── 自动翻页（v2.7.0）──────────────────
-    def _on_autopage(self):
-        """打开「自动翻页抓取」小窗。"""
-        try:
-            w = getattr(self, "_ap_win", None)
-            if w is not None and getattr(w, "_alive", lambda: False)():
-                w.win.deiconify()
-                w.win.lift()
-                return
-        except Exception:
-            pass
-        try:
-            from .autopage_ui import AutoPageWindow
-            self._ap_win = AutoPageWindow(self)
-        except Exception as e:                      # noqa: BLE001
-            messagebox.showerror("自动翻页", f"打开失败：{e}")
 
     def _on_douyin(self):
         """「🎵 抖音批量下载」入口：未授权给购买引导，已授权开窗口。
@@ -5833,26 +5876,6 @@ class App:
                     w.apply_login_done(item[1], item[2])
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
-        elif kind in ("ap_log", "ap_prog"):
-            # ★ v2.7.0：自动翻页进度回填
-            w = getattr(self, "_ap_win", None)
-            if w is None or not getattr(w, "_alive", lambda: False)():
-                return
-            try:
-                if kind == "ap_log":
-                    w.apply_log(item[1], item[2] if len(item) > 2 else "info")
-                else:
-                    w.apply_progress(item[1], item[2], item[3])
-            except Exception:
-                pass
-        elif kind == "autopage_done":
-            # ★ v2.7.0：自动翻页结束
-            try:
-                w = getattr(self, "_ap_win", None)
-                if w is not None and w._alive():
-                    w._on_done(item[1] if len(item) > 1 else {})
-            except Exception as e:                  # noqa: BLE001
-                self.push_log("warn", f"自动翻页事件处理出错：{e}")
         elif kind == "revoke_result":
             # ★ v2.3.0：吊销名单校验结果
             try:
