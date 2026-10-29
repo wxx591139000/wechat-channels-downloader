@@ -3341,6 +3341,19 @@ class App:
         """「⚡ 批量拉取」按钮（v2.0.8）：开/关一次。"""
         self._set_batch(not self.addon.batch_mode)
 
+    # ────────── 网络探测（v2.7.3）──────────
+    @staticmethod
+    def _net_ok(timeout: float = 2.0) -> bool:
+        """粗判当前有没有外网（断网时不该继续空转滚动）。"""
+        import socket
+        for host, port in (("www.qq.com", 443), ("channels.weixin.qq.com", 443)):
+            try:
+                socket.create_connection((host, port), timeout=timeout).close()
+                return True
+            except Exception:
+                continue
+        return False
+
     # ────────── 批量拉取的滚轮兜底（v2.7.2）──────────
     def _start_batch_wheel_fallback(self):
         """批量拉取期间，若页面内 JS 滚动长时间没进展，就用滚轮兜底。
@@ -3364,6 +3377,8 @@ class App:
         def _loop():
             last_count = -1
             last_change = time.time()
+            idle_rounds = 0          # 连续多少次兜底滚动后仍无新增
+            MAX_IDLE_ROUNDS = 5      # 5 次 × 12 秒 = 60 秒无新增 → 停
             while not self._bw_stop.is_set():
                 self._bw_stop.wait(4.0)
                 if self._bw_stop.is_set():
@@ -3375,10 +3390,33 @@ class App:
                     if n != last_count:
                         last_count = n
                         last_change = time.time()
+                        idle_rounds = 0
                         continue
-                    # 超过 12 秒没有任何新捕获 → JS 可能没在滚，兜底滚一次
                     if time.time() - last_change < 12:
                         continue
+
+                    # ★ v2.7.3：先看网络。WiFi 断了继续滚毫无意义 ——
+                    #   客户实测「一直自动翻页但只抓到 59 条」，就是断网后
+                    #   工具不知道，仍每 12 秒滚一次，白滚 7 分钟。
+                    if not self._net_ok():
+                        self.push_log("warn",
+                            f"⚠ 网络已断开（或视频号页面连不上），"
+                            f"已自动停止批量拉取。当前已抓 "
+                            f"{getattr(self.addon, 'batch_count', 0)} 条，"
+                            "恢复网络后重新点『⚡ 批量拉取』可继续"
+                            "（已抓过的不会重复）")
+                        self.ui_q.put(("batch_autostop", "网断"))
+                        return
+
+                    idle_rounds += 1
+                    if idle_rounds > MAX_IDLE_ROUNDS:
+                        self.push_log("ok",
+                            f"⚡ 连续 {MAX_IDLE_ROUNDS} 次兜底滚动都没有新内容，"
+                            f"判定已拉到底，自动停止。本次共抓 "
+                            f"{getattr(self.addon, 'batch_count', 0)} 条")
+                        self.ui_q.put(("batch_autostop", "到底"))
+                        return
+
                     from .autopage import find_video_window, post_wheel
                     hwnd, rect = find_video_window()
                     if not hwnd or not rect:
@@ -3387,7 +3425,8 @@ class App:
                     cy = (rect[1] + rect[3]) // 2
                     post_wheel(hwnd, -120 * 3, cx, cy)
                     self.push_log("info",
-                                  "⚡ 页面脚本 12 秒无进展，已用滚轮兜底滚动一次"
+                                  f"⚡ 页面脚本 12 秒无进展，滚轮兜底第 "
+                                  f"{idle_rounds}/{MAX_IDLE_ROUNDS} 次"
                                   "（不会把窗口顶到最前）")
                     last_change = time.time()   # 给 JS 一轮反应时间
                 except Exception:
@@ -3437,8 +3476,12 @@ class App:
             self.addon._batch_active = False
             self.btn_batch.config(text="⚡ 批量拉取")
             self._stop_batch_wheel_fallback()
-            if auto:
-                pass          # 自动停止的提示由调用方（满档）给出，避免重复
+            if auto == "网断":
+                pass          # 提示已由兜底线程给出
+            elif auto == "到底":
+                pass          # 同上
+            elif auto:
+                pass          # 满档，由调用方给出
             else:
                 self.push_log("info",
                     f"⚡ 批量拉取已停止（本次新增 {self.addon.batch_count} 条，"
@@ -5876,6 +5919,12 @@ class App:
                     w.apply_login_done(item[1], item[2])
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
+        elif kind == "batch_autostop":
+            # ★ v2.7.3：兜底判定「网断 / 到底」→ 真正关掉批量模式
+            try:
+                self._set_batch(False, auto=str(item[1] if len(item) > 1 else ""))
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"自动停止批量出错：{e}")
         elif kind == "revoke_result":
             # ★ v2.3.0：吊销名单校验结果
             try:
