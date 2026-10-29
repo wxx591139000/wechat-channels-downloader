@@ -522,7 +522,19 @@ def main():
         args.gui = True
 
     if args.gui:
-        logger.debug_enabled = True  # GUI 模式：全流量日志（诊断用，后续可改为开关）
+        # ★ v2.7.5：GUI 模式**默认关闭**全流量日志。
+        #   原来强制 True，导致每个 HTTP 请求一行 DIM（实测占日志 76%），
+        #   批量拉取时把 Text 控件灌爆 → 界面卡死。
+        #   需要诊断时：设置环境变量 SPHDL_DEBUG=1，或建 `开启调试日志.txt`。
+        import os as _os
+        _dbg = _os.environ.get("SPHDL_DEBUG", "").strip() in ("1", "true", "yes")
+        try:
+            from pathlib import Path as _P
+            if (_P(__file__).resolve().parent / "开启调试日志.txt").exists():
+                _dbg = True
+        except Exception:
+            pass
+        logger.debug_enabled = _dbg
         # 必须走 gui.main()（内含 Windows 单实例互斥检查），
         # 不能直接 App().run() —— 那样会绕过互斥导致多实例抢端口/抢代理。
         from sphdl import gui as sphdl_gui

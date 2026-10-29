@@ -99,6 +99,11 @@ class Logger:
             except Exception:
                 pass
             self._write_file(f"[{ts}] [{level.upper():<5}] {msg}")
+            # ★ v2.7.5：dim（每个 HTTP 请求一行）**只落盘，不推给 GUI**。
+            #   实测批量拉取时 DIM 占日志 76%（3000 行里 2294 行），
+            #   Text 控件被灌爆 → 界面卡死。落盘仍完整，排查时看日志文件即可。
+            if level == "dim":
+                return
             for fn in list(self._subscribers):
                 try:
                     fn(level, msg)

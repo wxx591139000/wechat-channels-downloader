@@ -351,6 +351,7 @@ class SphAddon:
         # ---- ⚡ 批量拉取（v2.0.8）----
         self.batch_mode = False       # GUI「⚡ 批量拉取」开关
         self.scroll_height = 0        # ★ v2.7.4 页面上报的 scrollHeight
+        self.batch_done_at = 0.0      # ★ v2.7.5 JS 判定"到底"的时间戳
         self.batch_count = 0          # 批量期间新增捕获数
         self.rejected_count = 0       # 列表满档被 GUI 拒收（未加载）的视频数（v2.0.17）
         self._batch_active = False    # 页面滚动驱动是否在跑
@@ -655,6 +656,9 @@ class SphAddon:
             body = req.content or b""
             self.last_batch_ts = time.time()
             if b"batch_done" in body:
+                # ★ v2.7.5：记下 JS 判"到底"的时间。GUI 的滚轮兜底看到它
+                #   就立刻停手 —— 否则 JS 已判完，兜底还会白滚 11 次（实测）。
+                self.batch_done_at = time.time()
                 if self._batch_active:
                     self._batch_active = False
                     logger.ok(f"⚡ 批量拉取完成：已滚动到列表末尾"

@@ -3390,6 +3390,16 @@ class App:
                 try:
                     if not getattr(self.addon, "batch_mode", False):
                         break
+                    # ★ v2.7.5：页面 JS 已经判定到底 → 兜底立刻收手。
+                    #   实测 v2.7.4 出现「JS 18:43:47 判完，兜底又白滚 11 次
+                    #   到 18:44:37」的重复劳动，也是卡顿来源之一。
+                    if getattr(self.addon, "batch_done_at", 0):
+                        self.push_log(
+                            "ok",
+                            f"⚡ 页面已报告滚动到底"
+                            f"（本次共抓 {getattr(self.addon, 'batch_count', 0)} 条），"
+                            "兜底停止")
+                        return
                     n = self.addon.capture_count
                     if n != last_count:
                         last_count = n
@@ -3464,9 +3474,12 @@ class App:
                             f"{getattr(self.addon, 'batch_count', 0)} 条")
                         self.ui_q.put(("batch_autostop", "到底"))
                         return
-                    self.push_log("info",
-                                  f"⚡ 页面高度未变（{idle_rounds}/{need}），"
-                                  "再试一次")
+                    # ★ v2.7.5：这类过程日志改成只在 1/2/4/8 轮打一次，
+                    #   避免每 6 秒一条把日志框刷满（也是卡顿来源）
+                    if idle_rounds in (1, 2, 4, 8, 16):
+                        self.push_log("info",
+                                      f"⚡ 页面高度未变（{idle_rounds}/{need}），"
+                                      "再试一次")
                 except Exception:
                     continue
 
