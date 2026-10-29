@@ -89,6 +89,9 @@ class AutoPageWindow:
         self.btn_stop.pack(side="left", padx=(8, 0))
         ttk.Button(btnbar, text="🔄 重新检测窗口",
                    command=self._refresh_target).pack(side="left", padx=(8, 0))
+        # ★ v2.7.1：先滚一次验证，别等跑 40 页才发现没生效
+        ttk.Button(btnbar, text="👁 测试滚一次",
+                   command=self._test_scroll).pack(side="left", padx=(8, 0))
 
         # 进度
         self.pb = ttk.Progressbar(pad, mode="determinate", maximum=100)
@@ -168,6 +171,48 @@ class AutoPageWindow:
         self.pager.start()
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
+
+    def _test_scroll(self):
+        """只滚一次，让客户肉眼确认页面动没动（比跑 40 页再判定快得多）。"""
+        if not self._alive():
+            return
+        try:
+            from .autopage import activate_window, find_video_window, \
+                post_wheel, send_wheel, set_cursor_pos, get_cursor_pos, WHEEL_DELTA
+            hwnd, rect = find_video_window()
+            if not hwnd:
+                self._log("⚠ 没找到视频号窗口 —— 请先打开「微信视频号」"
+                          "并停在回放列表上", "warn")
+                return
+            import win32gui
+            title = win32gui.GetWindowText(hwnd) or ""
+            cx = (rect[0] + rect[2]) // 2
+            cy = (rect[1] + rect[3]) // 2
+            fg = activate_window(hwnd)
+            target = hwnd
+            try:
+                sub = win32gui.WindowFromPoint((cx, cy))
+                if sub and win32gui.GetAncestor(sub, 2) == hwnd:
+                    target = sub
+            except Exception:
+                pass
+            old = get_cursor_pos()
+            try:
+                set_cursor_pos(cx, cy)
+                import time as _t
+                _t.sleep(0.1)
+                send_wheel(-WHEEL_DELTA * 3)
+                post_wheel(target, -WHEEL_DELTA * 3, cx, cy)
+                _t.sleep(0.05)
+            finally:
+                set_cursor_pos(*old)
+            self._log(f"测试滚动已发出 —— 目标「{title[:20]}」"
+                      f"{rect[2]-rect[0]}×{rect[3]-rect[1]} "
+                      f"前台={'是' if fg else '否'}", "ok")
+            self._log("请现在看一眼视频号窗口：页面往下动了吗？"
+                      "动了就点【开始自动翻页】；没动请把这行信息发给我。")
+        except Exception as e:                      # noqa: BLE001
+            self._log(f"❌ 测试滚动失败：{type(e).__name__}: {e}", "err")
 
     def _stop(self):
         if self.pager:

@@ -3,6 +3,65 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.7.1] - 2026-10-29
+
+- v2.7.1 修复滚动无效
+### 修复：自动翻页「一条没抓到、页面也没翻页」
+
+客户实测反馈：点了开始，3 页全无新增，视频号页面纹丝不动。
+
+#### 根因（两个）
+
+**① 滚轮打错了窗口**
+
+上一版只做「把光标移到窗口中心 + SendInput 滚轮」。
+但**滚轮事件的接收者是"光标下最顶层窗口"** —— 客户刚点过我们工具的按钮，
+视频号窗口在后台，滚轮就打在了别的窗口上，页面自然不动。
+
+**② 一个 AttributeError**
+
+```
+'W AutoPageWindow' object has no attribute 'winfo_exists'
+```
+GUI 事件处理里对包装类调了 Tk 的 `winfo_exists()`，应该是 `_alive()`。
+导致翻页结束后状态栏不更新（客户以为卡住了）。
+
+#### 修复
+
+1. **强制前置窗口**：`activate_window()`
+   - `ShowWindow` + `SetForegroundWindow`
+   - 失败时用 `AttachThreadInput` 绕过 Windows 前台锁
+   - 再失败用「模拟按 ALT + SetForegroundWindow」老技巧
+   - 校验 `GetForegroundWindow() == hwnd`，失败在日志里明确告警
+2. **投递给正确的子窗口**：`WindowFromPoint(中心点)` 取真实渲染窗口
+   （Chromium 渲染在 `Chrome_RenderWidgetHostHWND` 子窗上，发给顶层窗有时不生效）
+3. **双保险**：真实滚轮 + `PostMessage(WM_MOUSEWHEEL)` 直接投递
+4. **日志写出判断依据**（下次一眼定位）：
+```
+🎯 滚动目标：标题「微信视频号」 1273×805 hwnd=... 子窗=... 前台=是
+```
+5. **新增【👁 测试滚一次】按钮**：先滚一次让客户肉眼确认，
+   不用跑 40 页才发现没生效
+6. 修 `winfo_exists` → `_alive()`
+
+#### 验证：新增真实浏览器端到端测试（6/6）
+
+`tests/verify_scroll_e2e.py` 起一个真实 Chromium 长页面，
+调**生产代码**（`AutoPager._do_scroll` + `activate_window` + `post_wheel`），
+然后**直接读页面 scrollY** 判断到底滚没滚：
+
+```
+滚动前 scrollY = 0
+滚动后 scrollY = 600      ✅ 真的滚了
+连续滚动: 600 → 1200 → 1800 → 2400  ✅ 单调递增
+每次滚动后光标: [(5,5), (5,5), (5,5)]  ✅ 生产代码还原光标
+仅 post_wheel（光标在别处）: 2400 → 2700  ✅ 不依赖光标
+```
+
+**为什么必须做这个测试**：单测用的是注入的假 `scroll_fn`，
+滚轮到底有没有落到窗口上，单测**根本测不出来** —— 这正是上一版
+「29 项全过但客户一点效果都没有」的原因。
+
 ## [2.7.0] - 2026-10-29
 
 - v2.7.0 自动翻页（含自检）

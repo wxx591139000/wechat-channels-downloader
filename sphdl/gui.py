@@ -5849,7 +5849,7 @@ class App:
             # ★ v2.7.0：自动翻页结束
             try:
                 w = getattr(self, "_ap_win", None)
-                if w is not None and w.winfo_exists():
+                if w is not None and w._alive():
                     w._on_done(item[1] if len(item) > 1 else {})
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"自动翻页事件处理出错：{e}")

@@ -73,6 +73,88 @@ def send_wheel(delta: int = -WHEEL_DELTA):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
+SW_RESTORE = 9
+WM_MOUSEWHEEL = 0x020A
+
+
+def activate_window(hwnd) -> bool:
+    """把窗口拉到前台。返回是否成功成为前台窗口。
+
+    ★ Windows 有「前台锁」：后台进程调 SetForegroundWindow 常被忽略。
+      这里用 AttachThreadInput 把当前线程挂到目标线程上绕过限制，
+      失败再退回「模拟按一下 ALT」的老技巧。
+    """
+    import win32api
+    import win32con
+    import win32gui
+    import win32process
+
+    try:
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, SW_RESTORE)
+        else:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+        time.sleep(0.08)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        time.sleep(0.08)
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True
+
+        # 绕过前台锁：AttachThreadInput
+        try:
+            fg = win32gui.GetForegroundWindow()
+            _, fg_tid = win32process.GetWindowThreadProcessId(fg)
+            _, my_tid = win32process.GetWindowThreadProcessId(
+                win32api.GetCurrentThreadId() or 0)
+            cur_tid = win32api.GetCurrentThreadId()
+            attached = False
+            if fg_tid and fg_tid != cur_tid:
+                win32process.AttachThreadInput(cur_tid, fg_tid, True)
+                attached = True
+            try:
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.SetForegroundWindow(hwnd)
+            finally:
+                if attached:
+                    win32process.AttachThreadInput(cur_tid, fg_tid, False)
+            time.sleep(0.08)
+            if win32gui.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
+
+        # 最后手段：模拟按 ALT 解除前台锁
+        try:
+            import ctypes
+            user32.keybd_event(0x12, 0, 0, 0)      # ALT down
+            user32.keybd_event(0x12, 0, 2, 0)      # ALT up
+            win32gui.SetForegroundWindow(hwnd)
+            time.sleep(0.08)
+            return win32gui.GetForegroundWindow() == hwnd
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def post_wheel(hwnd, delta: int, screen_x: int, screen_y: int) -> bool:
+    """直接向窗口投递 WM_MOUSEWHEEL（不依赖光标位置）。
+
+    坐标必须是**屏幕坐标**（lParam），delta 放 wParam 高 16 位。
+    对 Chromium 有时比真实滚轮更可靠（尤其是后台窗口）。
+    """
+    try:
+        wparam = (int(delta) & 0xFFFF) << 16
+        lparam = (int(screen_y) & 0xFFFF) << 16 | (int(screen_x) & 0xFFFF)
+        user32.PostMessageW(int(hwnd), WM_MOUSEWHEEL, wparam, lparam)
+        return True
+    except Exception:
+        return False
+
+
 # ── 找视频号窗口 ────────────────────────────────────────────────────
 # 视频号在 PC 微信里跑在独立进程（Chromium 内核）：
 #   微信 3.x → WeChatAppEx.exe
@@ -218,25 +300,76 @@ class AutoPager(threading.Thread):
 
     # ---- 内部 ----
     def _do_scroll(self) -> bool:
-        """滚一次。返回 False 表示找不到窗口。"""
+        """滚一次。返回 False 表示找不到窗口。
+
+        ★ v2.7.1 修复（客户实测「一条没抓到、页面也没翻页」）：
+          原来只把光标移到窗口中心再 SendInput 滚轮 —— 但**滚轮事件是给
+          「光标下最顶层窗口」的**。如果视频号窗口不在前台（很可能，
+          客户刚点过我们的按钮），滚轮就打在了别的窗口上，页面纹丝不动。
+
+          现在：
+            ① 先把目标窗口拉到前台（含绕过 Windows 前台锁的处理）
+            ② 用 WindowFromPoint 取「窗口中心那个真实子窗口」
+               （Chromium 渲染在 Chrome_RenderWidgetHostHWND 子窗上，
+                发给顶层窗有时不生效）
+            ③ 真实滚轮 + 向该子窗 PostMessage 双保险
+            ④ 把判断依据写进日志，下次一眼能看出错在哪
+        """
         if self._scroll_fn:
             self._scroll_fn()
             return True
         hwnd, rect = self._find_fn()
         if not hwnd or not rect:
             return False
+
+        title = ""
+        try:
+            import win32gui
+            title = win32gui.GetWindowText(hwnd) or ""
+        except Exception:
+            pass
+
         cx = (rect[0] + rect[2]) // 2
         cy = (rect[1] + rect[3]) // 2
+
+        # ① 前置窗口（不前置的话滚轮会打到别的窗口）
+        fg_ok = activate_window(hwnd)
+        if not fg_ok and not getattr(self, "_warned_fg", False):
+            self._warned_fg = True
+            self._on_log("⚠ 未能把视频号窗口切到前台，滚轮可能无效。"
+                         "请手动点一下视频号窗口再开始（或保持它在最前面）",
+                         "warn")
+
+        # ② 找到光标处真实的子窗口（Chromium 的渲染窗口）
+        target = hwnd
+        try:
+            import win32gui
+            sub = win32gui.WindowFromPoint((cx, cy))
+            if sub:
+                root_of_sub = win32gui.GetAncestor(sub, 2)   # GA_ROOT
+                if root_of_sub == hwnd:
+                    target = sub
+        except Exception:
+            pass
+
         old = get_cursor_pos()
         try:
             set_cursor_pos(cx, cy)
+            time.sleep(0.08)
+            send_wheel(-WHEEL_DELTA * 3)              # 真实滚轮
+            post_wheel(target, -WHEEL_DELTA * 3, cx, cy)   # 兜底：直接投递给子窗
             time.sleep(0.05)
-            send_wheel(-WHEEL_DELTA * 3)   # 一次滑 3 格（约一屏的 1/3）
         finally:
             try:
-                set_cursor_pos(*old)        # 还原用户光标，别乱跳
+                set_cursor_pos(*old)                  # 还原用户光标
             except Exception:
                 pass
+
+        if not getattr(self, "_logged_target", False):
+            self._logged_target = True
+            self._on_log(f"🎯 滚动目标：标题「{title[:24]}」 "
+                         f"{rect[2] - rect[0]}×{rect[3] - rect[1]} "
+                         f"hwnd={hwnd} 子窗={target} 前台={'是' if fg_ok else '否'}")
         return True
 
     def run(self):
