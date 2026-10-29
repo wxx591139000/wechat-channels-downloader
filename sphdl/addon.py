@@ -337,6 +337,14 @@ class SphAddon:
         self.ANCHOR = 2               # 新列表数据前几条先入列（当前浏览锚点）
         self.LOOKAHEAD = 2            # 播放命中后，紧随其后的几条一起捕获
         self.PENDING_CAP = 200        # 候选缓存上限
+        # ★ v2.6.6：长视频（直播回放）整页全抓
+        #   背景：博主的「直播回放」列表一个 payload 带 8 条，每条都有完整
+        #   下载地址（file_size 2~3GB、video_play_len 1.8~7 小时）。
+        #   但老逻辑只抓前 2 条 → 245 条回放要滑 122 次才抓完。
+        #   现在：同一 payload 里**时长 ≥ 10 分钟**的全部入列（最多 60 条/页），
+        #   短视频仍只抓 2 条 —— 避免推荐流把无关视频灌进列表。
+        self.LONG_VIDEO_SEC = 600     # ≥10 分钟算长视频（回放/讲座）
+        self.LONG_PER_PAGE_CAP = 60   # 单页最多补抓多少条长视频
         self.PENDING_EXPIRE = 1800    # 候选缓存过期（秒）
         self._pending = []            # [{efk, key, vd, ts, source}] 按列表顺序
         self._pending_lock = _threading.Lock()
@@ -1006,13 +1014,30 @@ class SphAddon:
 
     def _capture_anchor(self, odes, source: str, entries_map=None):
         """置顶锚点：新列表数据的前 ANCHOR 条先入列表
-        （对应「当前浏览 + 随后的几个缓存」，保证有可见反馈）。"""
+        （对应「当前浏览 + 随后的几个缓存」，保证有可见反馈）。
+
+        ★ v2.6.6：长视频（直播回放）**整页全抓**。
+        博主的「直播回放」列表一个 payload 带 8 条回放（每条 1.8~7 小时、
+        2~3GB），老逻辑只抓前 2 条 → 245 条要滑 122 次。
+        现在长视频全部入列（单页上限 LONG_PER_PAGE_CAP）。
+        """
+        if entries_map is None:
+            entries_map = {}
+
+        def _dur(od) -> int:
+            try:
+                m = (od or {}).get("media") or []
+                return int((m[0] or {}).get("video_play_len") or 0) if m else 0
+            except Exception:
+                return 0
+
         grabbed = 0
+        long_added = 0
+        # ① 先按老逻辑抓前 ANCHOR 条（保证「当前浏览」立刻可见）
         for od in odes:
             if grabbed >= self.ANCHOR:
                 break
-            vd = extract_from_object_desc(
-                od, entry=(entries_map or {}).get(id(od)))
+            vd = extract_from_object_desc(od, entry=entries_map.get(id(od)))
             if not vd:
                 continue
             key = vd.video_id or (vd.url, vd.decode_key)
@@ -1023,6 +1048,24 @@ class SphAddon:
         if grabbed:
             logger.ok(f"🎯 自然捕获：新列表前 {grabbed} 条已入列表"
                       "（当前浏览+随后的缓存）")
+
+        # ② 再补抓本页所有长视频（直播回放场景）
+        for od in odes:
+            if long_added >= self.LONG_PER_PAGE_CAP:
+                break
+            if _dur(od) < self.LONG_VIDEO_SEC:
+                continue
+            vd = extract_from_object_desc(od, entry=entries_map.get(id(od)))
+            if not vd:
+                continue
+            key = vd.video_id or (vd.url, vd.decode_key)
+            if key in self.seen:
+                continue
+            long_added += 1
+            self._handle(vd, source=source)
+        if long_added:
+            logger.ok(f"📺 长视频整页捕获：本页另入 {long_added} 条"
+                      f"（时长 ≥{self.LONG_VIDEO_SEC // 60} 分钟，多为直播回放）")
 
     def _maybe_capture_from_stream(self, url: str):
         """播放器请求某条视频的流/封面 → 捕获命中的候选 + 后续 LOOKAHEAD 条。"""

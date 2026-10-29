@@ -1,0 +1,819 @@
+{
+ "feeds_count": 245,
+ "object": [
+  {
+   "id": "14423879503756398334",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "16250686699582094387_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 20,
+   "forward_count": 138,
+   "fav_count": 48,
+   "comment_count": 9,
+   "createtime": 1719460428,
+   "object_desc": {
+    "description": "【公益直播课】心理咨询基础项目专家组专家，胡海波老师，与您分享心理咨询实操技能训练课程",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 6751,
+      "width": 1920.0,
+      "height": 1080.0,
+      "md5sum": "df8cd9cddddbc4aaad38e756844c3202",
+      "file_size": 2251928915,
+      "bitrate": 2501,
+      "spec": [
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 9446551,
+        "bit_rate": 91,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 6751221,
+        "quality_score": 0,
+        "video_bitrate": 615,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":6751;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW30",
+        "first_load_bytes": 9028995,
+        "bit_rate": 53,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 856,
+        "height": 480,
+        "duration_ms": 6751221,
+        "quality_score": 0,
+        "video_bitrate": 297,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":6751;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 2251928915,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14423176098392378096",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "17734745124037324419_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 16,
+   "forward_count": 116,
+   "fav_count": 37,
+   "comment_count": 7,
+   "createtime": 1719376575,
+   "object_desc": {
+    "description": "【公益直播课】中国科学院心理研究所王利刚副研究员，深度解读群体心理与行为，对社会学感兴趣的小伙伴不要错过",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 9340,
+      "width": 1364.0,
+      "height": 768.0,
+      "md5sum": "a45344ca71db403bb4a30185f37f3991",
+      "file_size": 3122090218,
+      "bitrate": 2501,
+      "spec": [
+       {
+        "file_format": "xW30",
+        "first_load_bytes": 13126584,
+        "bit_rate": 137,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 9340470,
+        "quality_score": 0,
+        "video_bitrate": 989,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":9340;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW20",
+        "first_load_bytes": 12995390,
+        "bit_rate": 99,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 9340470,
+        "quality_score": 0,
+        "video_bitrate": 674,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":9340;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":2;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 12916568,
+        "bit_rate": 73,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 9340470,
+        "quality_score": 0,
+        "video_bitrate": 466,
+        "audio_bitrate": 127,
+        "level_order": 2,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":2;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":9340;\"grade\":2;\"highest_grade\":1;\"lowest_grade\":2;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 3122090218,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14418807854011124224",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "4285073896711540087_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 32,
+   "forward_count": 379,
+   "fav_count": 61,
+   "comment_count": 2,
+   "createtime": 1718855840,
+   "object_desc": {
+    "description": "6月20日上午10:00-12:00，曲方炳副教授与您分享儿童情绪管理的秘籍",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 7007,
+      "width": 1920.0,
+      "height": 1080.0,
+      "md5sum": "1ca6a7990082d38736a99b22b54a1912",
+      "file_size": 2339096737,
+      "bitrate": 2501,
+      "spec": [
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 9771108,
+        "bit_rate": 92,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 7007530,
+        "quality_score": 0,
+        "video_bitrate": 618,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":7007;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW30",
+        "first_load_bytes": 9472553,
+        "bit_rate": 48,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 856,
+        "height": 480,
+        "duration_ms": 7007530,
+        "quality_score": 0,
+        "video_bitrate": 257,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":7007;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 2339096737,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14418130797171640649",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "12234060961020032115_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 57,
+   "forward_count": 339,
+   "fav_count": 65,
+   "comment_count": 1,
+   "createtime": 1718775128,
+   "object_desc": {
+    "description": "【科普讲座】摆脱焦虑情绪，做情绪的主人——李新影，中国科学院心理研究所研究员，博士生导师。",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 12712,
+      "width": 1364.0,
+      "height": 768.0,
+      "md5sum": "851e3bc5fa9665e34f892ae9bf003d8a",
+      "file_size": 4249399916,
+      "bitrate": 2501,
+      "spec": [
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 17467069,
+        "bit_rate": 84,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 12712600,
+        "quality_score": 0,
+        "video_bitrate": 557,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":12712;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW30",
+        "first_load_bytes": 17111044,
+        "bit_rate": 83,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 12712600,
+        "quality_score": 0,
+        "video_bitrate": 543,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":12712;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 4249399916,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14414570118052581084",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "14729107729981437454_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 3,
+   "forward_count": 30,
+   "fav_count": 5,
+   "comment_count": 0,
+   "createtime": 1718350662,
+   "object_desc": {
+    "description": "【公开课第二天】中华女子学院教授硕士生导师，王中会老师与您探讨如何“走出亲子沟通障碍”。",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 20063,
+      "width": 1278.0,
+      "height": 720.0,
+      "md5sum": "b91a48382d1e3b8c6872556e137c95a6",
+      "file_size": 1843022729,
+      "bitrate": 522,
+      "spec": [
+       {
+        "file_format": "xV0",
+        "first_load_bytes": 31527147,
+        "bit_rate": 89,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1278,
+        "height": 720,
+        "duration_ms": 20063200,
+        "quality_score": 0,
+        "video_bitrate": 522,
+        "audio_bitrate": 199,
+        "bypass": "{\"rid\":\"1793248099590196\";\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":20063;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "200012",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 20323647,
+        "bit_rate": 42,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 20.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 20072500,
+        "quality_score": 0,
+        "video_bitrate": 214,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":20063;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 1843022729,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14413850865958979891",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "14032392113276579411_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 8,
+   "forward_count": 55,
+   "fav_count": 11,
+   "comment_count": 2,
+   "createtime": 1718264921,
+   "object_desc": {
+    "description": "中华女子学院教授王中会老师谈”走出亲子沟通障碍“，关注我们，一起学习心理学吧",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 20642,
+      "width": 1278.0,
+      "height": 720.0,
+      "md5sum": "19e948048ee2123ec4139959deed4b71",
+      "file_size": 1943156003,
+      "bitrate": 540,
+      "spec": [
+       {
+        "file_format": "xV0",
+        "first_load_bytes": 32211741,
+        "bit_rate": 91,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1278,
+        "height": 720,
+        "duration_ms": 20642401,
+        "quality_score": 0,
+        "video_bitrate": 541,
+        "audio_bitrate": 200,
+        "bypass": "{\"rid\":\"1793248099590196\";\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":20642;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "200012",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 20865419,
+        "bit_rate": 42,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 20.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 20651901,
+        "quality_score": 0,
+        "video_bitrate": 214,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":20642;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 1943156003,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14403707797194672302",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "17961251451183257721_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 4,
+   "forward_count": 30,
+   "fav_count": 9,
+   "comment_count": 1,
+   "createtime": 1717055773,
+   "object_desc": {
+    "description": "欢庆六一科普讲座：“通向阅读之路”。中国科学院心理研究所，儿童早期阅读与学习研究组，与您分享早期阅读的奥秘。",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 25054,
+      "width": 1092.0,
+      "height": 614.0,
+      "md5sum": "ee3bfdea46148222a0553e4f49e1318c",
+      "file_size": 1709873218,
+      "bitrate": 333,
+      "spec": [
+       {
+        "file_format": "xWT156",
+        "first_load_bytes": 34034875,
+        "bit_rate": 25,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1096,
+        "height": 616,
+        "duration_ms": 25054700,
+        "quality_score": 0,
+        "video_bitrate": 73,
+        "audio_bitrate": 128,
+        "level_order": 100,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":100;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"trans_flag\":5;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":25054;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"f_spec\":\"W21|WT157|WH157|WT112|WH112|\";\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159143",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xWT111",
+        "first_load_bytes": 32202858,
+        "bit_rate": 25,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1096,
+        "height": 616,
+        "duration_ms": 25054700,
+        "quality_score": 0,
+        "video_bitrate": 70,
+        "audio_bitrate": 128,
+        "level_order": 100,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":100;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"trans_flag\":5;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":25054;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"f_spec\":\"W21|WT157|WH157|WT112|WH112|\";\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158143",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 1709873218,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "id": "14373301488896773159",
+   "nickname": "林萃心屿",
+   "object_nonce_id": "11118067521436870454_0_143_0_0_0_2b350212-d351-11f1-bb80-ff6fc644f128",
+   "like_count": 6,
+   "forward_count": 35,
+   "fav_count": 17,
+   "comment_count": 1,
+   "createtime": 1713431058,
+   "object_desc": {
+    "description": "机器学习大模型与心理学的结合",
+    "media_type": 4,
+    "media": [
+     {
+      "url": "https://finder.video.qq.com/251/20302/stodownload?encfilekey=TESTFIXTURE",
+      "thumb_url": "https://finder.video.qq.com/thumb?encfilekey=TESTFIXTURE",
+      "media_type": 4,
+      "video_play_len": 11838,
+      "width": 1280.0,
+      "height": 720.0,
+      "md5sum": "4f558a87a80a208abaf0757d58ccb7ee",
+      "file_size": 7541990437,
+      "bitrate": 4944,
+      "spec": [
+       {
+        "file_format": "xW29",
+        "first_load_bytes": 13619815,
+        "bit_rate": 271,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 11840800,
+        "quality_score": 0,
+        "video_bitrate": 2084,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":11838;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":2;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW30",
+        "first_load_bytes": 13628785,
+        "bit_rate": 173,
+        "coding_format": "h264",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 11840800,
+        "quality_score": 0,
+        "video_bitrate": 1285,
+        "audio_bitrate": 127,
+        "level_order": 2,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":2;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":11838;\"grade\":2;\"highest_grade\":1;\"lowest_grade\":2;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "158090",
+        "media_rate_type": 0,
+        "file_size": 0
+       },
+       {
+        "file_format": "xW21",
+        "first_load_bytes": 13760985,
+        "bit_rate": 91,
+        "coding_format": "h265",
+        "dynamic_range_type": 0,
+        "vfps": 30.0,
+        "width": 1280,
+        "height": 720,
+        "duration_ms": 11840800,
+        "quality_score": 0,
+        "video_bitrate": 609,
+        "audio_bitrate": 127,
+        "level_order": 1,
+        "bypass": "{\"rid\":\"1793248099590196\";\"level_order\":1;\"ip_area_id\":\"cn.ml\";\"max_bitrate\":150;\"phone_level\":0;\"full_url_type\":0;\"video_play_len\":11838;\"grade\":1;\"highest_grade\":1;\"lowest_grade\":1;\"cgi_id\":8336;\"pre_f_time\":30000;\"b_len\":10;\"avg_v_len\":14175;\"fake_uin\":3194689253;\"ad_flag\":4;\"netid\":1}",
+        "is_3az": 0,
+        "lib_version": "159090",
+        "media_rate_type": 0,
+        "file_size": 0
+       }
+      ],
+      "hls_spec": {
+       "hls_list": []
+      },
+      "hdr_spec": {
+       "hdr_list": []
+      },
+      "live_cover_imgs": [],
+      "scaling_info": {
+       "version": "",
+       "is_split_screen": false,
+       "is_disable_follow": false,
+       "up_percent_position": 0.0,
+       "down_percent_position": 0.0
+      },
+      "duplicate_file_size": 7541990437,
+      "audio_spec": [],
+      "media_cdn_info": {
+       "is_use_pcdn": true,
+       "begin_use_pcdn_buffer_seconds": 12,
+       "exit_use_pcdn_buffer_seconds": 8,
+       "preload_begin_use_pcdn_buffer_kbytes": 768,
+       "pcdn_timeout_retry_count": 1,
+       "mars_pre_download_kbytes": 0,
+       "is_use_ugc_when_no_preload": true,
+       "preload_use_pcdn_only": true,
+       "preload_pcdn_connections": 4,
+       "soc_force_use_h3": false
+      }
+     }
+    ]
+   }
+  }
+ ]
+}
