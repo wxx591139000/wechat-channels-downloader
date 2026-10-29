@@ -2852,6 +2852,16 @@ class App:
                                  style="DyLocked.TButton",
                                  command=self._on_douyin)
         self.btn_dy.pack(side="left", padx=(6, 2))
+        # ★ v2.7.0：直播回放自动翻页（帮用户滑列表，逐页抓回放）
+        self.btn_autopage = ttk.Button(capf, text="🔁 自动翻页", width=13,
+                                      command=self._on_autopage)
+        self.btn_autopage.pack(side="left", padx=(6, 2))
+        self._tt(self.btn_autopage,
+                 "自动帮你在「微信视频号」窗口里往下滑，把回放列表逐页抓进清单。\n"
+                 "用途：博主直播回放有几百条、一页只显示 8 条时，不用手动滑 30 多次。\n\n"
+                 "使用前：先把视频号窗口打开、停在回放列表上。\n"
+                 "判定到底：连续 3 轮没新增就自动停。\n"
+                 "随时可点【停止】，不影响已抓到的条目。")
         self._tt(self.btn_dy,
                  "【抖音批量下载】**独立产品**，需专用授权码（与视频号/公众号分开）。\n"
                  "未授权时点它会提示购买方式。\n\n"
@@ -4584,6 +4594,23 @@ class App:
             pass
         return has_dy
 
+    # ────────────────── 自动翻页（v2.7.0）──────────────────
+    def _on_autopage(self):
+        """打开「自动翻页抓取」小窗。"""
+        try:
+            w = getattr(self, "_ap_win", None)
+            if w is not None and getattr(w, "_alive", lambda: False)():
+                w.win.deiconify()
+                w.win.lift()
+                return
+        except Exception:
+            pass
+        try:
+            from .autopage_ui import AutoPageWindow
+            self._ap_win = AutoPageWindow(self)
+        except Exception as e:                      # noqa: BLE001
+            messagebox.showerror("自动翻页", f"打开失败：{e}")
+
     def _on_douyin(self):
         """「🎵 抖音批量下载」入口：未授权给购买引导，已授权开窗口。
 
@@ -5806,6 +5833,26 @@ class App:
                     w.apply_login_done(item[1], item[2])
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
+        elif kind in ("ap_log", "ap_prog"):
+            # ★ v2.7.0：自动翻页进度回填
+            w = getattr(self, "_ap_win", None)
+            if w is None or not getattr(w, "_alive", lambda: False)():
+                return
+            try:
+                if kind == "ap_log":
+                    w.apply_log(item[1], item[2] if len(item) > 2 else "info")
+                else:
+                    w.apply_progress(item[1], item[2], item[3])
+            except Exception:
+                pass
+        elif kind == "autopage_done":
+            # ★ v2.7.0：自动翻页结束
+            try:
+                w = getattr(self, "_ap_win", None)
+                if w is not None and w.winfo_exists():
+                    w._on_done(item[1] if len(item) > 1 else {})
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"自动翻页事件处理出错：{e}")
         elif kind == "revoke_result":
             # ★ v2.3.0：吊销名单校验结果
             try:

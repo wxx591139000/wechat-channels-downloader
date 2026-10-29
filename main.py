@@ -483,6 +483,8 @@ def main():
                     help="公众号视频自检：验证文章解析逻辑后退出")
     ap.add_argument("--online", action="store_true",
                     help="配合 --selftest-mp：联网用真实文章端到端验证")
+    ap.add_argument("--selftest-autopage", action="store_true",
+                    help="自动翻页自检：验证滚轮/窗口查找模块完整（v2.7.0）")
     ap.add_argument("--selftest-douyin", action="store_true",
                     help="抖音模块自检：playwright 能否驱动系统浏览器")
     ap.add_argument("--selftest-telemetry", action="store_true",
@@ -528,6 +530,9 @@ def main():
         return
 
     banner()
+    if getattr(args, "selftest_autopage", False):
+        from sphdl.autopage import selftest
+        return 0 if selftest() else 1
     if getattr(args, "selftest_douyin", False):
         sys.exit(run_selftest_douyin(args))
     if args.selftest:
