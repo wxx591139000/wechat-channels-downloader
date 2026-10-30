@@ -1678,9 +1678,9 @@ class H(BaseHTTPRequestHandler):
                 + "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'>"
                 # ★ v2.8.3（客户需求）：不经过发码，直接一键复制网盘链接
                 + "<button type='button' class='btn2' style='padding:6px 12px'"
-                + " onclick=\"copyLink(" + str(i) + ")\">📋 复制链接</button>"
+                + " onclick=\"copyLink(" + str(i) + ",this)\">📋 复制链接</button>"
                 + "<button type='button' class='btn2 gray' style='padding:6px 12px'"
-                + " onclick=\"copyFull(" + str(i) + ")\">📄 复制完整话术</button>"
+                + " onclick=\"copyFull(" + str(i) + ",this)\">📄 复制完整话术</button>"
                 + "<button type='button' class='del' onclick=\"" + del_js + "\">"
                 + "删除</button></div></div>"
             )
@@ -1751,6 +1751,7 @@ class H(BaseHTTPRequestHandler):
 <input type="hidden" name="channel" id="dc">
 </form>
 
+<script>{JS_COPY}</script>
 {JS_PASTE}
 <script>
 // ★ v2.8.3（客户需求 2026-10-30）：独立于「发码」的一键复制路径
@@ -1771,17 +1772,22 @@ function _fullText(i) {{
   out.push("微信视频号下载器 v" + v.ver + (v.channel ? "（" + v.channel + "网盘）" : ""));
   if (v.filename) out.push("文件：" + v.filename);
   out.push("下载：" + _linkText(i));
-  return out.join("\n");
+  return out.join("\\n");
 }}
-function copyLink(i) {{
+// ★ v2.8.4 修复（客户 2026-10-30「点了没反应」）：
+//   原来用 `event && event.target` —— Chrome 内联 onclick 里全局 event
+//   不一定可用，未定义时 `event && ...` 抛 ReferenceError，函数中断
+//   → 既没复制也没提示，表现就是"点了没反应"。
+//   改为按钮显式传 this。
+function copyLink(i, btn) {{
   var t = _linkText(i);
   if (!t) {{ alert("这个版本还没填网盘链接"); return; }}
-  cp(t, event && event.target);
+  cp(t, btn || null);
 }}
-function copyFull(i) {{
+function copyFull(i, btn) {{
   var t = _fullText(i);
   if (!t) {{ alert("这个版本还没填网盘链接"); return; }}
-  cp(t, event && event.target);
+  cp(t, btn || null);
 }}
 </script>
 """
