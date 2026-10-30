@@ -60,3 +60,9 @@ sphdl/.devcache
 # v2.2.1 诊断数据（客户原始 object_desc 样本，绝不入库）
 diag_object_desc/
 开启原始数据记录.txt
+
+# docs（2026-10-30 纳入版本管理）
+#   ⚠️ 只排除确定不该入库的：临时脚本生成的缓存、超大中间产物
+docs/**/__pycache__/
+docs/**/*.pyc
+docs/**/*.tmp

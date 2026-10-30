@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>视频号下载器 · 宣传图</title>
+<style>
+  :root {
+    --bg: #F6F8F5;
+    --ink: #17201B;
+    --muted: #66736B;
+    --line: #E2E8E3;
+    --card: #FFFFFF;
+    --accent: #07C160;
+    --accent-dark: #059B4C;
+    --accent-tint: #E9F8EF;
+    --blue: #2F6FED;
+    --teal: #0F766E;
+    --radius: 18px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #E8ECE8; }
+  body {
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+  .canvas {
+    width: 1080px; min-height: 1520px;
+    background:
+      radial-gradient(900px 480px at 85% -60px, #DFF3E6 0%, rgba(223,243,230,0) 70%),
+      var(--bg);
+    padding: 48px 64px 36px;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ===== badges ===== */
+  .badges { display: flex; gap: 12px; }
+  .badge {
+    font-size: 22px; line-height: 1;
+    padding: 10px 20px;
+    border: 1.5px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    letter-spacing: 0.5px;
+  }
+  .badge.solid {
+    background: var(--accent); border-color: var(--accent);
+    color: #fff; font-weight: 600;
+  }
+
+  /* ===== hero ===== */
+  .hero { margin-top: 18px; }
+  .hero h1 {
+    font-size: 78px; line-height: 1.12; font-weight: 800;
+    letter-spacing: 2px;
+  }
+  .hero h1 .hl { color: var(--accent-dark); }
+  .hero .sub {
+    margin-top: 18px;
+    font-size: 33px; color: var(--ink); font-weight: 500;
+  }
+  .hero .tag {
+    margin-top: 12px;
+    font-size: 24px; color: var(--muted);
+    letter-spacing: 1px;
+  }
+
+  /* ===== app mock ===== */
+  .mock {
+    margin-top: 24px;
+    background: var(--card);
+    border: 1.5px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: 0 18px 44px rgba(23,32,27,0.10);
+    overflow: hidden;
+  }
+  .mock-title {
+    height: 50px;
+    background: #EAF6EF;
+    border-bottom: 1.5px solid var(--line);
+    display: flex; align-items: center;
+    padding: 0 22px;
+    font-size: 22px; font-weight: 600; color: #33413A;
+  }
+  .mock-title .win {
+    margin-left: auto; display: flex; gap: 18px;
+    color: #8A978F; font-size: 20px; font-weight: 400;
+  }
+  .mock-body { padding: 14px 24px 14px; }
+  .eng-row {
+    display: flex; align-items: center; gap: 18px;
+    padding: 12px 18px;
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    background: #FBFCFB;
+  }
+  .btn-start {
+    background: var(--accent); color: #fff;
+    font-size: 23px; font-weight: 600;
+    padding: 10px 26px; border-radius: 9px;
+    white-space: nowrap;
+  }
+  .eng-meta { font-size: 21px; color: var(--muted); }
+  .eng-meta b { color: var(--ink); font-weight: 600; }
+  .ca-ok { margin-left: auto; font-size: 21px; color: var(--accent-dark); font-weight: 600; white-space: nowrap; }
+
+  .list-head, .list-row {
+    display: grid;
+    /* ★ v2.2.2：加「序号」窄列（58px），其余按原比例 */
+    grid-template-columns: 58px 150px 1fr 150px 118px;
+    align-items: center;
+    padding: 0 18px;
+  }
+  /* 序号列：沿用原配色，弱化处理（跟 muted 同级） */
+  .seq { color: var(--muted); font-size: 20px; font-weight: 600; }
+  .list-head {
+    margin-top: 16px;
+    height: 36px;
+    border-bottom: 1.5px solid var(--line);
+    font-size: 20px; color: var(--muted); font-weight: 600;
+  }
+  .list-row { height: 48px; border-bottom: 1px solid #EFF3EF; font-size: 21.5px; }
+  .list-row:last-of-type { border-bottom: none; }
+  .st { font-weight: 600; white-space: nowrap; }
+  .st.done { color: var(--accent-dark); }
+  .st.down { color: var(--blue); }
+  .st.wait { color: var(--teal); }
+  .ti { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #33413A; }
+  .sz, .tm { color: var(--muted); font-size: 20px; text-align: right; }
+  .bar-strip {
+    height: 9px; margin: 4px 18px 0;
+    background: #EDF1EE; border-radius: 99px; overflow: hidden;
+  }
+  .bar-strip i { display: block; height: 100%; width: 62%; background: var(--blue); }
+  /* ★ v2.2.2：列表下方常驻多选提示条（与软件内一致，浅绿底） */
+  .hint-bar {
+    flex-shrink: 0;
+    margin-top: 10px;
+    background: var(--accent-tint);
+    border: 1.5px solid #CDEBDA;
+    border-radius: 9px;
+    padding: 8px 14px;
+    font-size: 16px; line-height: 1.4;
+    color: #2B5D42;
+    white-space: nowrap;       /* ★ 强制单行，避免撑高 */
+    overflow: hidden;
+  }
+  .mock-btns {
+    margin-top: 12px;
+    display: flex; gap: 14px; align-items: center;
+  }
+  .mbtn {
+    font-size: 22px; font-weight: 600;
+    padding: 10px 24px; border-radius: 9px;
+    background: var(--accent); color: #fff;
+  }
+  .mbtn.ghost { background: #fff; color: var(--ink); border: 1.5px solid var(--line); font-weight: 500; }
+  .mock-hint { margin-left: auto; font-size: 20px; color: #9AA69E; }
+
+  /* ===== steps ===== */
+  .steps { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .step {
+    background: var(--card);
+    border: 1.5px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 20px 20px;
+  }
+  .step .no {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: var(--accent-tint); color: var(--accent-dark);
+    font-size: 25px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step h3 { margin-top: 12px; font-size: 26px; font-weight: 700; }
+  .step p { margin-top: 7px; font-size: 20px; color: var(--muted); line-height: 1.45; }
+
+  /* ===== features ===== */
+  .feats { margin-top: 16px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .feat {
+    background: var(--card);
+    border: 1.5px solid var(--line);
+    border-radius: 14px;
+    padding: 14px 20px;
+  }
+  .feat .tick {
+    width: 32px; height: 32px; border-radius: 9px;
+    background: var(--accent-tint); color: var(--accent-dark);
+    font-size: 21px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .feat h4 { margin-top: 10px; font-size: 24px; font-weight: 700; }
+  .feat p { margin-top: 5px; font-size: 19.5px; color: var(--muted); line-height: 1.4; }
+
+  /* ===== footer ===== */
+  .foot {
+    margin-top: auto;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--line);
+    display: flex; align-items: center;
+    font-size: 21px; color: var(--muted);
+  }
+  .foot .ver { color: var(--ink); font-weight: 600; }
+  .foot .right { margin-left: auto; }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <div class="badges">
+    <span class="badge solid">Windows 10/11 · 64位</span>
+    <span class="badge">绿色便携 · 免安装</span>
+    <span class="badge">解压即用 · 约30MB</span>
+  </div>
+
+  <div class="hero">
+    <h1>视频号<span class="hl">视频下载器</span></h1>
+    <div class="sub">电脑微信里边播边存，一键保存到本地</div>
+    <div class="tag">不靠在线解析网站 · 不碰第三方接口 · 微信更新也不易失效</div>
+  </div>
+
+  <div class="mock">
+    <div class="mock-title">微信视频号下载器&nbsp;&nbsp;sphdl v2.2.2 <span class="win">—&nbsp;&nbsp;▢&nbsp;&nbsp;✕</span></div>
+    <div class="mock-body">
+      <div class="eng-row">
+        <span class="btn-start">启动嗅探</span>
+        <span class="eng-meta">代理端口 <b>8899</b></span>
+        <span class="eng-meta">☑ 自动设置系统代理</span>
+        <span class="ca-ok">CA证书: 已安装 ✓</span>
+      </div>
+      <div class="list-head"><span class="seq">序号</span><span>状态</span><span>标题</span><span style="text-align:right">大小</span><span style="text-align:right">时间</span></div>
+      <div class="list-row">
+        <span class="seq">1</span>
+        <span class="st done">已完成 ✓</span>
+        <span class="ti">大疆发布 8K 全景相机 Osmo 360，每一面都是大场面</span>
+        <span class="sz">70.5 MB</span>
+        <span class="tm">10-20</span>
+      </div>
+      <div class="list-row">
+        <span class="seq">2</span>
+        <span class="st down">下载中 62%</span>
+        <span class="ti">我们用18吨的光刻机，刻28纳米的汉字</span>
+        <span class="sz">802.5 MB</span>
+        <span class="tm">10-20</span>
+      </div>
+      <div class="bar-strip"><i></i></div>
+      <div class="list-row">
+        <span class="seq">3</span>
+        <span class="st wait">待下载</span>
+        <span class="ti">上海00后女孩手搓核磁共振，穿洞洞鞋到美国领奖</span>
+        <span class="sz">109.1 MB</span>
+        <span class="tm">10-20</span>
+      </div>
+      <div class="mock-btns">
+        <span class="mbtn">下载选中</span>
+        <span class="mbtn ghost">全选</span>
+        <span class="mbtn ghost">反选</span>
+        <span class="mock-hint">点序号表头＝按刷的顺序排</span>
+      </div>
+      <div class="hint-bar">💡 多选：点一行选一个　│　Ctrl 加选　│　Shift 连选　│　Ctrl+A 全选　│　也可点「全选 / 反选」按钮</div>
+    </div>
+  </div>
+
+  <div class="steps">
+    <div class="step">
+      <div class="no">1</div>
+      <h3>双击运行</h3>
+      <p>解压后双击 exe 启动，无需安装，无需配置</p>
+    </div>
+    <div class="step">
+      <div class="no">2</div>
+      <h3>微信里播放</h3>
+      <p>点「启动嗅探」，在电脑微信里正常播放视频</p>
+    </div>
+    <div class="step">
+      <div class="no">3</div>
+      <h3>选中即下载</h3>
+      <p>视频进入列表，选中后点「下载选中」；也可一键批量拉取整个号</p>
+    </div>
+  </div>
+
+  <div class="feats">
+    <div class="feat"><div class="tick">✓</div><h4>批量拉取整号</h4><p>主页点一下，自动滚到底全抓进清单</p></div>
+    <div class="feat"><div class="tick">✓</div><h4>自动连续下载</h4><p>勾上自动下载，抓到的排队下完</p></div>
+    <div class="feat"><div class="tick">✓</div><h4>序号按序下</h4><p>点表头即按刷的顺序排，下前 N 条</p></div>
+    <div class="feat"><div class="tick">✓</div><h4>断点续传</h4><p>中断保留进度，点重试接着下</p></div>
+    <div class="feat"><div class="tick">✓</div><h4>停嗅探不丢进度</h4><p>选「等下载完」自动等你下完再停</p></div>
+    <div class="feat"><div class="tick">✓</div><h4>视频 + 图片帖</h4><p>两种内容格式都支持</p></div>
+  </div>
+
+  <div class="foot">
+    <span class="ver">视频号下载器 v2.2.2 便携版</span>
+    <span class="right">仅供个人学习交流 · 请勿二次传播</span>
+  </div>
+
+</div>
+</body>
+</html>
