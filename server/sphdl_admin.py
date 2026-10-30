@@ -678,6 +678,14 @@ h3{font-size:15px;margin:4px 0 10px;color:#111827}
               word-break:break-all;display:block;margin-top:3px}
 .del{background:#fee2e2;color:#991b1b;border:none;border-radius:7px;
      padding:7px 12px;font-size:13px;cursor:pointer;width:auto}
+/* ★ v2.8.5（客户 2026-10-30「按钮改小些，并放在同一行」）：
+   .btn2 原本 width:100% 会撑满整行把按钮挤到下一行，
+   这里 .mini 强制 width:auto + 小内边距，三个按钮可挤在一行。 */
+.mini{width:auto!important;padding:5px 10px!important;font-size:12.5px!important;
+      border-radius:7px!important;font-weight:500!important;white-space:nowrap}
+.mini.gray{background:#e5e7eb!important;color:#374151!important}
+.ver-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;
+             margin-top:8px}
 """
 
 
@@ -1675,14 +1683,15 @@ class H(BaseHTTPRequestHandler):
                 + "</span>"
                 # ★ v2.2.4：本版更新要点（折叠显示，避免列表太长）
                 + notes_html
-                + "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'>"
+                + "<div class='ver-actions'>"
                 # ★ v2.8.3（客户需求）：不经过发码，直接一键复制网盘链接
-                + "<button type='button' class='btn2' style='padding:6px 12px'"
+                # ★ v2.8.5：改小 + 与删除按钮同一行（.mini 覆盖 btn2 的 width:100%）
+                + "<button type='button' class='btn2 mini'"
                 + " onclick=\"copyLink(" + str(i) + ",this)\">📋 复制链接</button>"
-                + "<button type='button' class='btn2 gray' style='padding:6px 12px'"
-                + " onclick=\"copyFull(" + str(i) + ",this)\">📄 复制完整话术</button>"
-                + "<button type='button' class='del' onclick=\"" + del_js + "\">"
-                + "删除</button></div></div>"
+                + "<button type='button' class='btn2 gray mini'"
+                + " onclick=\"copyFull(" + str(i) + ",this)\">📄 完整话术</button>"
+                + "<button type='button' class='del mini'"
+                + " onclick=\"" + del_js + "\">删除</button></div></div>"
             )
         if not items:
             items = "<div class='warn'>还没有任何版本，先在下面添加一个。</div>"
