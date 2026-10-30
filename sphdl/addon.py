@@ -306,6 +306,13 @@ class SphAddon:
         # ★ v2.7.8：小程序短剧
         self.out_dir = None           # 下载根目录（GUI 按用户配置注入）
         self.on_miniapp = None        # 回调 fn(ep_id, path, size)（GUI 加入清单）
+        # ★ v2.8.6：小程序短剧集号跨会话持久化
+        #   问题（客户 2026-10-30）：从第 27 集开始播放，清单却显示第01/02/03集。
+        #   根因：_miniapp_saved 每次启动重置为 0，与真实集数无关。
+        #   小程序 URL 只含哈希、不含集号，拿不到真实剧集号，
+        #   所以至少要做到：**接着上次的编号继续，不覆盖、不倒退**。
+        self._mp_seq_file = None      # Path：序号状态文件（由 out_dir 推出）
+        self._mp_seq = 0              # 已用到的最大序号
         # ★ v2.8.2：小程序短剧连播抓取（实测 2026-10-30）
         #   小程序一集播完会**自动跳下一集**，新视频必然重新请求 mp4
         #   → 只要一直挂着嗅探，"边播边存"就能连续抓完整季，无需任何额外操作。
@@ -1027,18 +1034,60 @@ class SphAddon:
             base = _P("小程序短剧")
         base.mkdir(parents=True, exist_ok=True)
 
-        # ★ v2.8.0：文件名带集序，方便按名字排序查阅（客户要求）。
-        #   集序 = 本程序运行期内第几个保存的（= 播放顺序）。
-        #   真实剧名/集号接口暂未找到（小程序元数据没走可拦截 HTTP），
-        #   找到后再升级为「剧名_第N集」。
-        #   映射关系存到 _episodes.json，重命名时不会乱序。
-        seq = getattr(self, "_miniapp_saved", 0) + 1
+        # ★ v2.8.6：集序改为**跨会话持久化**（客户 2026-10-30 反馈）
+        #   原逻辑 seq = _miniapp_saved + 1，每次启动归零 → 从第 27 集开始播
+        #   也会写成「第01集」，还会与旧文件重名冲突（旧文件被跳过 → 看起来"没抓到"）。
+        #   现在：
+        #     ① 从 <下载目录>/小程序短剧/.seq.json 恢复上次最大序号
+        #     ② 同时扫描已有「第NN集_」文件名，取最大值兜底（防状态文件丢）
+        #     ③ 同一集哈希复用时沿用原序号（幂等）
+        #   注：小程序 URL 只有哈希、不含真实剧集号，无法拿到「第27集」这个数字，
+        #      所以这里是「接着上次继续编号」，不是"真实集号"。
         name_map = getattr(self, "_mp_names", None)
         if name_map is None:
             name_map = self._mp_names = {}
-        # 同一集重复请求要沿用旧名字
-        seq = name_map.get(ep, seq)
-        name_map.setdefault(ep, seq)
+        if not name_map and getattr(self, "_mp_names_loaded", False) is False:
+            self._mp_names_loaded = True
+            try:
+                import json as _j
+                sf = base / ".seq.json"
+                if sf.exists():
+                    d = _j.loads(sf.read_text(encoding="utf-8"))
+                    if isinstance(d, dict):
+                        name_map.update({str(k): int(v) for k, v in d.items()})
+            except Exception:
+                pass
+        if not name_map:
+            pass
+        # 扫已有文件名兜底
+        if not getattr(self, "_mp_scanned", False):
+            self._mp_scanned = True
+            mx = 0
+            try:
+                import re as _re
+                for f in base.glob("第*集_*.mp4"):
+                    mm = _re.match(r"第(\d+)集_", f.name)
+                    if mm:
+                        mx = max(mx, int(mm.group(1)))
+            except Exception:
+                pass
+            self._mp_seq = max(getattr(self, "_mp_seq", 0), mx)
+            for k, v in name_map.items():
+                self._mp_seq = max(self._mp_seq, v)
+
+        if ep in name_map:
+            seq = name_map[ep]          # 同一集复用原序号（幂等）
+        else:
+            self._mp_seq = max(getattr(self, "_mp_seq", 0),
+                               getattr(self, "_miniapp_saved", 0)) + 1
+            seq = self._mp_seq
+            name_map[ep] = seq
+            try:
+                import json as _j
+                (base / ".seq.json").write_text(
+                    _j.dumps(name_map, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
         short = ep[:8]
         final = base / f"第{seq:02d}集_{short}.mp4"
         if final.exists() and final.stat().st_size > 1024:
@@ -1097,9 +1146,23 @@ class SphAddon:
                 _os.replace(part, final)
                 logger.ok(f"🎬 小程序短剧已保存：{final.name} "
                           f"（{got / 1048576:.1f} MB）→ {final.parent}")
-                logger.info(
-                    "　　💡 小程序一集播完会自动跳下一集，"
-                    "保持嗅探运行即可连续抓取；如需换剧再点「选集」")
+                # ★ v2.8.6：区分「自动跳集」与「手动换集」，给不同提示
+                #   依据两次保存的时间间隔：若 ≈ 上一集时长，说明是自动连播；
+                #   间隔明显更长（>3 分钟）说明中途停过/手动点的。
+                _prev = getattr(self, "_mp_prev_ts", None)
+                _gap = (time.time() - _prev) if _prev else None
+                self._mp_prev_ts = time.time()
+                if _gap is not None and _gap <= 180:
+                    logger.info(
+                        f"　　▶ 自动连播中（距上一集 {int(_gap)} 秒）"
+                        "—— 保持嗅探运行即可继续抓")
+                elif _gap is not None:
+                    logger.info(
+                        f"　　⏸ 距上一集 {int(_gap // 60)} 分钟（可能是手动选集，"
+                        "或中途暂停）。如需连续抓取：让小程序自己往下播，别关播放页")
+                else:
+                    logger.info(
+                        "　　💡 小程序一集播完会自动跳下一集，保持嗅探运行即可连续抓取")
                 self._miniapp_saved = getattr(self, "_miniapp_saved", 0) + 1
                 self.miniapp_saved_total += 1
                 ranges.pop(ep, None)
