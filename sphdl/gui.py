@@ -1017,6 +1017,13 @@ class App:
         # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
         # 捕获即自动入队（v1.2.5，状态持久化 config.json）
         self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
+        # ★ v2.7.8：小程序短剧落盘目录 + 清单回调
+        try:
+            self.addon.out_dir = self.cfg.download_dir
+            self.addon.on_miniapp = (lambda ep, path, size:
+                                     self.ui_q.put(("miniapp_saved", ep, path, size)))
+        except Exception:
+            pass
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
@@ -4748,6 +4755,35 @@ class App:
             pass
         return has_dy
 
+    # ────────── 小程序短剧入清单（v2.7.8）──────────
+    def _add_miniapp_record(self, ep: str, path: str, size: int):
+        """把已落盘的小程序短剧加入清单（状态已完成，可直接双击打开）。"""
+        from pathlib import Path as _P
+        try:
+            rid = f"mini_{ep[:16]}"
+            if rid in self.store.items:
+                return
+            rec = Record(
+                id=rid,
+                title=_P(path).name,
+                url="",
+                decode_key="",
+                size=int(size or 0),
+                source="小程序短剧",
+                created=datetime.datetime.now().strftime("%m-%d %H:%M:%S"),
+                status="done",
+                file=str(path),
+                video_id=ep,
+                platform="小程序短剧",
+            )
+            self.store.add(rec)
+            self._add_row(rec)
+            self.push_log("ok",
+                          f"🎬 已加入清单：{rec.title}（{rec.size / 1048576:.1f} MB）")
+            self._dirty = True
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("warn", f"小程序短剧入清单失败：{e}")
+
     def _on_douyin(self):
         """「🎵 抖音批量下载」入口：未授权给购买引导，已授权开窗口。
 
@@ -5970,6 +6006,12 @@ class App:
                     w.apply_login_done(item[1], item[2])
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
+        elif kind == "miniapp_saved":
+            # ★ v2.7.8：小程序短剧落盘 → 加入清单（客户要求在列表里看到）
+            try:
+                self._add_miniapp_record(item[1], item[2], item[3])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"小程序短剧入清单失败：{e}")
         elif kind == "batch_autostop":
             # ★ v2.7.3：兜底判定「网断 / 到底」→ 真正关掉批量模式
             try:

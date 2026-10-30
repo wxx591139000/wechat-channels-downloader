@@ -302,6 +302,9 @@ class SphAddon:
         self._passthrough_logged = set()
         self.pipeline = pipeline
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
+        # ★ v2.7.8：小程序短剧
+        self.out_dir = None           # 下载根目录（GUI 按用户配置注入）
+        self.on_miniapp = None        # 回调 fn(ep_id, path, size)（GUI 加入清单）
         self.auto_download = auto_download
         self.allow_images = allow_images
         # 可选 fn(vd)->bool：GUI 跨会话去重（records.json 已有该视频/链接则 True）。
@@ -969,9 +972,15 @@ class SphAddon:
         m = _re.search(r"/([a-f0-9]{20,})/f0\.mp4", path)
         ep = m.group(1) if m else str(abs(hash(path)) % 10**12)
 
+        # ★ v2.7.8：必须用**用户配置的下载目录**（GUI 传进来的），
+        #   不能用 config.DOWNLOAD_DIR —— 那是模块默认值（程序目录/downloads），
+        #   导致客户在 E:\视频号下载 里找不到文件（实测 2026-10-30）。
         try:
-            from . import config as _cfg
-            base = _P(getattr(_cfg, "DOWNLOAD_DIR", ".")) / "小程序短剧"
+            root = getattr(self, "out_dir", None)
+            if not root:
+                from . import config as _cfg
+                root = getattr(_cfg, "DOWNLOAD_DIR", ".")
+            base = _P(root) / "小程序短剧"
         except Exception:
             base = _P("小程序短剧")
         base.mkdir(parents=True, exist_ok=True)
@@ -1035,6 +1044,13 @@ class SphAddon:
                           f"（{got / 1048576:.1f} MB）→ {final.parent}")
                 self._miniapp_saved = getattr(self, "_miniapp_saved", 0) + 1
                 ranges.pop(ep, None)
+                # ★ v2.7.8：加入清单（客户期望在列表里看到，而不是只在磁盘）
+                cb = getattr(self, "on_miniapp", None)
+                if cb:
+                    try:
+                        cb(ep, str(final), got)
+                    except Exception:
+                        pass
             except Exception:
                 pass
         else:
