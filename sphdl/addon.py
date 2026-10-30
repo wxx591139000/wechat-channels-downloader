@@ -306,6 +306,12 @@ class SphAddon:
         # ★ v2.7.8：小程序短剧
         self.out_dir = None           # 下载根目录（GUI 按用户配置注入）
         self.on_miniapp = None        # 回调 fn(ep_id, path, size)（GUI 加入清单）
+        # ★ v2.8.2：小程序短剧连播抓取（实测 2026-10-30）
+        #   小程序一集播完会**自动跳下一集**，新视频必然重新请求 mp4
+        #   → 只要一直挂着嗅探，"边播边存"就能连续抓完整季，无需任何额外操作。
+        #   实测证据：第02集 10:12:35 → 第03集 10:12:45（仅隔 10 秒，
+        #   客户未手动操作，是小程序自动跳的）。
+        self.miniapp_saved_total = 0  # 累计保存集数（连播统计）
         self.auto_download = auto_download
         self.allow_images = allow_images
         # 可选 fn(vd)->bool：GUI 跨会话去重（records.json 已有该视频/链接则 True）。
@@ -1091,8 +1097,18 @@ class SphAddon:
                 _os.replace(part, final)
                 logger.ok(f"🎬 小程序短剧已保存：{final.name} "
                           f"（{got / 1048576:.1f} MB）→ {final.parent}")
+                logger.info(
+                    "　　💡 小程序一集播完会自动跳下一集，"
+                    "保持嗅探运行即可连续抓取；如需换剧再点「选集」")
                 self._miniapp_saved = getattr(self, "_miniapp_saved", 0) + 1
+                self.miniapp_saved_total += 1
                 ranges.pop(ep, None)
+                # ★ 连播进度提示（每 5 集一次，避免刷日志）
+                if self.miniapp_saved_total % 5 == 0:
+                    logger.ok(
+                        f"🎬 小程序短剧已连续保存 "
+                        f"{self.miniapp_saved_total} 集"
+                        "（小程序自动跳集时无需人工操作，挂着即可）")
                 # ★ v2.7.8：加入清单（客户期望在列表里看到，而不是只在磁盘）
                 cb = getattr(self, "on_miniapp", None)
                 if cb:
