@@ -940,6 +940,41 @@ class SphAddon:
             "sniffing": bool(getattr(self, "running", False)),
         }
 
+    # ────────── 小程序接口深挖（v2.7.9）──────────
+    def _dump_miniapp_json(self, flow):
+        """把 JSON 响应按域名落盘：diag_miniapp/<host>.jsonl
+
+        用途（2026-10-30 客户需求「深挖剧集 + 文件名对齐剧集名」）：
+          小程序播放短剧时，剧集标题/集数/整季列表一定在某个 JSON 接口里。
+          把全部 JSON 抓下来，就能找到它，从而：
+            · 实现真正的批量（一次拿全季地址）
+            · 给下载的文件起名「剧集名_第N集.mp4」
+
+        只记 URL + body，单条上限 512KB，每域名最多 200 条（防爆盘）。
+        """
+        import json as _json
+        from pathlib import Path as _P
+        try:
+            root = _P(getattr(self, "out_dir", None) or ".")
+            d = root / "diag_miniapp"
+            d.mkdir(parents=True, exist_ok=True)
+            host = flow.request.host
+            f = d / f"{host}.jsonl"
+            # 限流
+            cnt = getattr(self, "_mpjson_cnt", None)
+            if cnt is None:
+                cnt = self._mpjson_cnt = {}
+            n = cnt.get(host, 0)
+            if n >= 200:
+                return
+            cnt[host] = n + 1
+            body = (flow.response.content or b"").decode("utf-8", "replace")
+            rec = {"url": flow.request.path, "len": len(body), "body": body[:200000]}
+            with open(f, "a", encoding="utf-8") as fh:
+                fh.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
     # ────────── 小程序短剧「边播边存」（v2.7.7）──────────
     def _save_miniapp_media(self, flow):
         """把小程序视频响应体落盘（支持 Range 分片拼装）。
@@ -1075,6 +1110,17 @@ class SphAddon:
         # 自然捕获（v2.0.7）：播放器请求某条视频的流/封面 → 命中候选并捕获
         if "stodownload" in flow.request.path:
             self._maybe_capture_from_stream(flow.request.path)
+
+        # ★★★ v2.7.9：小程序接口深挖 —— 诊断模式下把所有 JSON 响应落盘。
+        #   目的：找出「剧集列表 / 剧集标题」接口（客户要求文件名对齐剧集名）。
+        #   只记 <512KB 的 JSON（视频本体是 mp4，不走这里）。
+        try:
+            if getattr(self, "_bridge_diag", False) or self._diag_on():
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if "json" in ctype and len(resp.content or b"") < 524288:
+                    self._dump_miniapp_json(flow)
+        except Exception:
+            pass
 
         # ★★★ v2.7.7：小程序短剧「边播边存」
         #   实测（2026-10-30）：小程序视频在 `*.wxamedia.com/.../f0.mp4`，
