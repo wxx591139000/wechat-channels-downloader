@@ -1675,12 +1675,24 @@ class H(BaseHTTPRequestHandler):
                 + "</span>"
                 # ★ v2.2.4：本版更新要点（折叠显示，避免列表太长）
                 + notes_html
-                + "<div style='margin-top:8px;display:flex;gap:8px'>"
+                + "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'>"
+                # ★ v2.8.3（客户需求）：不经过发码，直接一键复制网盘链接
+                + "<button type='button' class='btn2' style='padding:6px 12px'"
+                + " onclick=\"copyLink(" + str(i) + ")\">📋 复制链接</button>"
+                + "<button type='button' class='btn2 gray' style='padding:6px 12px'"
+                + " onclick=\"copyFull(" + str(i) + ")\">📄 复制完整话术</button>"
                 + "<button type='button' class='del' onclick=\"" + del_js + "\">"
                 + "删除</button></div></div>"
             )
         if not items:
             items = "<div class='warn'>还没有任何版本，先在下面添加一个。</div>"
+
+        import json as _json
+        _vers_js = _json.dumps(
+            [{"ver": v["ver"], "channel": v.get("channel", ""),
+              "filename": v.get("filename", ""), "link": v.get("link", ""),
+              "pwd": v.get("pwd", "")} for v in d["versions"]],
+            ensure_ascii=False)
 
         body = f"""
 <div class="card"><h3>① 套路词（每次发码都会带上）</h3>
@@ -1740,6 +1752,38 @@ class H(BaseHTTPRequestHandler):
 </form>
 
 {JS_PASTE}
+<script>
+// ★ v2.8.3（客户需求 2026-10-30）：独立于「发码」的一键复制路径
+//   场景：已购用户只要网盘地址（补发/换链接），不涉及授权码。
+var VERS = {_vers_js};
+function _linkText(i) {{
+  var v = VERS[i]; if (!v) return "";
+  var t = v.link || "";
+  if (v.pwd) {{
+    // 链接已带 pwd= 就不重复追加
+    if (t.indexOf("pwd=") < 0) t += "  提取码：" + v.pwd;
+  }}
+  return t;
+}}
+function _fullText(i) {{
+  var v = VERS[i]; if (!v) return "";
+  var out = [];
+  out.push("微信视频号下载器 v" + v.ver + (v.channel ? "（" + v.channel + "网盘）" : ""));
+  if (v.filename) out.push("文件：" + v.filename);
+  out.push("下载：" + _linkText(i));
+  return out.join("\n");
+}}
+function copyLink(i) {{
+  var t = _linkText(i);
+  if (!t) {{ alert("这个版本还没填网盘链接"); return; }}
+  cp(t, event && event.target);
+}}
+function copyFull(i) {{
+  var t = _fullText(i);
+  if (!t) {{ alert("这个版本还没填网盘链接"); return; }}
+  cp(t, event && event.target);
+}}
+</script>
 """
         return self._send(200, page("话术库", body, nav_on(3), flash))
 
