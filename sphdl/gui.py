@@ -3964,12 +3964,16 @@ class App:
         """
         self._wd_last_warn = 0.0
         self._wd_started = time.time()
+        # ★ v2.8.1（客户反馈 2026-10-30「这个弹窗不要反复弹，弹一个就行」）：
+        #   原来用 180 秒冷却 → 3 分钟后又弹，客户被反复打扰。
+        #   改成**每个嗅探会话只弹一次**；只有「抓到了视频」才重置，
+        #   这样下次真出问题（重新开嗅探）还能提醒一次。
+        if not hasattr(self, "_wd_popup_shown"):
+            self._wd_popup_shown = False
 
         def _tick():
             try:
                 if not self.engine_running:
-                    return
-                if time.time() - getattr(self, "_wd_last_warn", 0) < 180:
                     return
                 if time.time() - self._wd_started < 25:
                     return          # 刚启动，给客户 25 秒操作时间
@@ -3979,15 +3983,23 @@ class App:
                 cap = st.get("captured", 0)
                 age = st.get("last_hit_age", -1)
 
-                # 已经抓到了 → 不打扰
+                # ★ 必须先判「抓到没」再判「弹过没」——
+                #   v2.8.1 第一版把 `if _wd_popup_shown: return` 放在前面，
+                #   抓到视频时直接 return，永远走不到重置分支 →
+                #   之后真出问题也不再提醒（测试 P3 抓到的）。
                 if cap > 0:
+                    self._wd_popup_shown = False
                     return
 
+                if self._wd_popup_shown:
+                    return          # ★ 弹过了就不再弹
+
                 if fail > 0:
+                    self._wd_popup_shown = True
                     self._wd_last_warn = time.time()
-                    self._warn_capture_failed(
-                        "tls", fail)
+                    self._warn_capture_failed("tls", fail)
                 elif hits >= 3 and age >= 0 and age < 120:
+                    self._wd_popup_shown = True
                     self._wd_last_warn = time.time()
                     self._warn_capture_failed("nohook", hits)
             except Exception:
@@ -4013,7 +4025,18 @@ class App:
         self.push_log("warn", f"⚠ 诊断：微信页面活动 {n} 次但没有抓到视频"
                               f"（kind={kind}）")
 
+        # ★ v2.8.1：同一个诊断窗只允许存在一个（不管谁调用）
+        try:
+            old_win = getattr(self, "_capture_fail_win", None)
+            if old_win is not None and old_win.winfo_exists():
+                old_win.deiconify()
+                old_win.lift()
+                return
+        except Exception:
+            pass
+
         win = tk.Toplevel(self.root)
+        self._capture_fail_win = win
         win.title("抓不到视频？")
         win.transient(self.root)
         win.configure(bg="#ffffff")
