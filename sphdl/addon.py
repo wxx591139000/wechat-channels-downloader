@@ -270,6 +270,7 @@ class SphAddon:
         #   日志出现 `33wozf743525a.vodpreview.wxamedia.com` 但被**透传**，
         #   一个字节都看不到。wxamedia 是小程序视频 CDN（wxa = 微信小程序）。
         r"(^|\.)wxamedia\.com$",         # 小程序视频 CDN（含 vodpreview）
+        r"(^|\.)qq\.com\.cn$",           # ★ 小程序 COS（实测 wxaintpcos.wxqcloud.qq.com.cn 被透传）
         r"(^|\.)servicewechat\.com$",    # 小程序 API 网关
         r"(^|\.)wxs\.qq\.com$",          # 小程序接口（部分场景）
     )
@@ -1020,11 +1021,24 @@ class SphAddon:
             base = _P("小程序短剧")
         base.mkdir(parents=True, exist_ok=True)
 
-        final = base / f"{ep}.mp4"
+        # ★ v2.8.0：文件名带集序，方便按名字排序查阅（客户要求）。
+        #   集序 = 本程序运行期内第几个保存的（= 播放顺序）。
+        #   真实剧名/集号接口暂未找到（小程序元数据没走可拦截 HTTP），
+        #   找到后再升级为「剧名_第N集」。
+        #   映射关系存到 _episodes.json，重命名时不会乱序。
+        seq = getattr(self, "_miniapp_saved", 0) + 1
+        name_map = getattr(self, "_mp_names", None)
+        if name_map is None:
+            name_map = self._mp_names = {}
+        # 同一集重复请求要沿用旧名字
+        seq = name_map.get(ep, seq)
+        name_map.setdefault(ep, seq)
+        short = ep[:8]
+        final = base / f"第{seq:02d}集_{short}.mp4"
         if final.exists() and final.stat().st_size > 1024:
             return                                    # 已存过
 
-        part = base / f"{ep}.mp4.part"
+        part = base / f"第{seq:02d}集_{short}.mp4.part"
         cr = resp.headers.get("content-range") or ""
         total = 0
         start = 0

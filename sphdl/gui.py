@@ -1017,16 +1017,22 @@ class App:
         # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
         # 捕获即自动入队（v1.2.5，状态持久化 config.json）
         self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
-        # ★ v2.7.8：小程序短剧落盘目录 + 清单回调
-        try:
-            self.addon.out_dir = self.cfg.download_dir
-            self.addon.on_miniapp = (lambda ep, path, size:
-                                     self.ui_q.put(("miniapp_saved", ep, path, size)))
-        except Exception:
-            pass
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
+
+        # ★ v2.8.0：小程序短剧落盘目录 + 清单回调
+        #   ⚠ 必须放在 addon 创建**之后**！
+        #   v2.7.8 曾把这段放在 self.addon 还是 None 时执行，
+        #   AttributeError 被 except 吞掉 → out_dir 一直是 None
+        #   → 文件全存到了程序目录/downloads（客户找不到，2026-10-30 实测）。
+        try:
+            if self.addon is not None:
+                self.addon.out_dir = self.cfg.download_dir
+                self.addon.on_miniapp = (lambda ep, path, size:
+                                         self.ui_q.put(("miniapp_saved", ep, path, size)))
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("warn", f"小程序短剧目录注入失败：{e}")
         self.addon.natural_capture = self.cfg.natural_capture
         # ★ v2.2.5：把授权门禁交给 addon，堵住「自动下载绕过授权」的漏洞
         self.addon.license_check = self._has_download_license

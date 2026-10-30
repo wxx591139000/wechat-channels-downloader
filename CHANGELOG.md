@@ -3,6 +3,74 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.8.0] - 2026-10-30
+
+- v2.8.0 小程序目录修复+集序命名
+### 小程序短剧：修落盘目录 + 文件名按集序
+
+#### ① 修严重 bug：文件仍存到程序目录
+
+v2.7.8 把 `self.addon.out_dir = ...` 写在 **addon 创建之前**：
+
+```python
+self.pipeline = Pipeline(...)
+try:
+    self.addon.out_dir = self.cfg.download_dir   # ❌ 此时 self.addon 还是 None
+except Exception:
+    pass                                         # ❌ 异常被静默吞掉
+...
+self.addon = SphAddon(...)                       # 真正的创建在这里
+```
+
+→ `out_dir` 永远是 None → 回退到 `config.DOWNLOAD_DIR`（程序目录/downloads）
+→ 客户配置 `E:\视频号下载`，文件却不在那儿（连续两版都是这个症状）。
+
+现在注入移到 addon 创建之后，且失败会 `push_log` 告警，不再静默。
+
+#### ② 文件名按集序（客户要求「方便查阅」）
+
+```
+第01集_aaaa1111.mp4
+第02集_bbbb2222.mp4
+```
+
+- 序号 = 本程序运行期内的保存顺序（= 播放顺序）
+- 保留哈希前 8 位（便于去重、追源）
+- 同一集重复请求沿用同一序号（不会变第02集）
+- `.part` 分片名与最终名一致
+
+#### ③ 深挖剧集的结果（如实汇报）
+
+诊断模式把所有 JSON 响应落盘后，**只拿到埋点和心跳**：
+
+```
+mp.weixin.qq.com     /mp/jsmonitor        → {"ret":0,"errmsg":"ok"}
+sh.servicewechat.com /ob/sdkmonitor       → {"base_resp":{"ret":0}}
+game.weixin.qq.com   /reportgamewebruntime → {"errcode":0}
+```
+
+透传域名只有 COS 静态资源（`wxaintpcos.wxqcloud.qq.com.cn` 等）。
+
+**结论：剧集标题/集数/整季地址没有走可拦截的 HTTP**，
+大概率在小程序私有通道或包内 JS 里。
+
+→ 所以本版**先用播放顺序命名**。真剧名需要更深的逆向（解 wxapkg / 私有协议），
+   不保证能拿到，暂不承诺。
+
+#### ④ 白名单补 `qq.com.cn`
+
+`wxaintpcos.wxqcloud.qq.com.cn` 之前被裸透传（`.qq.com.cn` 不在白名单）。
+
+#### 验证（14 项）
+
+`tests/verify_miniapp_naming.py`：
+- ★out_dir 注入在 addon 创建**之后**、失败有告警
+- ★文件名 `第01集_aaaaaaaa.mp4`，第 2 集递增
+- ★同一集重复请求不新增、序号不变
+- `.part` 名字一致
+- 白名单含 qq.com.cn
+- 深挖函数有上限且只在诊断开关下触发
+
 ## [2.7.9] - 2026-10-30
 
 - v2.7.9 深挖剧集接口
