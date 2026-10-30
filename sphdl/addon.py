@@ -266,6 +266,12 @@ class SphAddon:
         #   评论区能显示多少，取决于评论接口恰好走没走白名单 → 时好时坏。
         r"(^|\.)qq\.com$",
         r"(^|\.)gtimg\.cn$",              # 微信图片 CDN（体量小）
+        # ★★★ v2.7.6：小程序（短剧）相关域名 —— 实测客户播放「绿泡泡短剧」时
+        #   日志出现 `33wozf743525a.vodpreview.wxamedia.com` 但被**透传**，
+        #   一个字节都看不到。wxamedia 是小程序视频 CDN（wxa = 微信小程序）。
+        r"(^|\.)wxamedia\.com$",         # 小程序视频 CDN（含 vodpreview）
+        r"(^|\.)servicewechat\.com$",    # 小程序 API 网关
+        r"(^|\.)wxs\.qq\.com$",          # 小程序接口（部分场景）
     )
 
     # ★ v2.2.15：这些重型媒体域名**不拦**（MITM 大流量视频会卡/断流）
@@ -931,6 +937,111 @@ class SphAddon:
             "sniffing": bool(getattr(self, "running", False)),
         }
 
+    # ────────── 小程序短剧「边播边存」（v2.7.7）──────────
+    def _save_miniapp_media(self, flow):
+        """把小程序视频响应体落盘（支持 Range 分片拼装）。
+
+        ★ 为什么这么做（2026-10-30 实测结论）：
+          · 地址形如 `xxx.vodpreview.wxamedia.com/<vod>/<episode_id>/f0.mp4?t=..&us=..`
+          · `t=` 是时间戳签名，几分钟后必然 403
+          · 用微信 UA + Referer + Range 等 5 种组合外部重下，**全部 403**
+            → 说明还依赖小程序会话（cookie / 设备指纹），外部下载走不通
+          · 但流经代理的响应是**明文可用**的 → 直接 tee 落盘最可靠
+
+        分片处理：播放器用 Range 请求（206）。按 Content-Range 的 start/total
+        定位写入，凑满 total 即完成，然后改名去掉 .part。
+        """
+        import os as _os
+        import re as _re
+        from pathlib import Path as _P
+
+        resp = flow.response
+        path = flow.request.path or ""
+        if ".mp4" not in path.lower():
+            return
+        if resp.status_code not in (200, 206):
+            return
+        body = resp.content or b""
+        if not body:
+            return
+
+        # 集号：路径里 `/<vod>/<episode_id>/f0.mp4`
+        m = _re.search(r"/([a-f0-9]{20,})/f0\.mp4", path)
+        ep = m.group(1) if m else str(abs(hash(path)) % 10**12)
+
+        try:
+            from . import config as _cfg
+            base = _P(getattr(_cfg, "DOWNLOAD_DIR", ".")) / "小程序短剧"
+        except Exception:
+            base = _P("小程序短剧")
+        base.mkdir(parents=True, exist_ok=True)
+
+        final = base / f"{ep}.mp4"
+        if final.exists() and final.stat().st_size > 1024:
+            return                                    # 已存过
+
+        part = base / f"{ep}.mp4.part"
+        cr = resp.headers.get("content-range") or ""
+        total = 0
+        start = 0
+        if cr:
+            mm = _re.match(r"bytes\s+(\d+)-(\d+)/(\d+)", cr)
+            if mm:
+                start, _end, total = int(mm.group(1)), int(mm.group(2)), int(mm.group(3))
+        elif resp.status_code == 200:
+            total = len(body)
+
+        mode = "r+b" if part.exists() else "wb"
+        with open(part, mode) as f:
+            if start:
+                f.seek(start)
+            else:
+                f.seek(0)
+            f.write(body)
+
+        # ★ 完成判定必须按「字节区间覆盖」算，不能看文件大小。
+        #   实测教训：分片可能乱序到达（先到 2000 段），seek 写完后文件大小
+        #   就已经等于 total，但 0~2000 还是空洞 → 提前改名产生残缺文件。
+        ranges = getattr(self, "_mp_ranges", None)
+        if ranges is None:
+            ranges = self._mp_ranges = {}
+        rec = ranges.setdefault(ep, {"total": 0, "got": []})
+        if total:
+            rec["total"] = total
+        # 记录本次写入的区间
+        seg_end = start + len(body) - 1
+        rec["got"].append((start, seg_end))
+
+        covered = 0
+        if rec["total"]:
+            # 合并区间，算连续覆盖长度
+            merged = []
+            for a, b in sorted(rec["got"]):
+                if merged and a <= merged[-1][1] + 1:
+                    merged[-1][1] = max(merged[-1][1], b)
+                else:
+                    merged.append([a, b])
+            covered = sum(b - a + 1 for a, b in merged)
+            complete = (len(merged) == 1 and merged[0][0] == 0
+                        and merged[0][1] >= rec["total"] - 1)
+        else:
+            complete = True        # 没有 total 信息（200 全量）→ 视为完成
+
+        got = part.stat().st_size
+        if complete:
+            try:
+                _os.replace(part, final)
+                logger.ok(f"🎬 小程序短剧已保存：{final.name} "
+                          f"（{got / 1048576:.1f} MB）→ {final.parent}")
+                self._miniapp_saved = getattr(self, "_miniapp_saved", 0) + 1
+                ranges.pop(ep, None)
+            except Exception:
+                pass
+        else:
+            logger.debug(f"🎬 小程序短剧分片 {ep[:10]}… "
+                         f"{covered / 1048576:.1f}/"
+                         f"{rec['total'] / 1048576:.1f} MB")
+
     def response(self, flow: http.HTTPFlow):
         resp = flow.response
         if resp is None:
@@ -948,6 +1059,18 @@ class SphAddon:
         # 自然捕获（v2.0.7）：播放器请求某条视频的流/封面 → 命中候选并捕获
         if "stodownload" in flow.request.path:
             self._maybe_capture_from_stream(flow.request.path)
+
+        # ★★★ v2.7.7：小程序短剧「边播边存」
+        #   实测（2026-10-30）：小程序视频在 `*.wxamedia.com/.../f0.mp4`，
+        #   是**完整 MP4**（单集 3~7MB），但 URL 带 `t=` 时间戳签名，
+        #   几分钟就 403；而且外部重下（换任何 headers）也都 403。
+        #   → 唯一可靠办法：**把流经代理的响应体直接落盘**，
+        #     不需要 cookie、不需要签名、不担心过期。
+        if host.endswith("wxamedia.com"):
+            try:
+                self._save_miniapp_media(flow)
+            except Exception as e:                    # noqa: BLE001
+                logger.warn(f"小程序短剧保存失败：{e}")
 
         # ③ 注入点：web-finder 页面的 svg-icons-register JS
         if host.endswith("res.wx.qq.com") and config.INJECT_JS_MARKER in flow.request.path:

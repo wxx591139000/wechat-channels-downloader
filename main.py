@@ -529,12 +529,18 @@ def main():
         import os as _os
         _dbg = _os.environ.get("SPHDL_DEBUG", "").strip() in ("1", "true", "yes")
         try:
-            from pathlib import Path as _P
-            if (_P(__file__).resolve().parent / "开启调试日志.txt").exists():
+            # ★ v2.7.6：必须用 config.BASE_DIR（程序真实所在目录），
+            #   不能用 __file__ —— PyInstaller 打包后 __file__ 指向
+            #   解压出的临时目录，开关文件永远判定为不存在。
+            #   （v2.7.5 就是这样：客户建了开关但 DIM 一条都没记下来）
+            if (config.BASE_DIR / "开启调试日志.txt").exists():
                 _dbg = True
         except Exception:
             pass
         logger.debug_enabled = _dbg
+        if _dbg:
+            logger.info("🔬 调试日志已开启（所有网络请求会写入日志文件，"
+                        "界面不显示）")
         # 必须走 gui.main()（内含 Windows 单实例互斥检查），
         # 不能直接 App().run() —— 那样会绕过互斥导致多实例抢端口/抢代理。
         from sphdl import gui as sphdl_gui
