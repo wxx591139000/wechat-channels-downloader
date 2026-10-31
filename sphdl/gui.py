@@ -6046,7 +6046,7 @@ class App:
             self._update_status_bar()
         elif kind in ("dy_item", "dy_parse_done", "dy_dl_start",
                       "dy_dl_prog", "dy_dl_done", "dy_all_done",
-                      "dy_login_done"):
+                      "dy_login_done", "dy_profile_progress"):
             # ★ v2.4.0：抖音批量下载窗口的事件
             w = getattr(self, "_dy_win", None)
             if w is None:
@@ -6068,6 +6068,12 @@ class App:
                     w.apply_all_done(item[1], item[2], item[3])
                 elif kind == "dy_login_done":
                     w.apply_login_done(item[1], item[2])
+                elif kind == "dy_profile_progress":
+                    # ★ 方案 B：主页抓取进度（显示在状态栏）
+                    try:
+                        w.lbl_stat.config(text=item[1])
+                    except Exception:
+                        pass
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
         elif kind == "miniapp_saved":

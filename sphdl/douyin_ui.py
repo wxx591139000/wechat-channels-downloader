@@ -97,15 +97,20 @@ class DouyinWindow:
         pad.pack(fill="both", expand=True)
 
         # ① 粘贴区
-        tk.Label(pad, text="① 粘贴抖音链接（一行一个，也可直接粘整段分享文案）",
+        tk.Label(pad, text="① 粘贴抖音链接（作品链接 或 博主主页链接，一行一个）",
                  bg="#f6f8fa", font=(FONT, 10, "bold")).pack(
             anchor="w", padx=14, pady=(12, 4))
         self.txt = tk.Text(pad, height=5, wrap="word", font=(FONT, 10),
                            bg="#ffffff", relief="solid", bd=1)
         self.txt.pack(fill="x", padx=14)
-        self.txt.insert("1.0",
-                        "例：https://www.douyin.com/video/7xxxxxxxxxxxxxxxxx\n"
-                        "或：https://v.douyin.com/xxxxxx/")
+        self.txt.insert(
+            "1.0",
+            "作品链接：https://www.douyin.com/video/7xxxxxxxxxxxxxxxxx\n"
+            "短  链：https://v.douyin.com/xxxxxx/\n"
+            "主页链接：https://www.douyin.com/user/MS4wLjABAAAA...\n"
+            "\n"
+            "★ 粘主页链接 = 抓该博主的全部作品（最多抓 500 条，可改）\n"
+            "★ 主页链接建议先【登录】，未登录抖音只给很少作品")
 
         bar1 = tk.Frame(pad, bg="#f6f8fa")
         bar1.pack(fill="x", padx=14, pady=(8, 4))
@@ -117,6 +122,15 @@ class DouyinWindow:
         self.lbl_count = tk.Label(bar1, text="", bg="#f6f8fa",
                                   font=(FONT, 9), fg="#6b7280")
         self.lbl_count.pack(side="left", padx=10)
+
+        # ★ 方案 B：主页最多抓多少条
+        tk.Label(bar1, text="主页最多抓", bg="#f6f8fa",
+                 font=(FONT, 9), fg="#6b7280").pack(side="left", padx=(6, 2))
+        self.var_max = tk.StringVar(value="500")
+        tk.Spinbox(bar1, from_=10, to=2000, width=6, textvariable=self.var_max,
+                   font=(FONT, 9)).pack(side="left")
+        tk.Label(bar1, text="条", bg="#f6f8fa", font=(FONT, 9),
+                 fg="#6b7280").pack(side="left")
 
         # ② 结果表
         tk.Label(pad, text="② 解析结果（勾选后批量下载）",
@@ -402,6 +416,81 @@ class DouyinWindow:
                   "已删除本地抖音登录态" if ok else "删除登录态失败")
 
     # ────────────────── 解析 ──────────────────
+    # ────────────── ★ 方案 B：主页批量抓取 ──────────────
+    def _start_profile_fetch(self, profile_urls, video_urls):
+        """抓取主页全部作品（方案 B）。
+
+        流程：打开主页 → 让页面自己请求（签名天然正确）→ 读响应 → 滚动加载更多
+        抓完后把视频列表填进表格，用户勾选下载。
+        """
+        try:
+            max_items = int(float(self.var_max.get()))
+        except Exception:
+            max_items = 500
+        max_items = max(10, min(2000, max_items))
+
+        self._set_busy(True, f"正在抓取主页作品（最多 {max_items} 条）…")
+        self._log("info", f"主页模式：{len(profile_urls)} 个主页，"
+                          f"最多 {max_items} 条/主页")
+
+        def _worker():
+            from .douyin_profile import fetch_profile
+            from .douyin import resolve_many
+
+            all_videos = []
+            try:
+                for pu in profile_urls:
+                    if self._stop:
+                        break
+                    self._log("info", f"打开主页：{pu}")
+
+                    def on_page(added, total):
+                        self.app.ui_q.put(("dy_profile_progress",
+                                           f"已抓到 {total} 条"))
+
+                    res = fetch_profile(
+                        pu, max_items=max_items,
+                        on_log=lambda lv, m: self._log(lv, m),
+                        on_page=on_page,
+                        should_stop=lambda: self._stop,
+                    )
+                    if res.error:
+                        self._log("error", f"主页抓取失败：{res.error}")
+                        continue
+                    who = res.nickname or res.sec_uid[:16]
+                    self._log("ok", f"✅ {who}：抓到 {len(res.items)} 条作品"
+                                    + (f"（{res.note}）" if res.note else ""))
+                    all_videos.extend(res.items)
+
+                if not all_videos:
+                    self._log("error", "没有抓到任何作品")
+                    self.app.ui_q.put(("dy_parse_done", 0))
+                    return
+
+                # 填入表格（复用现有的 dy_item 回填通道）
+                for i, v in enumerate(all_videos):
+                    self.app.ui_q.put(("dy_item", i, v))
+                self._log("ok", f"共 {len(all_videos)} 条，可以勾选下载了")
+
+                # 如果同时还粘了作品链接，一并解析
+                if video_urls and not self._stop:
+                    self._log("info", f"另外解析 {len(video_urls)} 个作品链接…")
+
+                    def on_item(i, url, v):
+                        self.app.ui_q.put(("dy_item", len(all_videos) + i, v))
+
+                    resolve_many(video_urls, on_item=on_item,
+                                 on_log=lambda lv, m: self._log(lv, m),
+                                 should_stop=lambda: self._stop)
+            except Exception as e:                     # noqa: BLE001
+                self._log("error", f"主页抓取异常: {type(e).__name__}: {e}")
+            finally:
+                self.app.ui_q.put(("dy_parse_done",
+                                   len(all_videos) + len(video_urls)))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _on_parse(self):
         if self._busy:
             return
@@ -418,11 +507,29 @@ class DouyinWindow:
                 parent=self.win)
             return
 
+        # ══════ ★ 方案 B：先检查有没有「主页链接」══════
+        from .douyin_profile import normalize as _norm_profile
+        profile_urls = []
+        video_urls = []
+        for u in urls:
+            n = _norm_profile(u)
+            if n["kind"] in ("profile",) :
+                profile_urls.append(n["url"])
+            elif n["kind"] == "short":
+                video_urls.append(u)      # 短链可能是主页，先按作品处理，解析时再判断
+            else:
+                video_urls.append(u)
+
         for i in list(self.tree.get_children()):
             self.tree.delete(i)
         self._rows.clear()
         self.videos.clear()
         self._stop = False
+
+        if profile_urls:
+            self._start_profile_fetch(profile_urls, video_urls)
+            return
+
         self._set_busy(True, f"正在解析 {len(urls)} 条…（每条间隔 2~5 秒防限流）")
 
         # 先占位，边解析边回填
