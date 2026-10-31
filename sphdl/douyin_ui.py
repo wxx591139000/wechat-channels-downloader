@@ -110,7 +110,8 @@ class DouyinWindow:
             "主页链接：https://www.douyin.com/user/MS4wLjABAAAA...\n"
             "\n"
             "★ 粘主页链接 = 抓该博主的全部作品（最多抓 500 条，可改）\n"
-            "★ 主页链接建议先【登录】，未登录抖音只给很少作品")
+            "★ 主页抓取【必须先登录】：未登录时抖音不返回作品列表，\n"
+            "   页面会一直显示「数据加载中」。请先点顶部【登录抖音】扫码。")
 
         bar1 = tk.Frame(pad, bg="#f6f8fa")
         bar1.pack(fill="x", padx=14, pady=(8, 4))
