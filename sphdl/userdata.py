@@ -278,8 +278,32 @@ def _resolve_inner(fname: str) -> Path:
             except Exception:
                 _MIGRATED[fname] = src
                 return src
-            # ★ 关键：清掉继承来的授权码，只保留设置
-            _sanitize_license(target)
+            # ★★★ v2.9.7 修复（客户报障：每次换新版本授权信息都会丢失）★★★
+            #
+            #   原代码在这里无脑调用 _sanitize_license(target)，
+            #   把**刚从旧配置复制过来的授权码清空**了。
+            #   结果：客户每换一版就要重新激活一次（已售客户体验事故）。
+            #
+            #   为什么要区分两种情况：
+            #
+            #   ① src 在【程序目录】里（打包机带出来的配置）
+            #      → 必须清（那是开发机的授权，不能送给客户）
+            #      → 这才是 _sanitize_license 的原始设计意图
+            #
+            #   ② src 在【用户数据目录】里（客户自己激活的记录，
+            #      或旧版本的用户数据）
+            #      → **绝不能清**，那正是要保留的客户授权
+            #
+            #   判断依据：src 是否位于 app_dir()（程序所在目录）之下。
+            try:
+                _under_appdir = str(src.resolve()).lower().startswith(
+                    str(app_dir().resolve()).lower())
+            except Exception:
+                _under_appdir = False
+            if _under_appdir:
+                _sanitize_license(target)
+            else:
+                logger.debug(f"迁移 {fname}：来源在用户目录，保留授权码")
         _MIGRATED[fname] = target
         return target
 

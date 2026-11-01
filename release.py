@@ -290,7 +290,21 @@ def build_frozen(v: tuple, force: bool, edition_sfx: str = "",
             log("     → 打包后会自动校验包内无敏感文件")
     if WORK.exists():
         shutil.rmtree(WORK)
+    # ★★★ v2.9.7 修复（打包出旧代码的严重事故）★★★
+    #   原来没有 --clean，PyInstaller 会复用 ~/.pyinstaller 缓存 +
+    #   项目里残留的 *.pyc，导致**改了源码但打出来还是旧代码**。
+    #   本次事故：v2.9.6/v2.9.7 都带着旧 gui.py（缺 self.tree）
+    #   → 客户双击直接崩「AttributeError: 'App' object has no attribute 'tree'」。
+    #   加 --clean 强制全新构建，代价只多几秒。
+    #   同时清 __pycache__：确保没有陈旧 .pyc 被塞进包。
+    for pc in (Path("sphdl/__pycache__"), Path("__pycache__")):
+        if pc.exists():
+            try:
+                shutil.rmtree(pc)
+            except Exception:
+                pass
     run([sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm",
+         "--clean",
          "--distpath", str(ver_dir),
          "--workpath", str(WORK)])
     return out_dir

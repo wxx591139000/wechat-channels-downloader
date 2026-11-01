@@ -1419,7 +1419,7 @@ class App:
 
         def _feat(txt, on, tip, buy=None):
             lb = ttk.Label(
-                feat_row, text=txt + ("✓" if on else "✗"),
+                feat_row, text=txt + ("√" if on else "✗"),
                 foreground="#0f766e" if on else "#b91c1c",
                 font=("Microsoft YaHei UI", 8, "bold" if not on else "normal"))
             lb.pack(side="left", padx=(6, 0))
@@ -1439,7 +1439,7 @@ class App:
                 lb.bind("<Button-1>", _click)
             return lb
 
-        ttk.Label(feat_row, text="视频号" + ("✓" if _has_vc else "✗"),
+        ttk.Label(feat_row, text="视频号" + ("√" if _has_vc else "✗"),
                   foreground="#0f766e" if _has_vc else "#9ca3af",
                   font=("Microsoft YaHei UI", 8)).pack(side="left")
         _feat("公众号视频", _has_mp,
@@ -2739,6 +2739,7 @@ class App:
         main = ttk.Frame(root, padding=8)
         main.pack(side="top", fill="both", expand=True)
 
+
         # ===== ⓿ 防盗声明横幅（v2.0.19）=====
         # 目的：让客户一眼看到这是"有授权追溯的正版"，同时让转卖者有所顾忌。
         # 内容随授权状态变化：已授权显示授权归属，未授权提示需授权。
@@ -3279,9 +3280,32 @@ class App:
                  "只删记录，已下载的文件保留在磁盘。")
 
         # ===== ④ 日志区 =====
-        logf = ttk.LabelFrame(main, text=" 日志 ", padding=4)
-        logf.pack(fill="both", pady=(0, 0))
-        self.log_text = tk.Text(logf, height=9, bg="#0b1020", fg="#d1d5db",
+        # ★★ v2.9.6 布局修复（客户报障：日志区看不见）★★
+        #   原代码 `fill="both"` 但**没有 expand**，而上面的视频列表区
+        #   `expand=True` 会吃掉全部剩余空间 → 日志区被压成 0 高度。
+        #   修法：加 expand=True，让两个区域按比例分配剩余空间。
+        # ★★★ v2.9.9 根治（客户三次反馈：日志框太小/看不见）★★★
+        #   前面试过 pack 双 expand、side=bottom、grid weight，都压不住：
+        #   因为 main 里还堆着引擎区/捕获设置/上限/目录等一堆 pack 控件，
+        #   Tk 给 expand 兄弟分空间时，日志区总是抢不过列表区（列表里有
+        #   Treeview + 2 行按钮 + 多选提示条，本身也全用 expand）。
+        #
+        #   最终解法：给日志区套一个**固定高度的容器**（height=320px，
+        #   pack_propagate(False) 禁止子控件撑大/缩小它），日志区再填满它。
+        #   这样无论窗口怎么变、列表区多贪，日志区都稳占 320px。
+        _log_holder = tk.Frame(main, height=200, bg="#f6f8fa")
+        # ★★ v2.9.9 关键：必须用 before=self.list_frame ★★
+        #   Tk 的 pack 按调用顺序分配空间：
+        #   list_frame 在 2994 行就先 pack 了（expand=True，抢走全部剩余），
+        #   等 3295 行才 pack 日志区时已经没空间可分了 → 只剩 30px。
+        #   before= 强制把日志区插到列表区**之前**的分配顺序里，
+        #   这样日志区先拿到 320px，列表区再吃剩下的。
+        _log_holder.pack(side="bottom", fill="x", expand=False,
+                         pady=(0, 0), before=self.list_frame)
+        _log_holder.pack_propagate(False)      # ★ 锁死高度，不让子控件改变它
+        logf = ttk.LabelFrame(_log_holder, text=" 日志 ", padding=4)
+        logf.pack(fill="both", expand=True)
+        self.log_text = tk.Text(logf, height=10, bg="#0b1020", fg="#d1d5db",
                                 insertbackground="#d1d5db", relief="flat",
                                 font=("Consolas", 9), wrap="word", state="disabled")
         lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log_text.yview)
