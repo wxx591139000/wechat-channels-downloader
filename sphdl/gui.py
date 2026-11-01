@@ -2736,7 +2736,7 @@ class App:
                                     padding=(8, 2))
         self.status_bar.pack(fill="x", side="bottom")
 
-        main = ttk.Frame(root, padding=8)
+        main = ttk.Frame(root, padding=6)
         main.pack(side="top", fill="both", expand=True)
 
 
@@ -2748,7 +2748,7 @@ class App:
         self._build_watermark_bar(main)
 
         # ===== ① 引擎控制区 =====
-        eng = ttk.LabelFrame(main, text=" 嗅探引擎 ", padding=8)
+        eng = ttk.LabelFrame(main, text=" 嗅探引擎 ", padding=(8, 3))
         eng.pack(fill="x")
 
         self.btn_engine = ttk.Button(eng, text="▶  启动嗅探", width=14,
@@ -2805,8 +2805,8 @@ class App:
                  "也有单按钮说明。")
 
         # ===== ② 捕获设置（捕获后的行为） =====
-        capf = ttk.LabelFrame(main, text=" 捕获设置 ", padding=6)
-        capf.pack(fill="x", pady=(8, 0))
+        capf = ttk.LabelFrame(main, text=" 捕获与下载 ", padding=(8, 4))
+        capf.pack(fill="x", pady=(3, 0))
 
         # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
         # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
@@ -2881,10 +2881,17 @@ class App:
             #     vista/xpnative                      → ❌ 忽略
             #   所以切到 clam（Tk 自带自绘主题，跨平台一致、支持配色）。
             try:
-                if st.theme_use() in ("vista", "xpnative", "winnative"):
+                _cur = st.theme_use()
+                if _cur in ("vista", "xpnative", "winnative"):
                     st.theme_use("clam")
-            except Exception:
-                pass
+                    # ★★ v3.0.0 关键：切主题后**必须重新取 Style 实例** ★★
+                    #   实测：切换前拿到的 st 对象上 configure 的自定义样式，
+                    #   在 clam 主题下 lookup 仍是默认灰 #dcdad5 ——
+                    #   配置被主题重置了。重新 ttk.Style() 再 configure 才生效。
+                    st = ttk.Style()
+                    logger.debug(f"ttk 主题 {_cur} → clam（已重新获取 Style）")
+            except Exception as _e:
+                logger.debug(f"ttk 主题切换失败: {_e}")
             st.configure("Mp.TButton", background="#ffe0b2",
                          foreground="#8a4b00")
             st.map("Mp.TButton",
@@ -2895,6 +2902,24 @@ class App:
             st.map("MpLocked.TButton",
                    background=[("active", "#e0e4e7")])
             # ★ v2.6.0：抖音按钮专属底色（深青，与公众号橙色区分开）
+            # ★★ v3.0.0 视觉层级（UI 重构）★★
+            #   原来 15 个按钮全是灰白，主操作（下载选中）和删除类
+            #   看起来一样重，客户扫一眼不知道点哪个。
+            #   现在给三档：
+            #     Primary  绿底白字 = 主操作（下载选中）
+            #     Danger   浅红底红字 = 破坏性（删除类）
+            #     (默认)   灰底 = 次级操作
+            # ★ v3.1.0：全局压缩 ttk.Button 的内边距（clam 默认偏大）
+            #   客户要求「按钮高度小一些」，这样两行按钮能省 ~16px
+            st.configure("TButton", padding=(6, 3))
+            st.configure("Primary.TButton", background="#16a34a",
+                         foreground="#ffffff")
+            st.map("Primary.TButton",
+                   background=[("active", "#15803d"), ("pressed", "#166534")])
+            st.configure("Danger.TButton", background="#fee2e2",
+                         foreground="#b91c1c")
+            st.map("Danger.TButton",
+                   background=[("active", "#fecaca"), ("pressed", "#fca5a5")])
             st.configure("Dy.TButton", background="#26a69a",
                          foreground="#ffffff")
             st.map("Dy.TButton",
@@ -2904,8 +2929,11 @@ class App:
                          foreground="#78909c")
             st.map("DyLocked.TButton",
                    background=[("active", "#e0e4e7")])
-        except Exception:
-            pass
+        except Exception as _style_err:
+            # ★ v3.0.0：不再静默！样式配置失败会导致「按钮全是灰的」，
+            #   客户报障时完全看不出原因（本次 FONT 未定义就是这样被吞的）。
+            logger.warn(f"按钮样式配置失败（界面配色将退化为默认灰）: "
+                        f"{_style_err}")
         self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=16,
                                  style="MpLocked.TButton",
                                  command=self._on_mp_article)
@@ -2942,8 +2970,12 @@ class App:
         self._refresh_like_column()
 
         # ===== ②-b 列表上限档位（v2.0.17：档位由发布方掌控，客户端不可自配） =====
-        limf = ttk.Frame(main)
-        limf.pack(fill="x", pady=(8, 0))
+        # ★ v3.1.0 布局重构：上限 + 目录直接放进「捕获与下载」区块内，
+        #   不再单独占一行（省掉一个 LabelFrame 的标题栏 + 上下边距 ≈ 30px）
+        _info_row = ttk.Frame(capf)
+        _info_row.pack(fill="x", pady=(4, 0))
+        limf = ttk.Frame(_info_row)
+        limf.pack(side="left")
         ttk.Label(limf, text="列表上限:").pack(side="left")
         self.limit_value_lbl = ttk.Label(
             limf, text="", font=("Microsoft YaHei UI", 9, "bold"),
@@ -2967,8 +2999,8 @@ class App:
         # 故不在此处调用，见 App.__init__ 末尾的 _refresh_limit_display()
 
         # ===== ③ 下载目录 =====
-        dirf = ttk.Frame(main)
-        dirf.pack(fill="x", pady=(8, 0))
+        dirf = ttk.Frame(_info_row)
+        dirf.pack(side="left", padx=(24, 0))
         ttk.Label(dirf, text="下载目录:").pack(side="left")
         self.dir_var = tk.StringVar(value=self.cfg.download_dir)
         self.dir_entry = ttk.Entry(dirf, textvariable=self.dir_var, width=52)
@@ -2992,14 +3024,18 @@ class App:
             if self.cfg.auto_download
             else " 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ",
             padding=4)
-        self.list_frame.pack(fill="both", expand=True, pady=8)
+        self.list_frame.pack(fill="both", expand=True, pady=4)
         listf = self.list_frame
 
         # 工具栏分两行：先 pack 管理行（最底），再 pack 下载行（其上）
-        btns2 = ttk.Frame(listf)   # 文件与记录管理
+        btns2 = ttk.Frame(listf)   # 文件与记录管理（破坏性操作）
         btns2.pack(side="bottom", fill="x", pady=(0, 0))
-        btns1 = ttk.Frame(listf)   # 下载操作
-        btns1.pack(side="bottom", fill="x", pady=(6, 2))
+        # ★ v3.0.0：两行按钮之间加细线分隔（视觉上区分「下载」与「清理」）
+        # ★ v3.1.0：按钮区纵向压缩（客户要求减少高度占用）
+        ttk.Separator(listf, orient="horizontal").pack(
+            side="bottom", fill="x", pady=(1, 0))
+        btns1 = ttk.Frame(listf)   # 下载操作（主要操作）
+        btns1.pack(side="bottom", fill="x", pady=(2, 0))
 
         # ★ v2.1.9：多选操作说明常驻条（客户反馈"不知道怎么多选"）
         #   放在下载按钮行下面（视觉上属于"操作提示"，跟按钮一起读）。
@@ -3022,15 +3058,12 @@ class App:
         self.hint_bar.pack(side="bottom", fill="x", pady=(5, 5))
         self.lbl_hint = tk.Label(
             self.hint_bar,
-            text=("💡 多选技巧　点一行＝选中一个　│　"
-                  "按住 Ctrl 再点＝逐个加选　│　"
-                  "按住 Shift 再点＝连续选一段　│　"
-                  "Ctrl+A＝全选　│　"
-                  "「反选」＝选中的变不选、没选的变选中"
-                  "\n　　点「序号」表头＝按抓取先后排序（还原你在视频号里刷的顺序）"),
+            text=("💡 点一行＝选中　│　Ctrl+点＝加选　│　"
+                  "Shift+点＝连选　│　Ctrl+A＝全选　│　"
+                  "「反选」＝选中反转　│　点「序号」表头＝按抓取顺序排序"),
             bg="#dce9fa", fg="#0d2d5c",
             font=_hint_font,
-            anchor="w", justify="left", padx=12, pady=8)
+            anchor="w", justify="left", padx=10, pady=4)
         self.lbl_hint.pack(side="left", fill="x", expand=True)
         # 窗口窄时提示文字会截断 → 允许换行显示（宽度绑定父容器）
         self.hint_bar.bind(
@@ -3062,7 +3095,7 @@ class App:
         cols = ("no", "status", "title", "platform", "size", "source",
                 "like", "time", "file")
         self._like_stats_ok = False
-        self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=10,
+        self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=16,
                                  selectmode="extended")
         # ★ v2.2.20：「大小」列也不再显示（客户要求）
         #
@@ -3071,13 +3104,17 @@ class App:
         #   实际下的是当时播放档位，两者天然不同 —— 解释了也难接受。
         #   直接隐藏这一列，避免这个无解的争议。
         #   （数据仍保留在 Record.size 里，内部逻辑照常使用）
+        # ★ v3.1.0 列宽重新分配（客户：标题被挤、状态列太宽浪费）
+        #   状态列 115→96（"已完成""下载中 100%" 够放）
+        #   标题列 330→420（长标题是主要阅读内容，优先给空间）
+        #   捕获方式 110→88、时间 85→76、文件 200→180
         heads = {"no": ("", 0),
-                 "status": ("状态", 115), "title": ("标题", 330),
-                 "platform": ("来源", 92), "size": ("", 0),
-                 "source": ("捕获方式", 110),
-                 "like": ("👍 点赞", 78),
-                 "time": ("时间", 85),
-                 "file": ("文件", 200)}
+                 "status": ("状态", 96), "title": ("标题", 420),
+                 "platform": ("来源", 80), "size": ("", 0),
+                 "source": ("捕获方式", 88),
+                 "like": ("👍 点赞", 72),
+                 "time": ("时间", 76),
+                 "file": ("文件", 180)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
             self.tree.heading(c, text=heads[c][0],
@@ -3164,7 +3201,8 @@ class App:
         self.tree.bind("<Motion>", self._on_tree_motion)
 
         # ---- 工具栏 A：下载操作 ----
-        self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=10,
+        self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=8,
+                                       style="Primary.TButton",
                                        command=lambda: self._download_selected())
         self.btn_download.pack(side="left")
         self._tt(self.btn_download,
@@ -3173,28 +3211,28 @@ class App:
                  "多个一起下：先 Ctrl+A 全选或 Shift 连选，再点这里。")
 
         # ★ v2.1.9：全选 / 反选（客户反馈不知道 Ctrl+A，给可见按钮）
-        self.btn_sel_all = ttk.Button(btns1, text="全选", width=6,
+        self.btn_sel_all = ttk.Button(btns1, text="全选", width=5,
                                       command=self._select_all)
         self.btn_sel_all.pack(side="left", padx=(4, 0))
         self._tt(self.btn_sel_all,
                  "选中列表里所有记录（等同 Ctrl+A）。\n"
                  "选完点『下载选中』即可批量下载。")
-        self.btn_sel_inv = ttk.Button(btns1, text="反选", width=6,
+        self.btn_sel_inv = ttk.Button(btns1, text="反选", width=5,
                                       command=self._invert_selection)
         self.btn_sel_inv.pack(side="left", padx=2)
         self._tt(self.btn_sel_inv,
                  "把选中的变成不选、没选的变成选中。\n"
                  "常用于：先全选 → 反选 → 只下没下过的。")
 
-        self.btn_stop = ttk.Button(btns1, text="停止下载", width=9,
+        self.btn_stop = ttk.Button(btns1, text="停止下载", width=7,
                                    command=lambda: self._stop_selected())
         self.btn_stop.pack(side="left", padx=4)
         self._tt(self.btn_stop, "停止选中的「排队中/下载中/解密中」任务。")
-        self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=12,
+        self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=10,
                                        command=self._stop_all_downloads)
         self.btn_stop_all.pack(side="left", padx=4)
         # ★ v2.2.12：查看评论（客户需求：像视频号一样的评论区）
-        self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=11,
+        self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=9,
                                        command=self._show_comments)
         self.btn_comments.pack(side="left", padx=(8, 4))
         # ★ v2.2.15：下载评论（支持批量，选中多条即可）
@@ -3213,13 +3251,13 @@ class App:
         self._tt(self.btn_stop_all,
                  "一键停止所有「排队中/下载中/解密中」的任务。\n"
                  "注意：已完成的保留；停止后可对选中项点『重试失败』重新下载。")
-        self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=12,
+        self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=10,
                                      command=lambda: self._download_all_waiting())
         self.btn_dl_all.pack(side="left", padx=4)
         self._tt(self.btn_dl_all,
                  "把列表里所有「待下载」记录一次性入队。\n"
                  "注意：数量多时按队列依次下载，速度受 CDN 限制。")
-        self.btn_cancel_queued = ttk.Button(btns1, text="取消所有排队", width=11,
+        self.btn_cancel_queued = ttk.Button(btns1, text="取消所有排队", width=9,
                                             command=self._cancel_all_queued)
         self.btn_cancel_queued.pack(side="left", padx=4)
         self._tt(self.btn_cancel_queued,
@@ -3227,52 +3265,56 @@ class App:
                  "「待下载」任务尚未入队，无需取消；\n"
                  "正在下载中的不会中断；之后可重新点『下载选中』或"
                  "『下载全部待下载』。")
-        self.btn_retry = ttk.Button(btns1, text="重试失败", width=9,
+        self.btn_retry = ttk.Button(btns1, text="重试失败", width=7,
                                     command=lambda: self._retry())
         self.btn_retry.pack(side="left", padx=4)
         self._tt(self.btn_retry,
                  "把选中的「失败/已停止」记录重新入队。\n"
                  "注意：链接可能已过期，仍失败需重新嗅探。")
-        self.btn_redl = ttk.Button(btns1, text="↻ 重新下载", width=10,
+        self.btn_redl = ttk.Button(btns1, text="↻ 重新下载", width=8,
                                    command=lambda: self._redownload_selected())
         self.btn_redl.pack(side="left", padx=4)
         self._tt(self.btn_redl,
                  "对「已完成/失败/已停止」记录重新下载，成功后覆盖旧文件。\n"
                  "文件打不开/播放不了时用它。")
         # ---- 工具栏 B：文件与记录管理 ----
-        self.btn_open_file = ttk.Button(btns2, text="打开文件", width=9,
+        self.btn_open_file = ttk.Button(btns2, text="打开文件", width=7,
                                         command=lambda: self._open_file())
         self.btn_open_file.pack(side="left", padx=4)
         self._tt(self.btn_open_file,
                  "用系统默认播放器打开选中记录的已下载文件。")
-        self.btn_open_folder = ttk.Button(btns2, text="打开文件夹", width=9,
+        self.btn_open_folder = ttk.Button(btns2, text="打开文件夹", width=7,
                                           command=lambda: self._open_folder())
         self.btn_open_folder.pack(side="left")
         self._tt(self.btn_open_folder,
                  "打开选中记录所在文件夹；未选中时打开下载目录。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=9,
+        self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=7,
+                                      style="Danger.TButton",
                                       command=lambda: self._del_record())
         self.btn_del_rec.pack(side="left", padx=4)
         self._tt(self.btn_del_rec,
                  "删除选中的 N 条记录（视频文件保留）。\n"
                  "支持 Ctrl/Shift 多选。")
-        self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=11,
+        self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=9,
+                                       style="Danger.TButton",
                                        command=lambda: self._del_file())
         self.btn_del_file.pack(side="left")
         self._tt(self.btn_del_file,
                  "删除选中的 N 条记录及其已下载文件。\n"
                  "注意：文件删除后不可恢复，谨慎操作。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=10,
+        self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=8,
+                                       style="Danger.TButton",
                                        command=lambda: self._clear_done())
         self.btn_clr_done.pack(side="left", padx=4)
         self._tt(self.btn_clr_done, "删除所有「已完成」记录（文件保留）。")
-        self.btn_clr_fail = ttk.Button(btns2, text="清空失败", width=9,
+        self.btn_clr_fail = ttk.Button(btns2, text="清空失败", width=7,
+                                       style="Danger.TButton",
                                        command=lambda: self._clear_failed())
         self.btn_clr_fail.pack(side="left")
         self._tt(self.btn_clr_fail, "删除所有「失败」记录（文件保留）。")
-        self.btn_del_all = ttk.Button(btns2, text="删除全部记录", width=11,
+        self.btn_del_all = ttk.Button(btns2, text="删除全部记录", width=9,
                                       command=self._del_all_records)
         self.btn_del_all.pack(side="left", padx=(8, 0))
         self._tt(self.btn_del_all,
@@ -3293,7 +3335,7 @@ class App:
         #   最终解法：给日志区套一个**固定高度的容器**（height=320px，
         #   pack_propagate(False) 禁止子控件撑大/缩小它），日志区再填满它。
         #   这样无论窗口怎么变、列表区多贪，日志区都稳占 320px。
-        _log_holder = tk.Frame(main, height=200, bg="#f6f8fa")
+        _log_holder = tk.Frame(main, height=210, bg="#f6f8fa")
         # ★★ v2.9.9 关键：必须用 before=self.list_frame ★★
         #   Tk 的 pack 按调用顺序分配空间：
         #   list_frame 在 2994 行就先 pack 了（expand=True，抢走全部剩余），
@@ -3305,7 +3347,7 @@ class App:
         _log_holder.pack_propagate(False)      # ★ 锁死高度，不让子控件改变它
         logf = ttk.LabelFrame(_log_holder, text=" 日志 ", padding=4)
         logf.pack(fill="both", expand=True)
-        self.log_text = tk.Text(logf, height=10, bg="#0b1020", fg="#d1d5db",
+        self.log_text = tk.Text(logf, height=12, bg="#0b1020", fg="#d1d5db",
                                 insertbackground="#d1d5db", relief="flat",
                                 font=("Consolas", 9), wrap="word", state="disabled")
         lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log_text.yview)
