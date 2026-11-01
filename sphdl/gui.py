@@ -3201,7 +3201,7 @@ class App:
         self.tree.bind("<Motion>", self._on_tree_motion)
 
         # ---- 工具栏 A：下载操作 ----
-        self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=8,
+        self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=12,
                                        style="Primary.TButton",
                                        command=lambda: self._download_selected())
         self.btn_download.pack(side="left")
@@ -3224,15 +3224,15 @@ class App:
                  "把选中的变成不选、没选的变成选中。\n"
                  "常用于：先全选 → 反选 → 只下没下过的。")
 
-        self.btn_stop = ttk.Button(btns1, text="停止下载", width=7,
+        self.btn_stop = ttk.Button(btns1, text="停止下载", width=9,
                                    command=lambda: self._stop_selected())
         self.btn_stop.pack(side="left", padx=4)
         self._tt(self.btn_stop, "停止选中的「排队中/下载中/解密中」任务。")
-        self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=10,
+        self.btn_stop_all = ttk.Button(btns1, text="停止所有下载", width=13,
                                        command=self._stop_all_downloads)
         self.btn_stop_all.pack(side="left", padx=4)
         # ★ v2.2.12：查看评论（客户需求：像视频号一样的评论区）
-        self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=9,
+        self.btn_comments = ttk.Button(btns1, text="💬 查看评论", width=12,
                                        command=self._show_comments)
         self.btn_comments.pack(side="left", padx=(8, 4))
         # ★ v2.2.15：下载评论（支持批量，选中多条即可）
@@ -3251,13 +3251,13 @@ class App:
         self._tt(self.btn_stop_all,
                  "一键停止所有「排队中/下载中/解密中」的任务。\n"
                  "注意：已完成的保留；停止后可对选中项点『重试失败』重新下载。")
-        self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=10,
+        self.btn_dl_all = ttk.Button(btns1, text="下载全部待下载", width=15,
                                      command=lambda: self._download_all_waiting())
         self.btn_dl_all.pack(side="left", padx=4)
         self._tt(self.btn_dl_all,
                  "把列表里所有「待下载」记录一次性入队。\n"
                  "注意：数量多时按队列依次下载，速度受 CDN 限制。")
-        self.btn_cancel_queued = ttk.Button(btns1, text="取消所有排队", width=9,
+        self.btn_cancel_queued = ttk.Button(btns1, text="取消所有排队", width=13,
                                             command=self._cancel_all_queued)
         self.btn_cancel_queued.pack(side="left", padx=4)
         self._tt(self.btn_cancel_queued,
@@ -3265,38 +3265,38 @@ class App:
                  "「待下载」任务尚未入队，无需取消；\n"
                  "正在下载中的不会中断；之后可重新点『下载选中』或"
                  "『下载全部待下载』。")
-        self.btn_retry = ttk.Button(btns1, text="重试失败", width=7,
+        self.btn_retry = ttk.Button(btns1, text="重试失败", width=9,
                                     command=lambda: self._retry())
         self.btn_retry.pack(side="left", padx=4)
         self._tt(self.btn_retry,
                  "把选中的「失败/已停止」记录重新入队。\n"
                  "注意：链接可能已过期，仍失败需重新嗅探。")
-        self.btn_redl = ttk.Button(btns1, text="↻ 重新下载", width=8,
+        self.btn_redl = ttk.Button(btns1, text="↻ 重新下载", width=12,
                                    command=lambda: self._redownload_selected())
         self.btn_redl.pack(side="left", padx=4)
         self._tt(self.btn_redl,
                  "对「已完成/失败/已停止」记录重新下载，成功后覆盖旧文件。\n"
                  "文件打不开/播放不了时用它。")
         # ---- 工具栏 B：文件与记录管理 ----
-        self.btn_open_file = ttk.Button(btns2, text="打开文件", width=7,
+        self.btn_open_file = ttk.Button(btns2, text="打开文件", width=9,
                                         command=lambda: self._open_file())
         self.btn_open_file.pack(side="left", padx=4)
         self._tt(self.btn_open_file,
                  "用系统默认播放器打开选中记录的已下载文件。")
-        self.btn_open_folder = ttk.Button(btns2, text="打开文件夹", width=7,
+        self.btn_open_folder = ttk.Button(btns2, text="打开文件夹", width=11,
                                           command=lambda: self._open_folder())
         self.btn_open_folder.pack(side="left")
         self._tt(self.btn_open_folder,
                  "打开选中记录所在文件夹；未选中时打开下载目录。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=7,
+        self.btn_del_rec = ttk.Button(btns2, text="删除记录", width=9,
                                       style="Danger.TButton",
                                       command=lambda: self._del_record())
         self.btn_del_rec.pack(side="left", padx=4)
         self._tt(self.btn_del_rec,
                  "删除选中的 N 条记录（视频文件保留）。\n"
                  "支持 Ctrl/Shift 多选。")
-        self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=9,
+        self.btn_del_file = ttk.Button(btns2, text="删除文件+记录", width=14,
                                        style="Danger.TButton",
                                        command=lambda: self._del_file())
         self.btn_del_file.pack(side="left")
@@ -3304,17 +3304,17 @@ class App:
                  "删除选中的 N 条记录及其已下载文件。\n"
                  "注意：文件删除后不可恢复，谨慎操作。")
         ttk.Separator(btns2, orient="vertical").pack(side="left", fill="y", padx=6)
-        self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=8,
+        self.btn_clr_done = ttk.Button(btns2, text="清空已完成", width=11,
                                        style="Danger.TButton",
                                        command=lambda: self._clear_done())
         self.btn_clr_done.pack(side="left", padx=4)
         self._tt(self.btn_clr_done, "删除所有「已完成」记录（文件保留）。")
-        self.btn_clr_fail = ttk.Button(btns2, text="清空失败", width=7,
+        self.btn_clr_fail = ttk.Button(btns2, text="清空失败", width=9,
                                        style="Danger.TButton",
                                        command=lambda: self._clear_failed())
         self.btn_clr_fail.pack(side="left")
         self._tt(self.btn_clr_fail, "删除所有「失败」记录（文件保留）。")
-        self.btn_del_all = ttk.Button(btns2, text="删除全部记录", width=9,
+        self.btn_del_all = ttk.Button(btns2, text="删除全部记录", width=13,
                                       command=self._del_all_records)
         self.btn_del_all.pack(side="left", padx=(8, 0))
         self._tt(self.btn_del_all,
@@ -6130,7 +6130,8 @@ class App:
             self._update_status_bar()
         elif kind in ("dy_item", "dy_parse_done", "dy_dl_start",
                       "dy_dl_prog", "dy_dl_done", "dy_all_done",
-                      "dy_login_done", "dy_profile_progress"):
+                      "dy_login_done", "dy_profile_progress",
+                      "dy_profile_batch"):
             # ★ v2.4.0：抖音批量下载窗口的事件
             w = getattr(self, "_dy_win", None)
             if w is None:
@@ -6152,6 +6153,8 @@ class App:
                     w.apply_all_done(item[1], item[2], item[3])
                 elif kind == "dy_login_done":
                     w.apply_login_done(item[1], item[2])
+                elif kind == "dy_profile_batch":
+                    w.apply_profile_batch(item[1])
                 elif kind == "dy_profile_progress":
                     # ★ 方案 B：主页抓取进度（显示在状态栏）
                     try:

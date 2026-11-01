@@ -1,4 +1,4 @@
-"""验证 v3.1.0 真实 exe：(1) 能启动 (2) 配色生效 (3) 日志区高度。"""
+"""验证 v3.1.1 真实 exe：(1) 能启动 (2) 配色生效 (3) 日志区高度。"""
 import ctypes
 import ctypes.wintypes as wt
 import time
@@ -16,7 +16,7 @@ def cb(h, _):
     if n:
         b = ctypes.create_unicode_buffer(n + 1)
         u.GetWindowTextW(h, b, n + 1)
-        if "sphdl" in b.value.lower() and "v3.1.0" in b.value:
+        if "sphdl" in b.value.lower() and "v3.1.1" in b.value:
             r = wt.RECT()
             u.GetWindowRect(h, ctypes.byref(r))
             w, hh = r.right - r.left, r.bottom - r.top
@@ -28,7 +28,7 @@ u.EnumWindows(ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)(cb), 0)
 found.sort(reverse=True)
 
 if not found:
-    print("❌ 没找到 v3.1.0 窗口")
+    print("❌ 没找到 v3.1.1 窗口")
     raise SystemExit(1)
 
 _, hwnd, title = found[0]

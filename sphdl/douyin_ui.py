@@ -471,9 +471,9 @@ class DouyinWindow:
                     self.app.ui_q.put(("dy_parse_done", 0))
                     return
 
-                # 填入表格（复用现有的 dy_item 回填通道）
-                for i, v in enumerate(all_videos):
-                    self.app.ui_q.put(("dy_item", i, v))
+                # ★ v3.1.1：主页条目**本身已完整**（play_url/标题/时长/大小都有），
+                #   直接铺进 videos 并回填表格，不需要再逐条 resolve。
+                self.app.ui_q.put(("dy_profile_batch", all_videos))
                 self._log("ok", f"共 {len(all_videos)} 条，可以勾选下载了")
 
                 # 如果同时还粘了作品链接，一并解析
@@ -588,10 +588,27 @@ class DouyinWindow:
     def apply_item(self, i: int, v):
         if not self._alive():
             return
-        """（主线程）回填一条解析结果。"""
+        """（主线程）回填一条解析结果。
+
+        ★★ v3.1.1 修复（客户：抖音解析博主「成功 0/84 条」）★★
+          主页模式（方案B）抓到的条目**本身就完整**（有 play_url /
+          title / duration / size），不需要再 resolve。
+          但它走 dy_item 事件时，原来这里 `self.videos[i][0]`
+          在 videos 还没铺满时会 IndexError → 被外层 except 吞掉
+          → 表格一行没填 → 统计 0/84。
+
+          修法：
+            ① 越界时自动扩容 videos（不再依赖预先占位）
+            ② 主页条目用 aweme_id 构造一个可追溯的 url
+        """
         if i >= len(self.videos):
-            return
-        url = self.videos[i][0]
+            # 扩容到 i+1，缺的用 ("", None) 填充
+            self.videos.extend([("", None)] * (i + 1 - len(self.videos)))
+        if self.videos[i] is None:
+            self.videos[i] = ("", None)
+        url = self.videos[i][0] if self.videos[i] else ""
+        if not url and getattr(v, "aweme_id", ""):
+            url = f"https://www.douyin.com/video/{v.aweme_id}"
         self.videos[i] = (url, v)
         iid = None
         for k, idx in self._rows.items():
@@ -608,6 +625,38 @@ class DouyinWindow:
             self.tree.item(iid, values=(
                 "☐", f"（失败）{url[:36]}", "-", "-", "-",
                 (v.error or "解析失败")[:26]))
+
+    def apply_profile_batch(self, videos):
+        """（主线程）主页批量抓取完成后，一次性把作品铺进表格。
+
+        ★ v3.1.1：主页条目来自 aweme_list，本身字段完整
+          （play_url / desc / duration / 大小 / 作者都有），
+          不需要再走 resolve_many。直接填表即可下载。
+        """
+        if not self._alive():
+            return
+        for i, v in enumerate(videos):
+            url = f"https://www.douyin.com/video/{v.aweme_id}" \
+                  if getattr(v, "aweme_id", "") else ""
+            if i < len(self.videos):
+                self.videos[i] = (url, v)
+            else:
+                self.videos.append((url, v))
+            iid = None
+            for k, idx in self._rows.items():
+                if idx == i:
+                    iid = k
+                    break
+            if iid is None:
+                iid = self.tree.insert("", "end", values=(
+                    "☑", v.title or "(无标题)", v.author or "-",
+                    v.duration_text, v.size_text, "待下载"))
+                self._rows[iid] = i
+            else:
+                self.tree.item(iid, values=(
+                    "☑", v.title or "(无标题)", v.author or "-",
+                    v.duration_text, v.size_text, "待下载"))
+        self._log("ok", f"主页作品已载入表格：{len(videos)} 条，可直接勾选下载")
 
     def parse_done(self, n: int):
         if not self._alive():
