@@ -510,16 +510,40 @@ class DouyinWindow:
 
         # ══════ ★ 方案 B：先检查有没有「主页链接」══════
         from .douyin_profile import normalize as _norm_profile
+        from .douyin_profile import resolve_short_url as _resolve_short
         profile_urls = []
         video_urls = []
+        shorts = []
         for u in urls:
             n = _norm_profile(u)
-            if n["kind"] in ("profile",) :
+            if n["kind"] == "profile":
                 profile_urls.append(n["url"])
             elif n["kind"] == "short":
-                video_urls.append(u)      # 短链可能是主页，先按作品处理，解析时再判断
+                shorts.append(u)
             else:
                 video_urls.append(u)
+
+        # ★★★ v2.9.4（客户实测）★★★
+        #   短链必须先跟随重定向才能知道是主页还是作品。
+        #   客户贴「查看TA的更多作品 https://v.douyin.com/xxx/」
+        #   → 落地是 /user/<sec_uid>（主页）
+        #   → 但原实现把它当作品解析 → 报「30 秒内没等到视频数据」
+        if shorts:
+            self._log("info", f"解析 {len(shorts)} 个短链，判断是主页还是作品…")
+            for su in shorts:
+                r = _resolve_short(su)
+                kind = r.get("kind")
+                if kind == "profile" and r.get("sec_uid"):
+                    profile_urls.append(r["url"])
+                    self._log("ok", f"  {su} → 主页（将抓取全部作品）")
+                elif kind == "video":
+                    video_urls.append(r.get("resolved_from") or su)
+                    self._log("ok", f"  {su} → 作品")
+                else:
+                    # 解析不出就当作品试（保持原行为，不静默丢弃）
+                    video_urls.append(su)
+                    self._log("warn", f"  {su} → 无法判断类型"
+                                      f"（{r.get('error', '未知')}），按作品尝试")
 
         for i in list(self.tree.get_children()):
             self.tree.delete(i)

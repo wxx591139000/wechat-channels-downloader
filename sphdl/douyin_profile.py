@@ -50,6 +50,13 @@ _LIST_KEYS = (
 _RE_USER = re.compile(
     r"https?://(?:www\.)?douyin\.com/user/([A-Za-z0-9_\-]{20,})", re.I)
 _RE_SHORT = re.compile(r"https?://v\.douyin\.com/([A-Za-z0-9_\-]+)/?", re.I)
+# ★ v2.9.4：旧版分享域的主页形态（短链常落到这里）
+#   https://www.iesdouyin.com/share/user/<sec_uid>?...
+_RE_SHARE_USER = re.compile(
+    r"https?://(?:www\.|m\.|)iesdouyin\.com/share/user/([A-Za-z0-9_\-]{20,})",
+    re.I)
+# 查询参数里的 sec_uid（部分落地页带 ?sec_uid=<id>）
+_RE_SEC_Q = re.compile(r"[?&]sec_uid=([A-Za-z0-9_\-]{20,})", re.I)
 _RE_MODAL = re.compile(r"[?&]modal_id=", re.I)
 _RE_SEC = re.compile(r"^MS4wLjABAAAA[A-Za-z0-9_\-]{10,}$")
 
@@ -72,6 +79,15 @@ def normalize(text: str) -> dict:
         return {"kind": "profile", "sec_uid": t, "short_code": None,
                 "url": f"https://www.douyin.com/user/{t}", "is_modal": False}
 
+    # ★ 先判旧版分享域的主页（短链落地常见）
+    m = _RE_SHARE_USER.search(t)
+    if m:
+        sec = m.group(1)
+        return {"kind": "profile", "sec_uid": sec, "short_code": None,
+                "url": f"https://www.douyin.com/user/{sec}", "is_modal": False}
+
+    # ★★ 顺序很重要：必须先判 /user/<sec>（主页），
+    #   否则带 modal_id 的主页链接会被后面的 sec_uid 查询参数分支抢走。
     m = _RE_USER.search(t)
     if m:
         sec = m.group(1)
@@ -81,6 +97,13 @@ def normalize(text: str) -> dict:
         return {"kind": "profile", "sec_uid": sec, "short_code": None,
                 "url": f"https://www.douyin.com/user/{sec}",
                 "is_modal": bool(_RE_MODAL.search(t))}
+
+    # 查询参数里的 sec_uid（部分落地页带 ?sec_uid=<id>，无 /user/ 路径）
+    m = _RE_SEC_Q.search(t)
+    if m:
+        sec = m.group(1)
+        return {"kind": "profile", "sec_uid": sec, "short_code": None,
+                "url": f"https://www.douyin.com/user/{sec}", "is_modal": False}
 
     m = _RE_SHORT.search(t)
     if m:
@@ -94,6 +117,87 @@ def normalize(text: str) -> dict:
 
     return {"kind": "unknown", "sec_uid": None, "short_code": None,
             "url": None, "is_modal": False}
+
+
+def resolve_short_url(short_url: str, timeout: int = 20) -> dict:
+    """跟随短链重定向，返回最终 URL 的结构化信息。
+
+    ★★ v2.9.4（客户实测 2026-11-01）★★
+      客户贴「长按复制此条消息…查看TA的更多作品。
+      https://v.douyin.com/N00VRZ-_isA/」
+      结果报「30 秒内没等到视频数据」。
+
+      根因：这条短链落地是 **主页**（/user/<sec_uid>），
+      但短链本身没有 ID → 被当成作品走 detail 流程
+      → 页面没有 detail 接口 → 等 20 秒超时报错。
+
+      实测落地：
+        https://www.douyin.com/user/MS4wLjABAAAAAgTdaUkW9Hoblhe...
+
+      所以必须先跟随重定向、判断落地类型，再决定走哪条路。
+
+    返回 normalize() 的结果（kind=profile/video/...），
+    失败时 kind="unknown" 并带 error 字段。
+    """
+    out = {"kind": "unknown", "sec_uid": None, "short_code": None,
+           "url": short_url, "is_modal": False}
+    u = (short_url or "").strip()
+    if not u:
+        out["error"] = "空链接"
+        return out
+
+    # ① 先试裸 HTTP（快，多数情况够用）
+    try:
+        import urllib.request
+        req = urllib.request.Request(u, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/120.0.0.0 Safari/537.36")})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            final = r.url
+        n = normalize(final)
+        if n["kind"] in ("profile", "video"):
+            out.update(n)
+            out["resolved_from"] = final
+            return out
+    except Exception as e:                                # noqa: BLE001
+        logger.debug(f"短链 HTTP 跟随失败: {e}")
+
+    # ② 退到浏览器（抖音可能用 JS 跳转）
+    try:
+        from playwright.sync_api import sync_playwright
+        from . import douyin as DY
+        with sync_playwright() as p:
+            ctx = None
+            for _name, kw in DY._browser_candidates()[:2]:
+                try:
+                    ctx = p.chromium.launch_persistent_context(
+                        str(DY.profile_dir()), headless=True,
+                        args=["--no-first-run"], user_agent=DY.UA,
+                        locale="zh-CN",
+                        viewport={"width": 1280, "height": 800}, **kw)
+                    break
+                except Exception:
+                    continue
+            if ctx is None:
+                out["error"] = "浏览器启动失败，无法解析短链"
+                return out
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+            try:
+                pg.goto(u, wait_until="domcontentloaded", timeout=30000)
+                final = pg.url
+            finally:
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+        n = normalize(final)
+        out.update(n)
+        out["resolved_from"] = final
+        return out
+    except Exception as e:                                # noqa: BLE001
+        out["error"] = f"短链解析失败：{type(e).__name__}: {e}"
+        return out
 
 
 def is_profile_url(text: str) -> bool:

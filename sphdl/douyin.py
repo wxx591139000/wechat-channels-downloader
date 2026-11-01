@@ -826,6 +826,18 @@ def _resolve_one(ctx, url: str):
         （video/tos 的 media-video 段；这是 DASH 分流，需配合音频，
          所以只作为兜底，且明确告知用户可能只有画面）
     """
+    # ★★★ v2.9.4（客户实测）★★★
+    #   主页链接被当作品解析时，页面根本没有 detail 接口，
+    #   等 20 秒才报「30 秒内没等到视频数据」—— 客户完全看不懂。
+    #   这里提前识别主页链接，立刻给出可操作的提示。
+    _u = (url or "").lower()
+    if ("/user/" in _u or "iesdouyin.com/share/user" in _u) and \
+            not _aweme_id_from_url(url):
+        return (DouyinVideo(error=(
+            "这是博主主页链接，不是单个作品。\n"
+            "请用「主页批量抓取」：直接粘贴主页链接，工具会列出该博主全部作品。\n"
+            "（如果你想下某个具体视频，请点开该视频后再复制它的链接）")), "none")
+
     page = ctx.new_page()
     box = {"json": None, "media": [], "audio": []}
 

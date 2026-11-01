@@ -3085,12 +3085,17 @@ class App:
                 # 宽度 0 + 不拉伸 + 不可拖宽 = 彻底看不见
                 self.tree.column(c, width=0, minwidth=0, stretch=False)
             elif c == "like":
-                # 统计列：固定宽度、居中、不拉伸（数字对齐才好看）
-                self.tree.column(c, width=heads[c][1], minwidth=heads[c][1],
-                                 stretch=False, anchor="center")
+                # ★ v2.9.4（客户要求：各列宽度允许拖拽）：
+                #   原来 minwidth == width 且 stretch=False，虽然理论上能拖，
+                #   但拖动空间为 0；且 stretch=False 时 Tk 会让用户拖不动。
+                #   现在给 minwidth 一个小的下限（40），用户可自由拖动加宽。
+                self.tree.column(c, width=heads[c][1], minwidth=40,
+                                 stretch=True, anchor="center")
             else:
-                self.tree.column(c, width=heads[c][1],
-                                 stretch=(c in ("title", "file")))
+                # ★ v2.9.4：所有可见列都允许拖拽调整宽度
+                #   （minwidth 给小值 → 可拖窄；stretch 让列跟随窗口）
+                self.tree.column(c, width=heads[c][1], minwidth=40,
+                                 stretch=True)
         self._seq_col_hidden = True
         self._size_col_hidden = True
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
