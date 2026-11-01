@@ -435,7 +435,8 @@ class DouyinWindow:
                           f"最多 {max_items} 条/主页")
 
         def _worker():
-            from .douyin_profile import fetch_profile
+            # ★ v2.9.5：用「客户滚动 + 工具监听」方案（实测 84 条 22 秒抓完）
+            from .douyin_profile_scroll import fetch_profile_by_scroll as fetch_profile
             from .douyin import resolve_many
 
             all_videos = []
@@ -454,6 +455,8 @@ class DouyinWindow:
                         on_log=lambda lv, m: self._log(lv, m),
                         on_page=on_page,
                         should_stop=lambda: self._stop,
+                        visible=True,        # ★ 必须可见：headless 滚动不触发加载
+                        auto_scroll=True,    # 工具自动滚，客户只需看着
                     )
                     if res.error:
                         self._log("error", f"主页抓取失败：{res.error}")

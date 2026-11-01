@@ -209,8 +209,13 @@ def profile_url(sec_uid: str) -> str:
 
 
 MAX_ITEMS_DEFAULT = 500      # 默认最多抓多少条
-SCROLL_WAIT = 1.8            # 每次滚动后等待秒数
-MAX_IDLE_SCROLL = 6          # 连续多少次滚动无新增就停
+# ★★ v2.9.5（客户实测 2026-11-01）★★
+#   实测：打开主页后**初次加载 xhr = 0 个**（页面先渲染骨架，
+#   作品列表请求要 3~6 秒后才发）；滚动后才有 74~116 个请求。
+#   原来 sleep(3.0) + 滚动等 1.8 秒 → 第一轮就判定"无新增"，
+#   6 轮空转后放弃，结果是「接口响应 0 次」。
+SCROLL_WAIT = 5.0            # 每次滚动后等待秒数（实测要 3~5s 才回数据）
+MAX_IDLE_SCROLL = 8          # 连续多少次滚动无新增就停（v2.9.5: 6→8）
 
 
 @dataclass
@@ -382,6 +387,11 @@ def fetch_profile(url: str,
             if cursor:
                 pages_meta["cursor"] = cursor
             if lst:
+                # ★ v2.9.5 诊断：记录每批拿到的数量，便于判断分页是否生效
+                _ids = [str(x.get("aweme_id")) for x in lst
+                        if isinstance(x, dict)]
+                logger.debug(f"主页接口: cursor={cursor} 本批 {len(lst)} 条 "
+                             f"has_more={has_more} 首个id={_ids[0] if _ids else '-'}")
                 pending.extend(lst)
         except Exception as e:                       # noqa: BLE001
             _log("info", f"响应解析跳过: {type(e).__name__}")
@@ -399,8 +409,34 @@ def fetch_profile(url: str,
             page.on("response", on_response)
 
             _log("info", f"打开主页 {target}")
-            page.goto(target, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3.0)
+            # ★ v2.9.5：抖音主页很重，实测 domcontentloaded 可能 60 秒都不触发
+            #   （一直有长连接/懒加载）。改为不等待导航完成，
+            #   只要能开始发请求就行 —— 我们靠 on_response 收数据，不靠页面 ready。
+            try:
+                page.goto(target, wait_until="commit", timeout=45000)
+            except Exception as e:                    # noqa: BLE001
+                _log("info", f"页面导航未完成（{type(e).__name__}），"
+                             "继续等待数据…")
+
+            # ★ v2.9.5：等首批作品接口真的回来（实测初次加载 xhr=0，
+            #   要 3~6 秒后才发第一个 aweme/post 请求）。
+            #   死等固定 3 秒会导致第一轮就判"无新增"→ 空转到放弃。
+            _log("info", "等待首批作品数据…")
+            _t0 = time.time()
+            while time.time() - _t0 < 12:
+                if pages_meta["resp_count"] > 0:
+                    break
+                time.sleep(0.5)
+            _got_first = pages_meta["resp_count"] > 0
+            _log("info", f"首批数据{'已到达' if _got_first else '未到达'}"
+                         f"（{pages_meta['resp_count']} 个响应，"
+                         f"等待 {time.time() - _t0:.1f} 秒）")
+            # ★★ v2.9.5 关键（实测对比出来的）★★
+            #   诊断脚本能滚动出 5 次请求，唯一差别是它**先 sleep(8)** 再滚。
+            #   我们的代码数据一到就滚 → 页面虚拟列表还没初始化完，
+            #   滚动只作用在空的/小的容器上，主列表容器从没被推进。
+            #   所以首批数据到了之后再等 5 秒，让列表渲染+虚拟滚动初始化。
+            time.sleep(5.0)
 
             # 拿作者昵称（页面标题里通常有）
             try:
@@ -457,11 +493,75 @@ def fetch_profile(url: str,
                                 "（可能是风控/未登录/真的到底了）")
                     break
 
-                # 滚动触发加载
+                # ★★ v2.9.5：滚动触发加载更多 ★★
+                #   实测 page.mouse.wheel() 在 headless 下经常无效
+                #   （鼠标不在可滚动区域，或抖音用自定义滚动容器）。
+                #   改为三种方式依次尝试，任一成功即可：
+                #     ① 找可滚动容器，直接设 scrollTop = scrollHeight
+                #     ② window.scrollTo 到底部
+                #     ③ 模拟 wheel 事件（兜底）
+                # ★ v2.9.5：滚动前先确认页面**渲染完毕**
+                #   实测：刚收到数据时容器还在长高（3410→4831），
+                #   此时滚到底部无效（真实高度还没定）。
+                #   等容器高度连续 2 次不变再滚。
                 try:
-                    page.mouse.wheel(0, 2400)
+                    for _w in range(6):
+                        _h1 = page.evaluate(
+                            "() => { let b=null,m=0;"
+                            "for (const e of document.querySelectorAll('*')){"
+                            "const s=getComputedStyle(e);"
+                            "if(!/auto|scroll/.test(s.overflowY))continue;"
+                            "const h=e.scrollHeight-e.clientHeight;"
+                            "if(h>m){m=h;b=e;}}"
+                            "return b?b.scrollHeight:0; }")
+                        time.sleep(0.7)
+                        _h2 = page.evaluate(
+                            "() => { let b=null,m=0;"
+                            "for (const e of document.querySelectorAll('*')){"
+                            "const s=getComputedStyle(e);"
+                            "if(!/auto|scroll/.test(s.overflowY))continue;"
+                            "const h=e.scrollHeight-e.clientHeight;"
+                            "if(h>m){m=h;b=e;}}"
+                            "return b?b.scrollHeight:0; }")
+                        if _h1 == _h2 and _h2 > 0:
+                            break
                 except Exception:
                     pass
+
+                _scrolled = False
+                # ★★★ v2.9.5：复刻「诊断脚本验证成功」的滚动方式 ★★★
+                #   诊断脚本跑出 5 次请求（cursor 连续推进）的写法是：
+                #     找可滚高度**最大**的那一个容器 → scrollTop = scrollHeight
+                #   一次到底（不是分步）。分步反而只触发第一页重复加载。
+                #   另外必须先等页面稳定 5 秒（上面已加），否则最大容器还没成形。
+                try:
+                    _scrolled = page.evaluate("""() => {
+                        let best = null, bestH = 0;
+                        for (const el of document.querySelectorAll('*')) {
+                            const st = getComputedStyle(el);
+                            if (!/auto|scroll/.test(st.overflowY)) continue;
+                            const h = el.scrollHeight - el.clientHeight;
+                            if (h > bestH) { bestH = h; best = el; }
+                        }
+                        if (best && bestH > 100) {
+                            best.scrollTop = best.scrollHeight;
+                            return 'C:' + bestH + ':' + best.scrollTop;
+                        }
+                        window.scrollTo(0, document.documentElement.scrollHeight);
+                        return 'W:' + window.scrollY;
+                    }""")
+                except Exception as _e:
+                    logger.debug(f"滚动 JS 异常: {type(_e).__name__}: {_e}")
+
+                logger.debug(f"滚动结果: {_scrolled!r}")
+                if not _scrolled:
+                    # ③ 兜底：真实 wheel 事件
+                    try:
+                        page.mouse.move(700, 500)
+                        page.mouse.wheel(0, 3000)
+                        logger.debug("滚动兜底: mouse.wheel 已发")
+                    except Exception as _e:
+                        logger.debug(f"滚动兜底失败: {_e}")
                 time.sleep(SCROLL_WAIT)
 
             res.items = list(seen.values())
