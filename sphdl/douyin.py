@@ -181,9 +181,31 @@ class DouyinVideo:
 
 # ────────────────────── 链接解析 ──────────────────────
 
+# ★★ v2.9.1 修复（客户实测）★★
+#   客户贴的链接是：
+#     https://www.douyin.com/jingxuan?modal_id=7702018171426868531
+#   而原正则只认 /video/<数字>，直接把这条判成「没找到抖音链接」。
+#
+#   抖音现在的作品链接形态很多（实测整理）：
+#     /video/7300000000000000000                     ← 经典
+#     /jingxuan?modal_id=7702018171426868531          ← 精选页弹出（客户这条）
+#     /discover?modal_id=...                          ← 发现页弹出
+#     /user/MS4w...?modal_id=...                      ← 主页弹出
+#     /follow?modal_id=...                            ← 关注页弹出
+#     /share/video/7300000000000000000                ← 分享页
+#     v.douyin.com/xxxxx/                             ← 短链
+#     iesdouyin.com/share/video/7300000000000000000
+#
+#   所以改成：**任何 douyin.com 链接都先抓下来**，再由后续逻辑判断类型。
+#   （不在这里筛太细，否则每遇到新页面形态就漏）
 _URL_RE = re.compile(
-    r"https?://(?:v\.douyin\.com/[\w\-]+|www\.douyin\.com/video/\d+"
-    r"|www\.iesdouyin\.com/share/video/\d+)[^\s，,。;；\"'<>]*",
+    r"https?://"
+    r"(?:"
+    r"v\.douyin\.com/[\w\-]+"                       # 短链
+    r"|(?:www\.|m\.|)iesdouyin\.com/[^\s]*"          # 旧版分享域
+    r"|(?:www\.|m\.|)douyin\.com/[^\s]*"             # 任意 douyin.com 路径
+    r")"
+    r"[^\s，,。；;\"'<>）)】]*",
     re.I)
 
 
@@ -210,11 +232,68 @@ def extract_urls(text: str) -> list[str]:
 
 
 def _aweme_id_from_url(url: str) -> str:
-    m = re.search(r"/video/(\d+)", url or "")
-    return m.group(1) if m else ""
+    """从作品链接里提取 aweme_id（视频 ID）。
+
+    ★★ v2.9.1 修复（客户实测）★★
+      原来只认 `/video/<数字>`，但抖音大量作品链接是
+      `?modal_id=<数字>` 形式（精选页/发现页/主页弹窗）：
+        https://www.douyin.com/jingxuan?modal_id=7702018171426868531
+      → 原实现返回空 → 判为"不是作品链接"。
+
+      现在按优先级尝试：
+        1. /video/<数字>          经典作品页
+        2. ?modal_id=<数字>       精选/发现/主页弹窗
+        3. /share/video/<数字>    分享页
+        4. /note/<数字>           图文（保留能力，下载会走图文判断）
+    """
+    u = url or ""
+    for pat in (r"/video/(\d+)",
+                r"[?&]modal_id=(\d+)",
+                r"/share/video/(\d+)",
+                r"/note/(\d+)"):
+        m = re.search(pat, u)
+        if m:
+            return m.group(1)
+    return ""
 
 
 # ────────────────────── 浏览器（复用同一个实例） ──────────────────────
+
+def _browser_candidates():
+    """返回浏览器启动候选 [(名称, kwargs), ...]（v2.9.1）。
+
+    ★ 为什么抽出来：`_launch`（未登录）和 `launch_persistent_context`
+      （已登录）都要用同一套候选，之前只有 _launch 有，
+      导致「已登录时反而报 executable doesn't exist」。
+    """
+    import os
+    cands = [("msedge", {"channel": "msedge"}),
+             ("chrome", {"channel": "chrome"})]
+    env = os.environ
+    for name, paths in (
+        ("edge-explicit", [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            os.path.join(env.get("LOCALAPPDATA") or "",
+                         r"Microsoft\Edge\Application\msedge.exe"),
+            os.path.join(env.get("PROGRAMFILES(X86)") or "",
+                         r"Microsoft\Edge\Application\msedge.exe"),
+            os.path.join(env.get("PROGRAMFILES") or "",
+                         r"Microsoft\Edge\Application\msedge.exe"),
+        ]),
+        ("chrome-explicit", [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.join(env.get("LOCALAPPDATA") or "",
+                         r"Google\Chrome\Application\chrome.exe"),
+        ]),
+    ):
+        for pe in paths:
+            if pe and os.path.isfile(pe):
+                cands.append((name, {"executable_path": pe}))
+                break
+    return cands
+
 
 def _launch(p):
     """启动浏览器：优先系统 Edge/Chrome（免内置 Chromium），最后才用自带。
@@ -224,19 +303,34 @@ def _launch(p):
     """
     args = ["--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage", "--no-first-run"]
+
+    # ★★ v2.9.1 修复（客户报障：executable doesn't exist）★★
+    #   `channel="msedge"` 在某些机器上找不到 Edge（注册表/安装位置差异），
+    #   但 Edge 其实装在标准路径。所以先试 channel，再**显式给可执行文件路径**。
+    cands = _browser_candidates()
     last = None
-    for kwargs in (
-        {"channel": "msedge"},        # Win10/11 默认都有 Edge
-        {"channel": "chrome"},        # 装了 Chrome 的机器
-        {},                            # 兜底：Playwright 自带 chromium
-    ):
+    for name, kwargs in cands:
         try:
-            return p.chromium.launch(headless=True, args=args, **kwargs)
+            b = p.chromium.launch(headless=True, args=args, **kwargs)
+            logger.debug(f"抖音：浏览器启动成功 [{name}]")
+            return b
         except Exception as e:                     # noqa: BLE001
             last = e
-            logger.debug(f"抖音：浏览器启动失败 {kwargs}: {e}")
+            logger.debug(f"抖音：浏览器启动失败 [{name}]: {e}")
             continue
-    raise RuntimeError(f"没有可用的浏览器（请装 Edge 或 Chrome）：{last}")
+
+    # 兜底：Playwright 自带 chromium（一般没装，但不排除）
+    try:
+        return p.chromium.launch(headless=True, args=args)
+    except Exception as e:                         # noqa: BLE001
+        last = e
+
+    # ★ 面向客户的说明，不是开发者报错
+    raise RuntimeError(
+        "找不到可用的浏览器。本工具需要电脑装有 Microsoft Edge 或 "
+        "Google Chrome（Win10/11 一般自带 Edge）。\n"
+        "如果确认装了 Edge 仍报此错，请把下面这行发给开发者：\n"
+        f"{last}")
 
 
 def _ctx(browser):
@@ -557,13 +651,31 @@ def resolve_many(urls: list[str], on_item=None, on_log=None,
         ctx = None
         try:
             if logged:
-                # 用持久化 profile → 带登录态
-                ctx = pw.chromium.launch_persistent_context(
-                    user_data_dir=str(profile_dir()), headless=True,
-                    args=["--disable-blink-features=AutomationControlled",
-                          "--no-first-run"],
-                    user_agent=UA, locale="zh-CN",
-                    viewport={"width": 1280, "height": 800})
+                # ★★ v2.9.1 修复（客户报障 executable doesn't exist）★★
+                #   原来这里**没传 channel**，Playwright 就去找它自带的
+                #   chromium_headless_shell —— 打包版没带，必然报
+                #   「Executable doesn't exist at ...chrome-headless-shell.exe」。
+                #   现在和 _launch 用同一套候选（系统 Edge/Chrome + 显式路径）。
+                last_err = None
+                for name, kw in _browser_candidates():
+                    try:
+                        ctx = pw.chromium.launch_persistent_context(
+                            user_data_dir=str(profile_dir()), headless=True,
+                            args=["--disable-blink-features=AutomationControlled",
+                                  "--no-first-run"],
+                            user_agent=UA, locale="zh-CN",
+                            viewport={"width": 1280, "height": 800},
+                            **kw)
+                        logger.debug(f"抖音：持久化上下文启动成功 [{name}]")
+                        break
+                    except Exception as e:               # noqa: BLE001
+                        last_err = e
+                        logger.debug(f"抖音：持久化上下文失败 [{name}]: {e}")
+                        ctx = None
+                        continue
+                if ctx is None:
+                    raise RuntimeError(
+                        f"找不到可用的浏览器（需要 Edge 或 Chrome）：{last_err}")
             else:
                 browser = _launch(pw)
                 ctx = _ctx(browser)

@@ -3,6 +3,142 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.9.2] - 2026-10-30
+
+- v2.9.2 修已登录分支
+### 修「已登录时反而报 executable doesn't exist」
+
+#### 客户报障
+「输入分享文案…解析视频报错 executable doesn't exist」
+
+#### 根因（v2.9.1 只修了一半）
+
+抖音有**两条**启动浏览器的路径，v2.9.1 只修了其中一条：
+
+| 路径 | 何时走 | v2.9.1 状态 |
+|---|---|---|
+| `_launch(pw)` → `launch()` | 未登录 | ✅ 已加显式 Edge/Chrome 路径 |
+| `launch_persistent_context()` | **已登录** | ❌ **没传 channel** |
+
+已登录走 `launch_persistent_context` 时没传 `channel`，
+Playwright 就去找它自带的 `chromium_headless_shell` ——
+打包版没带这个，必然报：
+
+```
+Executable doesn't exist at ...\chromium_headless_shell-1248\
+chrome-headless-shell-win64\chrome-headless-shell.exe
+```
+
+**所以这个错只在「已登录」状态下出现** —— 客户刚登录完就踩到了。
+
+修法：抽出 `_browser_candidates()` 供两条路径共用
+（channel msedge → channel chrome → 5 个 Edge 显式路径 → 3 个 Chrome 显式路径）。
+
+### ★ 另一个发现：抖音 aweme/detail 接口已失效
+
+修完浏览器问题后实测客户那条链接，能拿到地址但**元数据全丢**：
+
+```
+标题: 抖音视频_7702018171426868531   ← 默认名
+作者: （空）
+时长: 0 秒
+大小: —
+```
+
+抓包确认原因：**三种链接形态都拿不到 `aweme/detail` 响应**
+
+```
+https://www.douyin.com/video/<id>            → JSON 2 个，detail 0 个
+https://www.iesdouyin.com/share/video/<id>   → JSON 1 个，detail 0 个
+https://m.douyin.com/share/video/<id>        → JSON 1 个，detail 0 个
+```
+
+→ 抖音已改版（detail 接口不再被调用，或换了新接口）。
+目前只能靠「页面媒体流兜底」拿到地址，元数据拿不到。
+
+**这是独立问题，需要单独排查新接口**，不在本版范围内。
+
+## [2.9.1] - 2026-10-30
+
+- v2.9.2 修已登录分支浏览器启动
+- v2.9.1 修抖音按钮/链接形态/浏览器启动
+### 修客户实测的 4 个问题
+
+#### ① 抖音按钮文字看不见（配色失效）
+
+客户：「刚对抖音做了授权，发现『抖音批量下载』几个字看不见，颜色要改」
+
+**根因**：Windows 默认 ttk 主题是 `vista`（原生主题），
+**它完全忽略 `ttk.Button` 的 background/foreground**。
+实测：配了青绿底白字，渲染出来是系统浅蓝底 `(236,243,255)`，
+且按钮区域**纯色、文字一个像素都没画**。
+
+实测对比（`st.lookup` 都返回配置值，但只有自绘主题真的用）：
+
+| 主题 | 自定义配色 |
+|---|---|
+| winnative / clam / alt / default / classic | ✅ 生效 |
+| vista / xpnative | ❌ 忽略 |
+
+**修法**：程序启动时若主题是 vista/xpnative/winnative → 切到 `clam`。
+★ 影响范围：**所有** ttk 按钮（抖音/公众号等 4 个自定义样式全部生效）。
+
+#### ② 点「登录」立刻显示已登录，没输密码（客户质疑）
+
+**这不是 bug，是正常行为。**
+
+登录走的是「**打开真实浏览器窗口让客户扫码**」，不是在本工具里输账号密码：
+- 扫码成功后浏览器 profile 里就有登录态
+- 工具检测到 profile 有 Cookies + 登录标记 → 显示「已登录」
+- 后续抓取复用这个 profile（headless 复用登录态）
+
+客户不会、也不应该在本工具里输抖音账号密码（工具不接触密码，
+这是安全设计）。
+
+#### ③ 「最多抓 500 条」是授权配置吗？怎么在发码平台操作？
+
+**不是授权配置，与授权完全无关。**
+
+| | 视频号 | 抖音 |
+|---|---|---|
+| 是否分档 | ✅ 分四档（500/1000/2000/20000 条） | ❌ **不分档**（一次性买断全部能力） |
+| 500 这个数字 | 轻量版档位上限 | **只是主页抓取的默认单次上限** |
+
+抖音是 `product=3`，`tier` 固定 0（`license.py:362` 明确写了忽略档位）。
+那个 500 是**界面上的一个输入框**（抖音窗口右上「主页最多抓 N 条」，
+范围 10~2000），客户自己改，**发码平台不需要做任何操作**。
+
+#### ④ 贴 `jingxuan?modal_id=...` 提示「没找到抖音链接」
+
+客户原链接：
+```
+https://www.douyin.com/jingxuan?modal_id=7702018171426868531
+```
+
+**根因**：`extract_urls` 的正则只认 `/video/<数字>`，
+不认 `?modal_id=<数字>` 这种形态（精选页/发现页/主页弹窗都用这个）。
+
+**修法**：
+- 正则放宽为「任何 `douyin.com` / `iesdouyin.com` / `v.douyin.com` 链接都先抓下来」
+- `_aweme_id_from_url` 按优先级支持 4 种形态：
+  `/video/<id>` → `?modal_id=<id>` → `/share/video/<id>` → `/note/<id>`
+
+#### ⑤ 解析报错 `executable doesn't exist`
+
+`channel="msedge"` 在某些机器上找不到 Edge（注册表/安装位置差异）。
+
+**修法**：先试 channel，再**显式列出 8 个常见 Edge/Chrome 安装路径**用
+`executable_path` 启动；错误信息改成客户能看懂的中文说明。
+
+#### 验证
+
+`verify_v291_fixes.py` **18/18**：
+- ★客户原链接、分享文案原文都能提取
+- ★7 种 douyin.com 路径形态
+- ★clam 主题下 background/foreground 真的生效
+- ★浏览器候选含显式 Edge/Chrome 路径
+- ★douyin_profile 不读任何授权信息（确认 500 与授权无关）
+
 ## [2.9.0] - 2026-10-30
 
 - v2.9.0 抖音主页批量（方案B）

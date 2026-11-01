@@ -2871,6 +2871,19 @@ class App:
         #   未授权时换成浅灰底（暗示需解锁），但**不禁用**（仍可点，给引导）。
         try:
             st = ttk.Style()
+            # ★★★ v2.9.1 关键修复（客户报障：抖音按钮文字看不见）★★★
+            #   Windows 默认主题是 vista/xpnative（原生主题），
+            #   它们**完全忽略 ttk.Button 的 background/foreground** ——
+            #   实测：配了青绿底白字，渲染出来是系统浅蓝底、文字还没画出来。
+            #   实测对比（st.lookup 都返回配置值，但只有自绘主题真的用）：
+            #     winnative/clam/alt/default/classic  → ✅ 生效
+            #     vista/xpnative                      → ❌ 忽略
+            #   所以切到 clam（Tk 自带自绘主题，跨平台一致、支持配色）。
+            try:
+                if st.theme_use() in ("vista", "xpnative", "winnative"):
+                    st.theme_use("clam")
+            except Exception:
+                pass
             st.configure("Mp.TButton", background="#ffe0b2",
                          foreground="#8a4b00")
             st.map("Mp.TButton",
