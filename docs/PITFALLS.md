@@ -1201,3 +1201,163 @@ if time.time() - self._wd_last_warn < 180:
 
 **对策**：样式测试断言 `CSS 长度 > N`；后台必跑路由冒烟；
 系统交互必做真实端到端并读真实状态（`window.scrollY`）。
+
+---
+
+## P34 ★ `except Exception: pass` 吞掉样式配置 → 所有按钮配色失效
+
+**现象**：客户报「抖音按钮文字看不见」，我改了配色但一直不生效。
+
+**根因**：
+```python
+try:
+    st = ttk.Style()
+    ...
+    st.configure("Primary.TButton", ..., font=(FONT, 10, "bold"))
+    #                                    ^^^^ FONT 在整个文件里不存在
+    ...
+except Exception:
+    pass          # ← 静默吞掉 NameError，整个样式块被跳过
+```
+
+`FONT` 未定义 → `NameError` → 被吞 → **整个按钮样式配置块从未执行**，
+连原有的 `Mp.TButton` / `Dy.TButton` 也一起失效。
+
+**验证方法**（关键）：
+```python
+st.lookup("Primary.TButton", "background")   # 返回 #dcdad5（clam 默认灰）= 没生效
+```
+
+**教训**：
+1. **样式/主题这类"配置型"代码，`except: pass` 是灾难** ——
+   失败后界面看起来"只是不好看"，实际上功能配置全丢
+2. 改成 `logger.warn` + 明确的失败提示
+3. 视觉类改动必须**读像素验证**（`st.lookup` 或截图统计颜色），
+   不能只看"代码写了"
+
+---
+
+## P35 ★ ttk 主题切换会重置已配置的样式
+
+**现象**：先 `st.configure(...)` 再 `st.theme_use("clam")`，
+配置全部丢失。
+
+**正确顺序**：
+```python
+st = ttk.Style()
+if st.theme_use() in ("vista", "xpnative", "winnative"):
+    st.theme_use("clam")
+    st = ttk.Style()          # ★ 必须重新取实例
+st.configure("Primary.TButton", background="#16a34a")
+```
+
+**背景**：Windows 默认主题 `vista`/`xpnative` 是原生主题，
+**完全忽略** `ttk.Button` 的 `background`/`foreground`。
+实测对比：
+
+| 主题 | 自定义配色 |
+|---|---|
+| winnative / clam / alt / default / classic | ✅ 生效 |
+| vista / xpnative | ❌ 忽略 |
+
+---
+
+## P36 ★★★ PyInstaller 不加 `--clean` → 打包出旧代码
+
+**现象**：改了源码，打包后 exe 仍然崩在老的错误上：
+```
+AttributeError: 'App' object has no attribute 'tree'
+File "sphdl\gui.py", line 3038, in _build_ui
+```
+
+**根因**：`release.py` 调 PyInstaller 时没有 `--clean`，
+它复用了 `~/.pyinstaller` 缓存 + 残留 `.pyc`。
+**v2.9.6 和 v2.9.7 两个版本都是这样废掉的**（客户双击直接崩）。
+
+**修法**：
+```python
+run([sys.executable, "-m", "PyInstaller", str(SPEC), "--noconfirm",
+     "--clean",                    # ★ 强制全新构建
+     "--distpath", str(ver_dir), "--workpath", str(WORK)])
+```
+打包前还要清 `sphdl/__pycache__` 和 `__pycache__`。
+
+**验证铁律**：打包后必须**真的运行一次 exe 并确认窗口出现**，
+不能只看 `--selftest` 通过（selftest 不启动 GUI）。
+
+---
+
+## P37 Windows Tk 截图：`ImageGrab` 截不到窗口内容
+
+**现象**：验证日志区是否显示时，`PIL.ImageGrab.grab(bbox=窗口区域)`
+截出来的图**完全没有 Tk 控件内容**（是桌面其他部分）。
+
+这让"日志区看不见"的排查绕了 3 次弯 —— 三种布局（pack 双 expand /
+side=bottom / grid weight）全被判为"失败"，实际都能正常显示。
+
+**正确方法**：Win32 `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT=2)`
+```python
+hdc = user32.GetWindowDC(hwnd)
+mdc = gdi32.CreateCompatibleDC(hdc)
+bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+gdi32.SelectObject(mdc, bmp)
+user32.PrintWindow(hwnd, mdc, 2)      # 2 = PW_RENDERFULLCONTENT
+gdi32.GetDIBits(mdc, bmp, 0, h, buf, byref(bi), 0)
+```
+
+**注意**：找窗口时要**按面积排序取最大**，
+否则会抓到 tooltip（实测抓到过 314×50 的提示窗）。
+
+---
+
+## P38 Tk `pack` 按调用顺序分配空间 —— 底部固定区必须 `before=`
+
+**现象**：日志区 `fill="both", expand=True` 仍然被压成 0 高度。
+
+**根因**：Tk 的 `pack` **按调用顺序分配空间**。
+`list_frame` 在 2994 行就先 `pack(expand=True)` 抢走全部剩余，
+日志区 3295 行才 pack → 没有空间可分了。
+
+**解法**：
+```python
+_log_holder = tk.Frame(main, height=210)
+_log_holder.pack(side="bottom", fill="x", expand=False,
+                 before=self.list_frame)   # ★ 插到列表区之前
+_log_holder.pack_propagate(False)          # ★ 锁死高度
+```
+
+**验证**：改完必须用 PrintWindow 截图读像素，确认深色区高度达标。
+
+---
+
+## P39 `ttk.Button` 的 `width` 单位是字符，中文/emoji 占 2
+
+**现象**：批量把按钮 `width` 缩 2 后，15 个按钮文字显示不全。
+
+**原因**：`ttk` 的 `width` 是**字符宽度单位**，
+中文和 emoji 各占约 2 个单位。
+
+**正确算法**：
+```python
+need = sum(2 if ord(c) > 127 else 1 for c in text)
+width = need + 1     # 留 1 个余量
+```
+
+---
+
+## P40 `self.videos[i][0]` 裸取 + `except` 吞 → 统计 0/N
+
+**现象**：抖音主页抓到了 84 条，客户看到「成功 0/84 条」。
+
+**根因**（`douyin_ui.py:apply_item`）：
+```python
+url = self.videos[i][0]      # self.videos 还没铺满 → IndexError
+self.videos[i] = (url, v)
+```
+主页模式走 `dy_item` 回填时 `self.videos` 是空列表 → `IndexError`
+→ 被外层 `except` 吞 → 表格一行没填 → 统计 0/84。
+
+**教训**：
+1. 列表索引取值前必须判长度
+2. 主页条目**本身完整**（有 play_url），不该再送去 `resolve_many`
+3. `except` 里至少 `logger.debug`，否则永远发现不了

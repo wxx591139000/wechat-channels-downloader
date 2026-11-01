@@ -433,3 +433,52 @@ v2.7.3 用「连续 N 次无新增」判到底，只测了「有新增/无新增
 
 **对策**：`verify_bottom_detect.py` 用 5 个场景模拟，
 其中「断续增长」专门复现客户现场。
+
+---
+
+## 14. 本轮测试（v2.8.x → v3.1.1）
+
+| 测试 | 项数 | 覆盖 |
+|---|---|---|
+| `verify_miniapp_naming.py` | 14/14 | 小程序集序命名、落盘目录 |
+| `verify_miniapp_autoplay.py` | 13/13 | 连播抓取、集号持久化 |
+| `verify_miniapp_seq_persist.py` | 12/12 | 集号跨会话持久化 |
+| `verify_miniapp_click_e2e.py` | 全过 | WGC 截图 + 两点标定（坐标误差 0px） |
+| `verify_douyin_v293.py` | 17/17 | 链接规范化（modal_id → /video/<id>） |
+| `verify_douyin_v294.py` | 21/21 | 短链解析、主页识别、列宽可拖拽 |
+| `verify_douyin_profile_scroll.py` | 29/29 | 主页滚动抓取（客户滚动+工具监听） |
+| `verify_v311_douyin_profile.py` | 15/15 | **主页条目直接入表（修 0/84）** |
+| `verify_v297_fixes.py` | 13/13 | 授权迁移不清空、日志框高度、√ 符号 |
+| `verify_ui_v3.py` | 全过 | 配色像素验证（绿/红按钮渲染） |
+| `verify_v310_exe.py` | 全过 | **真实 exe** 启动 + 配色 + 日志区高度 |
+| `measure_regions.py` | — | 逐行测量各区块高度占比 |
+
+### ★ 本轮最重要的三个测试方法
+
+**① 真实 exe 验证，不能只跑 --selftest**
+`--selftest` 不启动 GUI。v2.9.6/v2.9.7 打包出旧代码，
+selftest 全过但客户双击直接崩。必须**真的启动 exe 并确认窗口出现**。
+
+**② 界面改动必须读像素**
+`st.lookup()` + PrintWindow 截图统计颜色像素。只看代码永远发现不了
+「样式配置被 except 吞了」。
+
+**③ 打包后核对 `--clean`**
+改了源码但打出来还是旧代码，是本轮最大的事故源。
+
+### 反例：本轮踩过的测试假绿
+
+| 假绿 | 真相 |
+|---|---|
+| `verify_snippets_copy.py` 18/18 | 只查"页面有没有这段文字"，函数根本没执行 |
+| `verify_miniapp_click` 16/16 | 纯算法对，真实窗口截图拿不到内容 |
+| `verify_popup_once` 首版 13/14 | 我把 ✅ 的判据算反了 |
+| 布局测试 geometry 说有 325px | ImageGrab 截不到 Tk，实际看不到 |
+
+### 真实网络验证（跑就验）
+
+| 脚本 | 需要什么 |
+|---|---|
+| `verify_modal_id_live.py` | 登录态（抖音） |
+| `verify_douyin_profile_logged_in.py` | 登录态 |
+| `diag_douyin_0of84.py` | 登录态，验证主页→下载全链路 |
