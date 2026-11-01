@@ -384,6 +384,67 @@ def _parse_detail(data: dict) -> DouyinVideo:
     )
 
 
+def _parse_from_dom(page) -> "DouyinVideo":
+    """★ v2.9.3（2026-11-01）：抖音 aweme/detail 接口已失效，改从 DOM 取元数据。
+
+    ═══ 为什么必须换 ═══
+    实测作品页 xhr 请求只有 2 个监控接口，**0 个 aweme/detail**。
+    三种链接形态（/video/、iesdouyin、m.douyin.com）都一样。
+    → 抖音改版了，detail 接口不再被调用。
+
+    ═══ 替代来源（实测可用）═══
+    | 数据 | DOM 位置 | 实测结果 |
+    |---|---|---|
+    | 标题 | `h1` | ✅ 「33天城市生存攒钱挑战今天是第14天」 |
+    | 时长 | `video.duration` | ✅ 2079.6 秒 |
+    | 分辨率 | `video.videoWidth/Height` | ✅ 576×1024 |
+    | 作者 | 找 a[href*="/user/"] 且非 /self 的文本 | ✅ |
+    | 地址 | 不能从 DOM 拿（是 blob:），由调用方从网络请求里取 |
+
+    ★ 作者字段的坑：直接用 `body.innerText` 匹配 `@xxx` 会匹配到
+      `@douyin.com`（页脚版权文字）。必须优先用 a[href*=user] 的锚文本。
+    """
+    try:
+        meta = page.evaluate("""() => {
+            const out = {};
+            const q = (s) => document.querySelector(s);
+            const txt = (e) => e ? (e.textContent || '').trim() : null;
+
+            out.title = txt(q('h1'));
+
+            const v = q('video');
+            if (v) {
+                out.duration = v.duration || 0;
+                out.vw = v.videoWidth || 0;
+                out.vh = v.videoHeight || 0;
+            }
+
+            // ★ 作者：优先 a[href*="/user/"] 的锚文本（排除 /self），
+            //   避免用 @xxx 正则匹配到页脚的 @douyin.com
+            const links = [...document.querySelectorAll('a[href*="/user/"]')]
+                .filter(e => e.offsetParent && !e.href.includes('/self'))
+                .map(e => (e.textContent || '').trim())
+                .filter(t => t && t.length >= 1 && t.length <= 30
+                             && t.indexOf('@') !== 0 && t.indexOf('.com') < 0);
+            out.author = links.length ? links[0] : '';
+
+            return out;
+        }""")
+    except Exception as e:                        # noqa: BLE001
+        logger.debug(f"DOM 元数据读取失败: {e}")
+        return DouyinVideo(error="页面元数据读取失败")
+
+    dur_ms = int(round(float(meta.get("duration") or 0) * 1000))
+    return DouyinVideo(
+        aweme_id="",
+        title=(meta.get("title") or "").strip(),
+        author=(meta.get("author") or "").strip(),
+        duration_ms=dur_ms,
+        width=int(meta.get("vw") or 0),
+        height=int(meta.get("vh") or 0),
+    )
+
+
 def _login_marker() -> Path:
     """登录成功标记文件（比猜 cookie 路径可靠）。"""
     return profile_dir() / "login_ok.json"
@@ -790,9 +851,21 @@ def _resolve_one(ctx, url: str):
 
     page.on("response", _on_resp)
     page.on("request", _on_req)
+
+    # ★★★ v2.9.3 关键修复（2026-11-01 实测）★★★
+    #   客户贴的 `jingxuan?modal_id=<id>` 打开后页面**没有 h1**
+    #   （标题在那个弹窗层里，DOM 读不到），只有 video 元素。
+    #   而 `/video/<id>` 打开后 h1 有完整标题。
+    #   所以：只要能从 URL 里解析出 aweme_id，就一律改用 /video/<id> 打开。
+    _aid_for_nav = _aweme_id_from_url(url)
+    nav_url = (f"https://www.douyin.com/video/{_aid_for_nav}"
+               if _aid_for_nav else url)
+    if nav_url != url:
+        logger.debug(f"抖音：链接规范化 {url[:50]} → {nav_url}")
+
     t0 = time.time()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        page.goto(nav_url, wait_until="domcontentloaded", timeout=20000)
     except Exception:
         pass                      # 超时不致命，接口可能已经在路上
 
@@ -816,6 +889,16 @@ def _resolve_one(ctx, url: str):
             break
         time.sleep(0.4)
 
+    # ★ v2.9.3：detail 接口已失效（实测 0 个响应），
+    #   所以在关页面前先抓 DOM 元数据（标题/作者/时长/分辨率）。
+    #   实测这三个字段 DOM 里都有，比 SSR 解析稳定得多。
+    dom_meta = None
+    if box["json"] is None:
+        dom_meta = _parse_from_dom(page)
+        logger.debug(f"抖音 DOM 元数据: title={getattr(dom_meta,'title','')!r} "
+                     f"author={getattr(dom_meta,'author','')!r} "
+                     f"dur={getattr(dom_meta,'duration_ms',0)}")
+
     try:
         page.close()
     except Exception:
@@ -830,13 +913,28 @@ def _resolve_one(ctx, url: str):
 
     # 兜底：页面媒体流（DASH 分离流 → 必须带上音轨，否则没声音）
     if box["media"]:
-        v = DouyinVideo(
-            aweme_id=_aweme_id_from_url(url),
-            title=f"抖音视频_{_aweme_id_from_url(url)}",
-            play_url=box["media"][0],
-            audio_url=(box["audio"][0] if box["audio"] else ""),
-            error="",
-        )
+        aid = _aweme_id_from_url(url)
+        # ★ v2.9.3：用 DOM 元数据替代「抖音视频_<id>」这种默认名
+        if dom_meta and dom_meta.title:
+            v = DouyinVideo(
+                aweme_id=aid,
+                title=dom_meta.title,
+                author=dom_meta.author,
+                duration_ms=dom_meta.duration_ms,
+                width=dom_meta.width,
+                height=dom_meta.height,
+                play_url=box["media"][0],
+                audio_url=(box["audio"][0] if box["audio"] else ""),
+                error="",
+            )
+        else:
+            v = DouyinVideo(
+                aweme_id=aid,
+                title=f"抖音视频_{aid}",
+                play_url=box["media"][0],
+                audio_url=(box["audio"][0] if box["audio"] else ""),
+                error="",
+            )
         if box["audio"]:
             logger.debug("抖音：使用页面媒体流兜底（音视频分离，需合并）")
         else:

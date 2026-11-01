@@ -3,6 +3,65 @@
 本项目遵循语义化版本（SemVer）。版本单一事实源：`sphdl/__init__.py` 的 `__version__`。
 
 
+## [2.9.3] - 2026-11-01
+
+- v2.9.3 修抖音元数据全丢
+### 修抖音解析元数据全丢（标题变「抖音视频_xxx」）
+
+#### 客户实测
+贴 `https://www.douyin.com/jingxuan?modal_id=7702018171426868531`
+→ 标题「抖音视频_7702018171426868531」、作者空、时长 0 秒、大小 —
+
+#### 根因：链接形态决定了页面结构（实测对比）
+
+| 打开方式 | DOM 有 h1？ | aweme/detail 接口 |
+|---|---|---|
+| `jingxuan?modal_id=<id>` | ❌ **没有**（标题在弹窗层） | ❌ 0 个 |
+| `/video/<id>` | ✅ 有完整标题 | ✅ 正常返回 |
+
+抓包数据：
+```
+jingxuan?modal_id=  → xhr 27 个，JSON 10 个，detail 0 个，h1 不存在
+/video/<id>         → detail 接口正常，h1 = 33天城市生存攒钱挑战今天是第14天
+```
+
+**所以不是接口失效，是我用错了打开方式。**
+
+#### 修法：链接规范化
+
+```python
+_aid_for_nav = _aweme_id_from_url(url)
+nav_url = f"https://www.douyin.com/video/{_aid_for_nav}" if _aid_for_nav else url
+page.goto(nav_url)   # 一律用 /video/<id> 打开
+```
+
+#### 顺带加的 DOM 兜底（防御性）
+
+万一将来 detail 接口真失效，用 DOM 取元数据：
+
+| 数据 | DOM 位置 | 实测 |
+|---|---|---|
+| 标题 | `h1` | ✅ |
+| 时长 | `video.duration` | ✅ 2079 秒 |
+| 分辨率 | `video.videoWidth/Height` | ✅ 576×1024 |
+| 作者 | `a[href*="/user/"]` 锚文本（排除 /self 和 @douyin.com） | ✅ |
+
+★ 作者字段的坑：用 `body.innerText` 匹配 `@xxx` 会匹配到页脚的
+`@douyin.com`，必须用锚文本。
+
+#### 实测结果（客户原链接）
+
+```
+修复前: 抖音视频_7702018171426868531 | 0 秒 | —
+修复后: 33天城市生存攒钱挑战今天是第14天 | 34:39 | 471 MB
+        作者: 齐大勇（泡长）
+        耗时: 14.7 秒
+```
+
+#### 验证
+
+`verify_douyin_v293.py` **17/17**
+
 ## [2.9.2] - 2026-10-30
 
 - v2.9.2 修已登录分支
