@@ -30,6 +30,7 @@ import tkinter as tk
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import font as tkfont
 
 # 应用主目录（开发=sphdl/，冻结打包=exe 所在目录 → 便携布局）
 if getattr(sys, "frozen", False):
@@ -46,6 +47,7 @@ from sphdl.addon import SphAddon               # noqa: E402
 from sphdl.proxy_manager import ProxyManager, restore_proxy   # noqa: E402
 from sphdl.downloader import format_size       # noqa: E402
 from sphdl import userdata                     # noqa: E402
+from sphdl.util import one_line                # noqa: E402
 
 # ★ v2.2.5：配置与列表改存用户级目录（%LOCALAPPDATA%\sphdl），
 #   换版本目录不再丢授权码 —— 客户解压新版的常见操作不再清空授权。
@@ -223,6 +225,117 @@ class ToolTip:
             except Exception:
                 pass
             self._tip = None
+
+
+class RowTip:
+    """列表行悬停提示（v3.1.4）：列宽放不下的文字，悬停 0.35 秒看全文。
+
+    为什么需要：Treeview 的单元格不会自动换行、也不会画省略号，
+    长标题被列宽硬切后，用户只能靠拖列宽才能看全（客户原话
+    "标题显示不完整"）。悬停全文是最轻的补偿手段 —— 不占版面、
+    不改变任何行高列宽、不影响点击/拖选。
+
+    只在**文字确实超出列宽**时弹（用字体实测宽度判断），
+    否则满屏都在冒气泡更烦人。
+    """
+
+    def __init__(self, tree, text_for_cell, delay_ms=350, wraplength=520):
+        self.tree = tree
+        self.text_for_cell = text_for_cell
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self._tip = None
+        self._after = None
+        self._key = None
+        tree.bind("<Motion>", self._on_motion, add="+")
+        tree.bind("<Leave>", self.hide, add="+")
+        tree.bind("<ButtonPress>", self.hide, add="+")
+        tree.bind("<MouseWheel>", self.hide, add="+")
+
+    # ---- 内部 ----
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self.tree.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _on_motion(self, evt):
+        try:
+            iid = self.tree.identify_row(evt.y)
+            col = self.tree.identify_column(evt.x)
+            region = self.tree.identify_region(evt.x, evt.y)
+        except Exception:
+            return
+        if region != "cell" or not iid:
+            self.hide()
+            return
+        try:
+            col_0 = int(col.lstrip("#")) - 1
+        except Exception:
+            return
+        key = (iid, col_0)
+        if key == self._key:
+            return                      # 同一格内移动：不重弹、不闪
+        self._key = key
+        self._cancel()
+        self._drop()
+        text = ""
+        try:
+            text = self.text_for_cell(iid, col_0) or ""
+        except Exception as e:           # noqa: BLE001
+            logger.warn(f"悬停提示取样失败: {e}")
+        if not text:
+            return
+        x, y = evt.x_root, evt.y_root
+        self._after = self.tree.after(self.delay_ms,
+                                      lambda: self._show(text, x, y))
+
+    def _show(self, text, x, y):
+        self._after = None
+        if self._tip is not None:
+            return
+        try:
+            top = tk.Toplevel(self.tree)
+            top.wm_overrideredirect(True)
+            try:
+                top.attributes("-topmost", True)
+            except Exception:
+                pass
+            tk.Label(top, text=text, justify="left", bg="#fffbe6",
+                     fg="#1f2937", relief="solid", bd=1, padx=10, pady=7,
+                     font=("Microsoft YaHei UI", 9),
+                     wraplength=self.wraplength).pack()
+            # 偏移 18/22 像素：气泡不能压住光标，否则树控件收到 <Leave>
+            # → 收起 → 再进 → 再弹，肉眼看到的就是疯狂闪烁
+            tx, ty = x + 18, y + 22
+            top.update_idletasks()
+            sw = self.tree.winfo_screenwidth()
+            sh = self.tree.winfo_screenheight()
+            tw, th = top.winfo_width(), top.winfo_height()
+            if tx + tw > sw - 8:
+                tx = max(8, sw - tw - 8)
+            if ty + th > sh - 8:
+                ty = max(8, y - th - 12)
+            top.wm_geometry(f"+{tx}+{ty}")
+            self._tip = top
+        except Exception as e:           # noqa: BLE001
+            logger.warn(f"悬停提示显示失败: {e}")
+            self._tip = None
+
+    def _drop(self):
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+    def hide(self, _e=None):
+        self._cancel()
+        self._key = None
+        self._drop()
 
 
 # ============================== 配置持久化 ==============================
@@ -1276,19 +1389,27 @@ class App:
             head = (f"满 {n} 条即停止加载后续视频"
                     f"（删掉部分记录后可继续加载）")
         try:
-            self.limit_hint.config(text=f"{head}　｜　{self._tier_source_text()}")
-        except Exception:
-            pass
+            # ★ v3.1.4：未授权（n<=0）时**不再**显示"满 0 条即停止加载后续
+            #   视频…" —— 那句话既不对（0 条不是上限，是不能下载）又长，
+            #   把这一行挤到后面「打开文件夹」都快看不见了。
+            #   左侧 label 已经写着"未授权（可捕获，不能下载）"，
+            #   右边就是琥珀色的「🔑 授权管理」按钮，中间不需要再解释。
+            if n <= 0:
+                self.limit_hint.config(text="")
+            else:
+                self.limit_hint.config(text=f"{head}　｜　{self._tier_source_text()}")
+        except Exception as _e:                      # noqa: BLE001
+            logger.warn(f"列表明细提示刷新失败: {_e}")
         try:
             self.limit_value_lbl.config(text=self._tier_label_of(n))
-        except Exception:
-            pass
+        except Exception as _e:                      # noqa: BLE001
+            logger.warn(f"列表档位文字刷新失败: {_e}")
         try:
             # 「🔑 授权管理」按钮文案随授权状态变化：未授权→「🔑 授权管理」，
             # 已授权→「🔑 授权管理」（保持一致，状态在提示里体现）
             self.btn_license.config(text="🔑 授权管理")
-        except Exception:
-            pass
+        except Exception as _e:                      # noqa: BLE001
+            logger.warn(f"授权管理按钮文字刷新失败: {_e}")
 
     def _refresh_limit_display(self):
         """界面控件建好后的首次刷新（等价 _refresh_limit_hint + 状态栏）。"""
@@ -2800,6 +2921,15 @@ class App:
                          foreground="#334155", relief="flat", borderwidth=0,
                          padding=(6, 6), font=(ui, 9, "bold"))
             st.map("Treeview.Heading", background=[("active", "#e2e8f0")])
+            # ★ v3.1.4：单元格左右各留 6px。
+            #   clam 默认 0 内边距 —— 标题被列宽硬切时最后一字直接顶到
+            #   下一列（来源/捕获方式）上，看着像两列糊在一起。
+            #   注意：这是改 Treeview.Item 的 padding 元素，不是列宽，
+            #   所以不会挤占其它列的可用宽度。
+            try:
+                st.configure("Treeview.Item", padding=(6, 1))
+            except Exception as _e:                  # noqa: BLE001
+                logger.warn(f"表格单元格内边距设置失败（只影响观感）: {_e}")
             st.map("Treeview", background=[("selected", "#dbeafe")],
                    foreground=[("selected", "#0f172a")])
 
@@ -3079,6 +3209,25 @@ class App:
                          foreground="#78909c")
             st.map("DyLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v3.1.4 两个"要找得到"的按钮（客户：授权管理 / 打开文件夹
+            #   太不起眼，一眼扫过去以为是普通文字）
+            #   · 授权管理 = 权益/解锁路径 → 琥珀色（暖、亮，但避开绿色的
+            #     主操作和青/橙两个产品入口）
+            #   · 打开文件夹 = "去我电脑里看结果" → 蓝色（导航语义）
+            #   两者都加粗 + 描边同色系，白卡片上一眼能挑出来。
+            st.configure("License.TButton", background="#fde68a",
+                         foreground="#7c2d12",
+                         font=("Microsoft YaHei UI", 9, "bold"),
+                         padding=(10, 4))
+            st.map("License.TButton",
+                   background=[("active", "#fcd34d"), ("pressed", "#fbbf24")])
+            st.configure("Folder.TButton", background="#dbeafe",
+                         foreground="#1d4ed8",
+                         font=("Microsoft YaHei UI", 9, "bold"),
+                         padding=(10, 4))
+
+            st.map("Folder.TButton",
+                   background=[("active", "#bfdbfe"), ("pressed", "#93c5fd")])
             # ★ v3.1.2：彩色按钮统一"同色描边 + 扁平"
             #   （原来它们继承 TButton 的灰边，彩色底配灰边看着脏）
             for _name, _bd in (("Mp.TButton", "#e8a85c"),
@@ -3086,7 +3235,9 @@ class App:
                                ("Primary.TButton", "#15803d"),
                                ("Danger.TButton", "#f3b6b6"),
                                ("Dy.TButton", "#00897b"),
-                               ("DyLocked.TButton", "#d3dae0")):
+                               ("DyLocked.TButton", "#d3dae0"),
+                               ("License.TButton", "#f59e0b"),
+                               ("Folder.TButton", "#93c5fd")):
                 try:
                     st.configure(_name, bordercolor=_bd, relief="flat",
                                  lightcolor=_bd, darkcolor=_bd)
@@ -3155,7 +3306,11 @@ class App:
             limf, text="", font=("Microsoft YaHei UI", 9, "bold"),
             foreground="#0f766e")
         self.limit_value_lbl.pack(side="left", padx=(6, 2))
-        self.btn_license = ttk.Button(limf, text="🔑 授权管理", width=14,
+        # ★ v3.1.4：改成琥珀色加粗按钮（原来灰白小按钮混在提示文字里，
+        #   客户根本注意不到；不指定 width，让 ttk 按文字自动撑开，
+        #   避免"🔑 授权管理"被 width 截半截）
+        self.btn_license = ttk.Button(limf, text="🔑 授权管理",
+                                      style="License.TButton",
                                       command=self._on_license_input)
         if self.cfg.locked_max_records is None:
             self.btn_license.pack(side="left", padx=6)
@@ -3188,9 +3343,12 @@ class App:
                                          command=self._choose_dir)
         self.btn_choose_dir.pack(side="left")
         self._tt(self.btn_choose_dir, "选择新的下载目录，修改后立即生效。")
-        self.btn_open_dir = ttk.Button(dirf, text="打开文件夹", width=10,
+        # ★ v3.1.4：蓝色加粗（"下完了去磁盘看文件"是高频动作，原来是
+        #   跟「更改…」同级的灰白按钮，客户反馈找不到）
+        self.btn_open_dir = ttk.Button(dirf, text="📂 打开文件夹",
+                                       style="Folder.TButton",
                                        command=self._open_download_dir)
-        self.btn_open_dir.pack(side="left", padx=4)
+        self.btn_open_dir.pack(side="left", padx=(6, 0))
         self._tt(self.btn_open_dir, "打开当前下载目录。")
 
         # 上限组最后 pack：拿剩下的宽度（提示文字可被压缩，按钮不会）
@@ -3291,8 +3449,14 @@ class App:
         #   状态列 115→96（"已完成""下载中 100%" 够放）
         #   标题列 330→420（长标题是主要阅读内容，优先给空间）
         #   捕获方式 110→88、时间 85→76、文件 200→180
+        # ★ v3.1.4：**只有标题列可拉伸**（stretch=True），其余固定。
+        #   原来 6 列全是 stretch=True，Tk 把窗口变宽多出来的像素**平均**
+        #   分给 6 列 → 标题只多几十像素，长标题照样被切。
+        #   现在窗口变宽全部给标题（1080 宽时标题约 460px，1240 宽时约 620px）。
+        #   固定列合计 592px + 标题最小 240px = 832px < 最小窗口 1080px，
+        #   不会出现"右列被窗口边缘吃掉"的溢出。
         heads = {"no": ("", 0),
-                 "status": ("状态", 96), "title": ("标题", 420),
+                 "status": ("状态", 96), "title": ("标题", 480),
                  "platform": ("来源", 80), "size": ("", 0),
                  "source": ("捕获方式", 88),
                  "like": ("👍 点赞", 72),
@@ -3300,8 +3464,11 @@ class App:
                  "file": ("文件", 180)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
-            self.tree.heading(c, text=heads[c][0],
-                              command=lambda col=c: self._on_tree_sort(col))
+            # ★ v3.1.4：表头对齐跟数据对齐一致（原来表头一律居中、数据
+            #   一律左对齐 → 「标题」「状态」表头飘在列中间，看着散）
+            self.tree.heading(c, text=heads[c][0], anchor=(
+                "center" if c in ("like", "no", "size") else "w"),
+                command=lambda col=c: self._on_tree_sort(col))
             if c in ("no", "size"):
                 # 宽度 0 + 不拉伸 + 不可拖宽 = 彻底看不见
                 self.tree.column(c, width=0, minwidth=0, stretch=False)
@@ -3311,12 +3478,15 @@ class App:
                 #   但拖动空间为 0；且 stretch=False 时 Tk 会让用户拖不动。
                 #   现在给 minwidth 一个小的下限（40），用户可自由拖动加宽。
                 self.tree.column(c, width=heads[c][1], minwidth=40,
-                                 stretch=True, anchor="center")
+                                 stretch=False, anchor="center")
+            elif c == "title":
+                # 唯一可拉伸列：窗口变宽的收益全部给标题
+                self.tree.column(c, width=heads[c][1], minwidth=240,
+                                 stretch=True)
             else:
                 # ★ v2.9.4：所有可见列都允许拖拽调整宽度
-                #   （minwidth 给小值 → 可拖窄；stretch 让列跟随窗口）
                 self.tree.column(c, width=heads[c][1], minwidth=40,
-                                 stretch=True)
+                                 stretch=False)
         self._seq_col_hidden = True
         self._size_col_hidden = True
         vsb = ttk.Scrollbar(listf, orient="vertical", command=self.tree.yview)
@@ -3382,6 +3552,16 @@ class App:
         self.tree.bind("<Control-a>", lambda e: self._select_all())
         # v2.0.19：鼠标移到「来源」列表头时提示「双击可筛选」（见 _on_tree_motion）
         self.tree.bind("<Motion>", self._on_tree_motion)
+
+        # ★ v3.1.4：标题被列宽硬切时，悬停 0.35s 显示全文（客户报"显示不完整"）
+        #   失败必须 logger.warn —— 不许 except: pass（PITFALLS P34/P47）
+        self._tip_font = None
+        self._row_tip = None
+        try:
+            self._tip_font = tkfont.Font(font=("Microsoft YaHei UI", 9))
+            self._row_tip = RowTip(self.tree, self._tip_text_for_cell)
+        except Exception as _e:                      # noqa: BLE001
+            logger.warn(f"标题悬停提示初始化失败（不影响列表其它功能）: {_e}")
 
         # ---- 工具栏 A：下载操作 ----
         self.btn_download = ttk.Button(btns1, text="⬇ 下载选中", width=12,
@@ -6058,6 +6238,33 @@ class App:
             self.push_log("error", f"复制日志失败: {e}")
 
     # ---------------- 树刷新 ----------------
+    def _tip_text_for_cell(self, iid, col_0):
+        """悬停提示取文本：**只在标题列表格真的放不下时**才返回文字。
+
+        Treeview 不会自动换行、也不会画省略号，超宽就是硬切；
+        这里用字体实测像素宽度和当前列宽比，判断"是否被切"。
+        没被切的格子返回空串 → 不弹气泡（避免满屏提示）。
+        """
+        ti = self._col_index("title")
+        if ti < 0 or col_0 != ti:
+            return ""
+        try:
+            vals = self.tree.item(iid, "values")
+        except Exception:
+            return ""
+        if len(vals) <= ti:
+            return ""
+        text = str(vals[ti])
+        if not text or self._tip_font is None:
+            return text
+        try:
+            col_id = self.tree["columns"][ti]
+            avail = int(self.tree.column(col_id, "width"))
+            need = self._tip_font.measure(text) + 12   # 单元格左右余量
+        except Exception:
+            return text
+        return text if need > avail else ""
+
     def _row_values(self, r: Record):
         st = STATUS_TEXT.get(r.status, r.status)
         if r.status == "downloading" and r.progress > 0:
@@ -6067,6 +6274,11 @@ class App:
         title = r.title or "(无标题)"
         if r.is_image:
             title = "🖼 " + title  # 图片帖（不是视频），避免误以为是视频
+        # ★ v3.1.4：标题必须压成单行再进表格。
+        #   抖音/视频号标题常带 \n（作者自己敲的），Treeview 行高固定 25px，
+        #   多行文本第二行会被裁掉一半 —— 屏幕上就是"标题显示不全"。
+        #   只压显示值，Record.title 保留原文（文件名要用原文）。
+        title = one_line(title)
         # v2.0.19：platform 列区分来源（视频号 / 公众号）
         #   前面加图标，一眼分辨；双击该单元格可按来源筛选（见 _on_tree_dclick）
         plat = r.platform or "视频号"

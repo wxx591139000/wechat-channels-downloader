@@ -15,6 +15,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from .logger import logger
+from .util import one_line
 
 FONT = "Microsoft YaHei UI"
 
@@ -619,7 +620,7 @@ class DouyinWindow:
             return
         if v.ok:
             self.tree.item(iid, values=(
-                "☑", v.title or "(无标题)", v.author or "-",
+                "☑", one_line(v.title or "(无标题)"), v.author or "-",
                 v.duration_text, v.size_text, "待下载"))
         else:
             self.tree.item(iid, values=(
@@ -649,12 +650,12 @@ class DouyinWindow:
                     break
             if iid is None:
                 iid = self.tree.insert("", "end", values=(
-                    "☑", v.title or "(无标题)", v.author or "-",
+                    "☑", one_line(v.title or "(无标题)"), v.author or "-",
                     v.duration_text, v.size_text, "待下载"))
                 self._rows[iid] = i
             else:
                 self.tree.item(iid, values=(
-                    "☑", v.title or "(无标题)", v.author or "-",
+                    "☑", one_line(v.title or "(无标题)"), v.author or "-",
                     v.duration_text, v.size_text, "待下载"))
         self._log("ok", f"主页作品已载入表格：{len(videos)} 条，可直接勾选下载")
 

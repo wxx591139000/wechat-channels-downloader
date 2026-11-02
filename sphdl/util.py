@@ -1,10 +1,31 @@
 """小工具（日志脱敏等）"""
+import re
+
+# 换行 / 制表 / 全角空格 / 连续空白（用于把多行标题压成一行显示）
+_WS_RE = re.compile(r"[\s\u3000\u00a0]+")
 
 # 日志中需要打码的查询参数：视频号 CDN URL 的 encfilekey 等同下载凭证
 _SENSITIVE_QUERY_KEYS = {
     "encfilekey", "key", "token", "sign", "sig", "vkey",
     "decode_key", "decodekey", "urlkey", "auth_key", "ckey",
 }
+
+
+def one_line(s, limit: int = 0) -> str:
+    """把多行文本压成单行（**仅用于列表显示**）。
+
+    为什么必须有：ttk.Treeview 的行高是固定的（rowheight=25），
+    而抖音/视频号的标题里常带 `\\n`（作者自己敲的换行）。单元格
+    会按多行排版 → 第二行被行高从中间裁掉，屏幕上只剩半截字，
+    看起来就是"标题显示不全"（PITFALLS P47）。
+
+    注意：**只用于显示**。Record.title 必须保留原文 —— 下载文件名、
+    「复制标题」、评论窗口都用原文，压平了会改坏文件名。
+    """
+    out = _WS_RE.sub(" ", str(s or "")).strip()
+    if limit and len(out) > limit:
+        out = out[:max(0, limit - 1)] + "…"
+    return out
 
 
 def mask_url(url: str, limit: int = 80) -> str:
