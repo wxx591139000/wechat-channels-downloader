@@ -1361,3 +1361,93 @@ self.videos[i] = (url, v)
 1. 列表索引取值前必须判长度
 2. 主页条目**本身完整**（有 play_url），不该再送去 `resolve_many`
 3. `except` 里至少 `logger.debug`，否则永远发现不了
+
+---
+
+## P41 ★★ `pack(side="left")` 吃掉横向空间 → 后面 `side="top"` 只拿到剩余 → 控件被压成 1×1
+
+**现象**：客户界面里「下载目录」和「🔑 授权管理」按钮**从来没见过**
+（v3.1.0 起就是这样，两版没人发现）。截图只能看到「列表上限」提示
+被截成「未授权（可捕获，」。
+
+**硬数据**（`tests/probe_layout_geom.py` 打印控件树）：
+```
+TLabel  下载目录:        855 134   1    1
+TButton 🔑 授权管理      855 134   1    1
+TLabel  满 N 条即停止…   855 134   1    1
+```
+
+**根因**：
+```python
+# 同一行先 pack 了 8 个 side="left" 的复选框/按钮
+self.auto_dl_chk.pack(side="left")     # 吃掉 x=19..853
+...
+# 再想开新的一行
+_info_row.pack(fill="x", pady=(4, 0))  # ← 只拿到剩下 665px！
+```
+Tk 的 pack 里 `side="left"` **消耗的是同一个矩形腔体的横向切片**，
+腔体高度不变。所以后面 `side="top"` 拿到的是「这一行右边剩下的那块」，
+不是新的一整行 —— 宽度 665px 里再塞 4 个控件，全部退化成 1×1。
+
+**修法**（唯一可靠做法）：**显式建行容器**。
+```python
+_row1 = ttk.Frame(capf); _row1.pack(fill="x")
+self.auto_dl_chk = ttk.Checkbutton(_row1, ...)   # 改 parent
+...
+_info_row = ttk.Frame(capf); _info_row.pack(fill="x", pady=(6, 0))
+```
+行内再定优先级：**先 pack 右侧固定宽度的组（占位），左侧可压缩的组后 pack**：
+```python
+dirf.pack(side="right")                                   # 目录组先占位
+limf.pack(side="left", fill="x", expand=True, padx=(0, 10)) # 上限组吃剩余
+```
+
+**判据（别再靠眼睛）**：
+```bash
+python tests/probe_layout_geom.py | grep -E " +1 +1  pack"
+```
+1×1 的 pack 控件 = 隐形控件。修复前 11 个，修复后 4 个
+（剩下的是筛选项/水印层这类**本应隐藏**的）。
+
+---
+
+## P42 ★★ 后台线程读 Tk 变量 → `RuntimeError` 且**线程静默死亡**，界面永久卡「下载中」
+
+**现象**：抖音下载点了没反应，界面一直显示「正在下载 0/N」，
+日志里**一条错误都没有**，客户只能强杀进程。
+
+**实测报错**（真实端到端跑出来的，不是推理）：
+```
+File "sphdl\douyin_ui.py", line 705, in _worker
+    dest = self._dir()
+File "sphdl\douyin_ui.py", line 192, in _dir
+    base = Path(self.app.dir_var.get() or ...)
+RuntimeError: main thread is not in main loop
+```
+
+**根因**：
+1. `_dir()` 里读了 `self.app.dir_var.get()` —— `StringVar` 是 **Tk 变量**
+2. Tk 不允许非创建线程访问，主线程不在 mainloop 内就抛
+3. 线程函数没有 try/except → 异常走 `threading.excepthook`
+   → **线程直接结束**，`dy_all_done` 永远不发 → `_busy` 永远是 True
+
+**修法两层**：
+```python
+# ① 主线程先算好，线程只读字符串
+dest = self._dir()                      # 在按钮回调里（主线程）
+def _worker():
+    ... download(v, dest) ...
+
+# ② 线程级兜底：异常必须落日志 + **补发结束事件**
+try:
+    for ...: ...
+except Exception as e:
+    self._log("error", f"下载线程异常: {type(e).__name__}: {e}")
+finally:
+    self.app.ui_q.put(("dy_all_done", done, failed, total))
+```
+
+**教训**：
+1. 线程里**只碰纯 Python 数据**：路径、列表、字符串。Tk 变量一律先在主线程取值
+2. 「界面卡 busy」类问题，先看线程是不是已经死了 —— 而线程死掉**默认不留任何 UI 痕迹**
+3. 后台线程必须有 `except` + `logger`，并且 `finally` 里补发「结束」事件

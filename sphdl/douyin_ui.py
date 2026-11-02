@@ -93,12 +93,12 @@ class DouyinWindow:
             cursor="hand2")
         self.btn_logout.pack(side="left", padx=6)
 
-        pad = tk.Frame(self.win, bg="#f6f8fa")
+        pad = tk.Frame(self.win, bg="#ffffff")
         pad.pack(fill="both", expand=True)
 
         # ① 粘贴区
         tk.Label(pad, text="① 粘贴抖音链接（作品链接 或 博主主页链接，一行一个）",
-                 bg="#f6f8fa", font=(FONT, 10, "bold")).pack(
+                 bg="#ffffff", font=(FONT, 10, "bold")).pack(
             anchor="w", padx=14, pady=(12, 4))
         self.txt = tk.Text(pad, height=5, wrap="word", font=(FONT, 10),
                            bg="#ffffff", relief="solid", bd=1)
@@ -113,33 +113,33 @@ class DouyinWindow:
             "★ 主页抓取【必须先登录】：未登录时抖音不返回作品列表，\n"
             "   页面会一直显示「数据加载中」。请先点顶部【登录抖音】扫码。")
 
-        bar1 = tk.Frame(pad, bg="#f6f8fa")
+        bar1 = tk.Frame(pad, bg="#ffffff")
         bar1.pack(fill="x", padx=14, pady=(8, 4))
         self.btn_parse = tk.Button(
             bar1, text="② 解析链接", command=self._on_parse,
             bg="#2563eb", fg="#ffffff", relief="flat",
             font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2")
         self.btn_parse.pack(side="left")
-        self.lbl_count = tk.Label(bar1, text="", bg="#f6f8fa",
+        self.lbl_count = tk.Label(bar1, text="", bg="#ffffff",
                                   font=(FONT, 9), fg="#6b7280")
         self.lbl_count.pack(side="left", padx=10)
 
         # ★ 方案 B：主页最多抓多少条
-        tk.Label(bar1, text="主页最多抓", bg="#f6f8fa",
+        tk.Label(bar1, text="主页最多抓", bg="#ffffff",
                  font=(FONT, 9), fg="#6b7280").pack(side="left", padx=(6, 2))
         self.var_max = tk.StringVar(value="500")
         tk.Spinbox(bar1, from_=10, to=2000, width=6, textvariable=self.var_max,
                    font=(FONT, 9)).pack(side="left")
-        tk.Label(bar1, text="条", bg="#f6f8fa", font=(FONT, 9),
+        tk.Label(bar1, text="条", bg="#ffffff", font=(FONT, 9),
                  fg="#6b7280").pack(side="left")
 
         # ② 结果表
         tk.Label(pad, text="② 解析结果（勾选后批量下载）",
-                 bg="#f6f8fa", font=(FONT, 10, "bold")).pack(
+                 bg="#ffffff", font=(FONT, 10, "bold")).pack(
             anchor="w", padx=14, pady=(10, 4))
 
         cols = ("sel", "title", "author", "dur", "size", "status")
-        wrap = tk.Frame(pad, bg="#f6f8fa")
+        wrap = tk.Frame(pad, bg="#ffffff")
         wrap.pack(fill="both", expand=True, padx=14)
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                  height=10, selectmode="extended")
@@ -160,7 +160,7 @@ class DouyinWindow:
         self.tree.bind("<Button-1>", self._on_click)
 
         # ③ 操作条
-        bar2 = tk.Frame(pad, bg="#f6f8fa")
+        bar2 = tk.Frame(pad, bg="#ffffff")
         bar2.pack(fill="x", padx=14, pady=(8, 4))
         self.btn_all = tk.Button(
             bar2, text="全选", command=self._toggle_all, bg="#e5e7eb",
@@ -183,7 +183,7 @@ class DouyinWindow:
 
         self.pbar = ttk.Progressbar(pad, mode="determinate", maximum=100)
         self.pbar.pack(fill="x", padx=14, pady=(4, 2))
-        self.lbl_stat = tk.Label(pad, text="就绪", bg="#f6f8fa", anchor="w",
+        self.lbl_stat = tk.Label(pad, text="就绪", bg="#ffffff", anchor="w",
                                  font=(FONT, 9), fg="#6b7280")
         self.lbl_stat.pack(fill="x", padx=14, pady=(0, 8))
 
@@ -700,43 +700,56 @@ class DouyinWindow:
         self._stop = False
         self._set_busy(True, f"正在下载 0/{total}…")
 
+        # ★★ v3.1.2 修复（真实端到端测试抓出来的）★★
+        #   原来 `_worker` 里第一行是 `dest = self._dir()`，而 `_dir()` 会读
+        #   `self.app.dir_var.get()` —— 那是 **Tk 变量**。
+        #   在后台线程里访问 Tk 变量，一旦主线程不在 mainloop 内就会抛
+        #   `RuntimeError: main thread is not in main loop`；
+        #   更糟的是：整个线程直接死掉，`dy_all_done` 永远不发 →
+        #   界面**永久停在「正在下载 0/N」**，客户只能强杀进程。
+        #   修法：目录在主线程（按钮回调里）先算好，线程只读字符串。
+        dest = self._dir()
+
         def _worker():
             from .douyin import download
-            dest = self._dir()
             done = 0
             failed = 0
-            for n, (idx, v) in enumerate(items, 1):
-                if self._stop:
-                    self._log("warn", "抖音：已停止下载")
-                    break
-                self.app.ui_q.put(("dy_dl_start", idx, n, total))
-                fname = ""
-                try:
-                    last = [0.0]
+            try:
+                for n, (idx, v) in enumerate(items, 1):
+                    if self._stop:
+                        self._log("warn", "抖音：已停止下载")
+                        break
+                    self.app.ui_q.put(("dy_dl_start", idx, n, total))
+                    try:
+                        last = [0.0]
 
-                    def prog(got, tot, dt, idx=idx, n=n):
-                        # 限频：最多每 0.4 秒刷一次 UI
-                        if time.time() - last[0] < 0.4:
-                            return
-                        last[0] = time.time()
-                        self.app.ui_q.put(("dy_dl_prog", idx, got, tot,
+                        def prog(got, tot, dt, idx=idx, n=n):
+                            # 限频：最多每 0.4 秒刷一次 UI
+                            if time.time() - last[0] < 0.4:
+                                return
+                            last[0] = time.time()
+                            self.app.ui_q.put(("dy_dl_prog", idx, got, tot,
+                                               n, total))
+
+                        ok, info = download(v, dest, on_progress=prog,
+                                            should_stop=lambda: self._stop)
+                    except Exception as e:            # noqa: BLE001
+                        ok, info = False, f"{type(e).__name__}: {e}"
+
+                    if ok:
+                        done += 1
+                        self.app.ui_q.put(("dy_dl_done", idx, True, info,
                                            n, total))
-
-                    ok, info = download(v, dest, on_progress=prog,
-                                        should_stop=lambda: self._stop)
-                    fname = info if ok else ""
-                except Exception as e:            # noqa: BLE001
-                    ok, info = False, f"{type(e).__name__}: {e}"
-
-                if ok:
-                    done += 1
-                    self.app.ui_q.put(("dy_dl_done", idx, True, info,
-                                       n, total))
-                else:
-                    failed += 1
-                    self.app.ui_q.put(("dy_dl_done", idx, False, info,
-                                       n, total))
-            self.app.ui_q.put(("dy_all_done", done, failed, total))
+                    else:
+                        failed += 1
+                        self.app.ui_q.put(("dy_dl_done", idx, False, info,
+                                           n, total))
+            except Exception as e:                    # noqa: BLE001
+                # ★ 线程级兜底：绝不能让异常悄悄结束线程 → 界面卡在 busy
+                #   （PITFALLS P34：except 不许静默；这里还要补发结束事件）
+                self._log("error", f"抖音下载线程异常: {type(e).__name__}: {e}")
+            finally:
+                self.app.ui_q.put(("dy_all_done", done, failed, total))
 
         threading.Thread(target=_worker, daemon=True).start()
 

@@ -2685,8 +2685,116 @@ class App:
             win.geometry(f"{bw}x{bh}+{x}+{y}")
         except Exception:
             pass
+
+    # ══════════════════ 视觉主题（v3.1.2）══════════════════
+    # 只改「颜色 / 边框 / 字体 / 行高 / 间距」，**不动任何控件、命令、变量**。
+    #
+    # 改什么：原来整界面是 clam 默认的灰底 + 凹陷刻线边框（像 2005 年的软件）。
+    #   现在统一成「浅灰画布 + 白色卡片 + 1px 细边」：
+    #     画布  #f4f6f9  ← 只有最外层，让白色区块浮起来
+    #     卡片  #ffffff  ← 每个 LabelFrame 是一张卡片
+    #     边线  #e3e8ef
+    #   区块标题加粗深色（原来和正文一样灰），表格表头加粗 + 行高 25px，
+    #   滚动条收细，输入框统一内边距。
+    #
+    # 为什么这样改能"零功能风险"：
+    #   · 全部走 ttk.Style，不碰 widget 的 command / variable / 事件绑定
+    #   · 唯一的结构性改动是 main 换 Page.TFrame 样式（同一控件、同一 pack）
+    C_PAGE = "#f4f6f9"      # 画布
+    C_CARD = "#ffffff"      # 卡片
+    C_BORDER = "#e3e8ef"    # 描边
+    C_TITLE = "#0f172a"     # 区块标题
+    C_TEXT = "#374151"      # 正文
+
+    def _setup_theme(self):
+        """统一 ttk 主题（v3.1.2）。失败必须 logger.warn，不许静默。"""
+        ui = "Microsoft YaHei UI"
+        try:
+            st = ttk.Style()
+            cur = st.theme_use()
+            if cur in ("vista", "xpnative", "winnative"):
+                st.theme_use("clam")
+                st = ttk.Style()          # 切主题会重置配置（PITFALLS P35）
+                logger.debug(f"ttk 主题 {cur} → clam（已重新获取 Style）")
+
+            try:
+                self.root.configure(bg=self.C_PAGE)
+            except Exception as _e:       # noqa: BLE001
+                logger.warn(f"根窗口底色设置失败: {_e}")
+
+            # 容器：画布 / 卡片
+            st.configure("Page.TFrame", background=self.C_PAGE)
+            st.configure("TFrame", background=self.C_CARD)
+
+            # 卡片：白底 + 1px 细边（clam 用 lightcolor/darkcolor 画立体边，
+            # 三个颜色设成一样就是干净的 1px 线）
+            st.configure("TLabelframe", background=self.C_CARD,
+                         bordercolor=self.C_BORDER,
+                         lightcolor=self.C_BORDER, darkcolor=self.C_BORDER,
+                         relief="solid", borderwidth=1)
+            st.configure("TLabelframe.Label", background=self.C_CARD,
+                         foreground=self.C_TITLE, font=(ui, 9, "bold"))
+            st.configure("TLabel", background=self.C_CARD,
+                         foreground=self.C_TEXT)
+            st.configure("Muted.TLabel", background=self.C_CARD,
+                         foreground="#6b7280")
+            st.configure("TCheckbutton", background=self.C_CARD,
+                         foreground=self.C_TEXT, font=(ui, 9))
+            st.map("TCheckbutton", background=[("active", self.C_CARD)])
+
+            # 输入框：白底细边（原来凹进去一圈，看着像按钮）
+            st.configure("TEntry", fieldbackground="#ffffff",
+                         bordercolor="#cbd5e1", lightcolor="#e6ebf2",
+                         darkcolor="#e6ebf2", padding=(6, 3),
+                         foreground="#111827")
+            st.map("TEntry", bordercolor=[("focus", "#93c5fd")])
+
+            st.configure("TSeparator", background=self.C_BORDER)
+
+            # 按钮：白底 + 细边（原来 clam 默认是灰凸块，跟白卡片冲突）
+            # ★ padding 与 v3.1.0 一致（高度不变），只是把边框和底色统一
+            st.configure("TButton", padding=(8, 4), background="#ffffff",
+                         foreground="#1f2937", bordercolor="#cbd5e1",
+                         lightcolor="#ffffff", darkcolor="#cbd5e1",
+                         relief="flat", focusthickness=0)
+            st.map("TButton",
+                   background=[("disabled", "#f1f5f9"),
+                               ("pressed", "#e2e8f0"),
+                               ("active", "#eef2f7")],
+                   foreground=[("disabled", "#9ca3af")],
+                   bordercolor=[("active", "#94a3b8")])
+
+            # 表格：行高 25 + 表头加粗浅底（原来 20px、表头灰得看不清）
+            st.configure("Treeview", background="#ffffff",
+                         fieldbackground="#ffffff", foreground="#1f2937",
+                         rowheight=25, borderwidth=0, font=(ui, 9))
+            st.configure("Treeview.Heading", background="#eef2f7",
+                         foreground="#334155", relief="flat", borderwidth=0,
+                         padding=(6, 6), font=(ui, 9, "bold"))
+            st.map("Treeview.Heading", background=[("active", "#e2e8f0")])
+            st.map("Treeview", background=[("selected", "#dbeafe")],
+                   foreground=[("selected", "#0f172a")])
+
+            # 滚动条：收细（clam 默认很粗，很占地方）
+            for _o in ("Vertical", "Horizontal"):
+                st.configure(f"{_o}.TScrollbar", background="#cbd5e1",
+                             troughcolor="#f4f6f9", bordercolor="#f4f6f9",
+                             arrowcolor="#64748b", borderwidth=0, arrowsize=12)
+                st.map(f"{_o}.TScrollbar",
+                       background=[("active", "#94a3b8")])
+
+            # 状态栏：浅灰条 + 深灰字（原来 sunken 凹陷 + 系统默认色）
+            st.configure("Status.TLabel", background="#eef2f7",
+                         foreground="#475569", padding=(10, 4),
+                         font=(ui, 9))
+        except Exception as _e:              # noqa: BLE001
+            # ★ 绝不允许 except: pass —— 样式失败会让整个界面退化成灰白一片，
+            #   客户只会说"界面难看"，根本看不出是配置崩了（PITFALLS P34）
+            logger.warn(f"界面主题配置失败（将退化为 clam 默认样式）: {_e}")
+
     def _build_ui(self):
         root = self.root
+        self._setup_theme()
         # ★ v2.2.3：main 必须 side="top"。
         #
         #   踩过的坑：原来只写 pack(fill="both", expand=True)（默认 side="top"），
@@ -2732,11 +2840,13 @@ class App:
                  "只显示「视频号」来源的记录（公众号记录只是被隐藏，不删除）")
 
         # ===== ⑦ 状态栏 =====
-        self.status_bar = ttk.Label(root, text="", relief="sunken", anchor="w",
-                                    padding=(8, 2))
+        # ★ v3.1.2：改用 Status.TLabel（浅灰底 + 深灰字 + 左右内边距），
+        #   去掉 relief="sunken"（凹陷感是老式 Windows 风格）。
+        self.status_bar = ttk.Label(root, text="", style="Status.TLabel",
+                                    anchor="w")
         self.status_bar.pack(fill="x", side="bottom")
 
-        main = ttk.Frame(root, padding=6)
+        main = ttk.Frame(root, padding=8, style="Page.TFrame")
         main.pack(side="top", fill="both", expand=True)
 
 
@@ -2806,12 +2916,22 @@ class App:
 
         # ===== ② 捕获设置（捕获后的行为） =====
         capf = ttk.LabelFrame(main, text=" 捕获与下载 ", padding=(8, 4))
-        capf.pack(fill="x", pady=(3, 0))
+        # ★ v3.1.2：区块之间留 8px 呼吸（原来 3px，卡片贴在一起像一块）
+        capf.pack(fill="x", pady=(8, 0))
+
+        # ★★★ v3.1.2：本区块现在明确分成两行 ★★★
+        #   第 1 行 = 捕获选项 + 功能入口（_row1）
+        #   第 2 行 = 列表上限 + 下载目录（_info_row）
+        #   为什么必须显式建行容器：pack 的 side="left" 会吃掉横向空间，
+        #   后面再 side="top" 只能拿到**剩下的那点空隙**（实测 665px），
+        #   于是「下载目录 / 授权管理」被压成 1×1 像素（完全看不见）。
+        _row1 = ttk.Frame(capf)
+        _row1.pack(fill="x")
 
         # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
         # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
         self.auto_dl_var = tk.BooleanVar(value=self.cfg.auto_download)
-        self.auto_dl_chk = ttk.Checkbutton(capf, text="⚙ 自动下载（捕获即入队）",
+        self.auto_dl_chk = ttk.Checkbutton(_row1, text="⚙ 自动下载（捕获即入队）",
                                            variable=self.auto_dl_var,
                                            command=self._on_auto_dl_toggle)
         self.auto_dl_chk.pack(side="left", padx=(2, 16))
@@ -2824,7 +2944,7 @@ class App:
         # 勾选 = 图片显示在列表并可下载；
         # 不勾（默认）= 列表不显示图片、新捕获的图片直接跳过、下载操作跳过图片。
         self.images_var = tk.BooleanVar(value=self.cfg.download_images)
-        self.images_chk = ttk.Checkbutton(capf, text="🖼 下载图片",
+        self.images_chk = ttk.Checkbutton(_row1, text="🖼 下载图片",
                                           variable=self.images_var,
                                           command=self._on_images_toggle)
         self.images_chk.pack(side="left", padx=16)
@@ -2837,7 +2957,7 @@ class App:
         # 「🎯 自然捕获」开关（v2.0.7）：开（默认）= 播放到哪条才捕获哪条；
         # 关 = 整页列表捕获（v2.0.6 行为）
         self.natural_var = tk.BooleanVar(value=self.cfg.natural_capture)
-        self.natural_chk = ttk.Checkbutton(capf, text="🎯 自然捕获",
+        self.natural_chk = ttk.Checkbutton(_row1, text="🎯 自然捕获",
                                            variable=self.natural_var,
                                            command=self._on_natural_toggle)
         self.natural_chk.pack(side="left", padx=16)
@@ -2846,7 +2966,7 @@ class App:
                  "不勾：整页列表捕获（v2.0.6 行为）。")
 
         # 「⚡ 批量拉取」按钮（v2.0.8）：整页入库 + 页面自动滚动拉取整个视频号
-        self.btn_batch = ttk.Button(capf, text="⚡ 批量拉取", width=10,
+        self.btn_batch = ttk.Button(_row1, text="⚡ 批量拉取", width=10,
                                     command=self._on_batch_toggle)
         self.btn_batch.pack(side="left", padx=(16, 2))
         self._tt(self.btn_batch,
@@ -2859,7 +2979,7 @@ class App:
                  "点击目标视频号窗口。")
 
         # 当前模式提示（随开关实时变化）
-        self.mode_label = ttk.Label(capf, foreground="#6b7280")
+        self.mode_label = ttk.Label(_row1, foreground="#6b7280")
         self.mode_label.pack(side="right", padx=4)
 
         # ===== ②-a2 「📄 公众号视频」按钮（v2.0.19 附加模块） =====
@@ -2911,7 +3031,9 @@ class App:
             #     (默认)   灰底 = 次级操作
             # ★ v3.1.0：全局压缩 ttk.Button 的内边距（clam 默认偏大）
             #   客户要求「按钮高度小一些」，这样两行按钮能省 ~16px
-            st.configure("TButton", padding=(6, 3))
+            # ★ v3.1.2：横向放松到 8px（文字不再贴着边框），纵向仍保持 4px
+            #   —— 高度不变，只是左右留白变匀。
+            st.configure("TButton", padding=(8, 4))
             st.configure("Primary.TButton", background="#16a34a",
                          foreground="#ffffff")
             st.map("Primary.TButton",
@@ -2929,18 +3051,31 @@ class App:
                          foreground="#78909c")
             st.map("DyLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v3.1.2：彩色按钮统一"同色描边 + 扁平"
+            #   （原来它们继承 TButton 的灰边，彩色底配灰边看着脏）
+            for _name, _bd in (("Mp.TButton", "#e8a85c"),
+                               ("MpLocked.TButton", "#d3dae0"),
+                               ("Primary.TButton", "#15803d"),
+                               ("Danger.TButton", "#f3b6b6"),
+                               ("Dy.TButton", "#00897b"),
+                               ("DyLocked.TButton", "#d3dae0")):
+                try:
+                    st.configure(_name, bordercolor=_bd, relief="flat",
+                                 lightcolor=_bd, darkcolor=_bd)
+                except Exception as _e:          # noqa: BLE001
+                    logger.warn(f"按钮样式 {_name} 描边设置失败: {_e}")
         except Exception as _style_err:
             # ★ v3.0.0：不再静默！样式配置失败会导致「按钮全是灰的」，
             #   客户报障时完全看不出原因（本次 FONT 未定义就是这样被吞的）。
             logger.warn(f"按钮样式配置失败（界面配色将退化为默认灰）: "
                         f"{_style_err}")
-        self.btn_mp = ttk.Button(capf, text="📄 公众号视频", width=16,
+        self.btn_mp = ttk.Button(_row1, text="📄 公众号视频", width=16,
                                  style="MpLocked.TButton",
                                  command=self._on_mp_article)
         self.btn_mp.pack(side="left", padx=(16, 2))
         # ★ v2.4.0：抖音批量下载（方案 A：粘贴链接）
         # 抖音按钮：未授权显示 🔒（仍可点 → 给购买引导）
-        self.btn_dy = ttk.Button(capf, text="🎵 抖音批量下载 🔒", width=17,
+        self.btn_dy = ttk.Button(_row1, text="🎵 抖音批量下载 🔒", width=17,
                                  style="DyLocked.TButton",
                                  command=self._on_douyin)
         self.btn_dy.pack(side="left", padx=(6, 2))
@@ -2972,10 +3107,21 @@ class App:
         # ===== ②-b 列表上限档位（v2.0.17：档位由发布方掌控，客户端不可自配） =====
         # ★ v3.1.0 布局重构：上限 + 目录直接放进「捕获与下载」区块内，
         #   不再单独占一行（省掉一个 LabelFrame 的标题栏 + 上下边距 ≈ 30px）
+        #
+        # ★★★ v3.1.2 修复（真实端到端验收抓出来的）★★★
+        #   上面那些复选框/按钮都是用 side="left" pack 进 capf 的，
+        #   pack 会**吃掉同一行的横向空间**。下面这行 side="top" 因此只拿到
+        #   那一行剩下的空隙（实测 156px），于是：
+        #     · 「下载目录:」+ 输入框 + 更改… + 打开文件夹 → 全部 1×1 像素（隐形）
+        #     · 「🔑 授权管理」按钮 → 1×1（客户根本点不到）
+        #     · 「列表上限」提示被截成「未授权（可捕获，」
+        #   实测数据（tests/probe_layout_geom.py）：TLabel 下载目录 855,134 1x1。
+        #   修法：用 before=self.mode_label 把它插到那一行**之前**，
+        #   让它真正独占一行；行内先 pack 右边的目录组（占位优先），
+        #   左边的上限组再吃掉剩余宽度 —— 这样按钮不会被挤没。
         _info_row = ttk.Frame(capf)
-        _info_row.pack(fill="x", pady=(4, 0))
+        _info_row.pack(fill="x", pady=(6, 0))
         limf = ttk.Frame(_info_row)
-        limf.pack(side="left")
         ttk.Label(limf, text="列表上限:").pack(side="left")
         self.limit_value_lbl = ttk.Label(
             limf, text="", font=("Microsoft YaHei UI", 9, "bold"),
@@ -2999,11 +3145,14 @@ class App:
         # 故不在此处调用，见 App.__init__ 末尾的 _refresh_limit_display()
 
         # ===== ③ 下载目录 =====
+        # ★ v3.1.2：目录组先 pack 到右边（先占位），左边上限组再吃剩余宽度
+        #   —— 反过来会让「更改…/打开文件夹」被挤成 1×1（原来就是这样）。
         dirf = ttk.Frame(_info_row)
-        dirf.pack(side="left", padx=(24, 0))
+        dirf.pack(side="right")
         ttk.Label(dirf, text="下载目录:").pack(side="left")
         self.dir_var = tk.StringVar(value=self.cfg.download_dir)
-        self.dir_entry = ttk.Entry(dirf, textvariable=self.dir_var, width=52)
+        # 宽度 52 → 34：52 字符会把整行撑爆，26 是量出来的结果
+        self.dir_entry = ttk.Entry(dirf, textvariable=self.dir_var, width=26)
         self.dir_entry.pack(side="left", padx=6)
         self._tt(self.dir_entry,
                  "视频保存目录。\n点『更改…』可修改，点『打开文件夹』直达。")
@@ -3015,6 +3164,9 @@ class App:
                                        command=self._open_download_dir)
         self.btn_open_dir.pack(side="left", padx=4)
         self._tt(self.btn_open_dir, "打开当前下载目录。")
+
+        # 上限组最后 pack：拿剩下的宽度（提示文字可被压缩，按钮不会）
+        limf.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         # ===== ③ 下载列表 =====
         # 标题随「⚙ 自动下载」开关联动（v1.2.5）
@@ -3050,7 +3202,9 @@ class App:
         #     ③ 字号提到 10pt + tkinter.font 显式 weight="bold"（程序化验证生效）
         #     ④ 客户要"明显"，10pt 与按钮 9pt 差得不够 → 提到 11pt + 加大内边距
         import tkinter.font as _tkfont
-        _hint_font = _tkfont.Font(family="Microsoft YaHei UI", size=11,
+        # ★ v3.1.2：11pt → 10pt。11pt 比正文大 2 号，整条横幅像"警告"，
+        #   抢了表格的注意力；10pt + 粗体 + 浅蓝底仍然明显，但不再喧宾夺主。
+        _hint_font = _tkfont.Font(family="Microsoft YaHei UI", size=10,
                                   weight="bold")
         self.hint_bar = tk.Frame(listf, bg="#dce9fa", bd=0,
                                  highlightthickness=1,
@@ -3335,7 +3489,9 @@ class App:
         #   最终解法：给日志区套一个**固定高度的容器**（height=320px，
         #   pack_propagate(False) 禁止子控件撑大/缩小它），日志区再填满它。
         #   这样无论窗口怎么变、列表区多贪，日志区都稳占 320px。
-        _log_holder = tk.Frame(main, height=210, bg="#f6f8fa")
+        # ★ v3.1.2：210 → 236。日志控件从右侧竖排改到顶部一行（见下），
+        #   多出的 26px 用来补回那一行，文本可见行数不变。
+        _log_holder = tk.Frame(main, height=236, bg="#f4f6f9")
         # ★★ v2.9.9 关键：必须用 before=self.list_frame ★★
         #   Tk 的 pack 按调用顺序分配空间：
         #   list_frame 在 2994 行就先 pack 了（expand=True，抢走全部剩余），
@@ -3347,9 +3503,35 @@ class App:
         _log_holder.pack_propagate(False)      # ★ 锁死高度，不让子控件改变它
         logf = ttk.LabelFrame(_log_holder, text=" 日志 ", padding=4)
         logf.pack(fill="both", expand=True)
+
+        # ★ v3.1.2：控件从「右侧竖排」改到「顶部一行」。
+        #   原来 checkbox 在右上、两个按钮在右下，属于同一个容器却分居两端，
+        #   把日志文本挤窄、右侧留一条空白竖带 —— 看着很乱。
+        #   控件本身、command、变量**一字未改**，只换了父容器和 pack 方向。
+        _logbar = ttk.Frame(logf)
+        _logbar.pack(side="top", fill="x", pady=(0, 4))
+        self.auto_scroll_var = tk.BooleanVar(value=True)
+        self.auto_scroll_chk = ttk.Checkbutton(_logbar, text="自动滚动",
+                                               variable=self.auto_scroll_var)
+        self.auto_scroll_chk.pack(side="left", padx=(2, 0))
+        self._tt(self.auto_scroll_chk,
+                 "日志自动滚动到最新；取消勾选可回看历史日志。")
+        self.btn_clear_log = ttk.Button(_logbar, text="清空", width=6,
+                                        command=self._clear_log)
+        self.btn_clear_log.pack(side="right")
+        self._tt(self.btn_clear_log,
+                 "清空日志区显示（不影响落盘的完整日志）。")
+        self.btn_copy_log = ttk.Button(_logbar, text="📋 复制日志", width=10,
+                                       command=self._copy_log)
+        self.btn_copy_log.pack(side="right", padx=(0, 4))
+        self._tt(self.btn_copy_log,
+                 "把日志区内容（含版本/时间/引擎状态）复制到剪贴板，\n"
+                 "方便粘贴给开发者排查问题。")
+
         self.log_text = tk.Text(logf, height=12, bg="#0b1020", fg="#d1d5db",
                                 insertbackground="#d1d5db", relief="flat",
-                                font=("Consolas", 9), wrap="word", state="disabled")
+                                font=("Consolas", 9), wrap="word", state="disabled",
+                                padx=8, pady=6)
         lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=lsb.set)
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -3357,25 +3539,6 @@ class App:
         for tag, color in (("info", "#7dd3fc"), ("ok", "#86efac"),
                            ("warn", "#fde047"), ("error", "#fca5a5"), ("dim", "#9ca3af")):
             self.log_text.tag_configure(tag, foreground=color)
-
-        self.auto_scroll_var = tk.BooleanVar(value=True)
-        self.auto_scroll_chk = ttk.Checkbutton(logf, text="自动滚动",
-                                               variable=self.auto_scroll_var)
-        self.auto_scroll_chk.pack(anchor="e", pady=(4, 0))
-        self._tt(self.auto_scroll_chk,
-                 "日志自动滚动到最新；取消勾选可回看历史日志。")
-        self.btn_copy_log = ttk.Button(logf, text="📋 复制日志", width=10,
-                                       command=self._copy_log)
-        self.btn_copy_log.pack(side="right", anchor="e",
-                               pady=(4, 0), padx=(0, 4))
-        self._tt(self.btn_copy_log,
-                 "把日志区内容（含版本/时间/引擎状态）复制到剪贴板，\n"
-                 "方便粘贴给开发者排查问题。")
-        self.btn_clear_log = ttk.Button(logf, text="清空", width=6,
-                                        command=self._clear_log)
-        self.btn_clear_log.pack(side="right", anchor="e", pady=(4, 0))
-        self._tt(self.btn_clear_log,
-                 "清空日志区显示（不影响落盘的完整日志）。")
 
 
         self._refresh_tree_all()
