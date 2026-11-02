@@ -240,6 +240,9 @@ class AppConfig:
         self.download_images = False
         self.natural_capture = True   # 默认自然捕获：当前播放+随后几条，不整页入库（v2.0.7）
         self.guide_auto_shown = False  # 内置使用说明是否已自动弹出过（v2.0.16）
+        # ★ v3.1.3：日志区高度（像素）。0 = 用出厂默认（矮，把高度让给视频列表）。
+        #   用户拖动「列表/日志」之间的分隔条后写入这里，下次启动沿用。
+        self.log_pane = 0
         # 列表容量档位（v2.0.17）：**客户端不可自行配置**
         #   ① 构建预置档位（release.py --max-records）→ 写死，无需授权码
         #   ② 否则由授权码决定（sphdl/license.py），未授权时用默认档
@@ -317,6 +320,11 @@ class AppConfig:
             self.download_images = bool(d.get("download_images", False))
             self.natural_capture = bool(d.get("natural_capture", True))
             self.guide_auto_shown = bool(d.get("guide_auto_shown", False))
+            # v3.1.3：日志区高度（用户拖过分隔条才有值；老配置无此项 → 默认）
+            try:
+                self.log_pane = int(d.get("log_pane", 0) or 0)
+            except Exception:
+                self.log_pane = 0
             # ---- v2.0.19：按产品线恢复授权码 ----
             self.license_codes = {}
             raw_codes = d.get("license_codes") or {}
@@ -393,6 +401,8 @@ class AppConfig:
                  "download_images": self.download_images,
                  "natural_capture": self.natural_capture,
                  "guide_auto_shown": self.guide_auto_shown,
+                 # v3.1.3：日志区高度（用户拖动分隔条的记忆值；0=默认）
+                 "log_pane": self.log_pane,
                  # v2.0.19：按产品线分别存（视频号 / 公众号 互不覆盖）
                  "license_codes": {str(k): v
                                    for k, v in (self.license_codes or {}).items()
@@ -2218,7 +2228,16 @@ class App:
         if self.cfg.locked_max_records is not None:
             _ed_sfx = "·" + config.label_of(self.cfg.locked_max_records)
         self.root.title(f"微信视频号下载器  sphdl v{__version__}{_ed_sfx}")
-        self.root.geometry("1240x780")
+        # ★ v3.1.3：窗口高度随屏幕自适应（下限 780 保持原样）。
+        #   客户日常主要在「视频列表」里看清单，1080p 屏上多给 100px
+        #   ≈ 多显示 4 行；小屏（如 768/840）仍按 780 开，不会顶到屏幕外。
+        try:
+            _sh = self.root.winfo_screenheight()
+            _h = min(880, max(780, int(_sh) - 120))
+        except Exception as e:
+            logger.warn(f"读屏幕高度失败，窗口用默认 780：{type(e).__name__}: {e}")
+            _h = 780
+        self.root.geometry(f"1240x{_h}")
         self.root.minsize(1080, 660)
         try:
             from tkinter import font as tkfont
@@ -2706,6 +2725,15 @@ class App:
     C_TITLE = "#0f172a"     # 区块标题
     C_TEXT = "#374151"      # 正文
 
+    # ---- v3.1.3：视频列表 / 日志 之间可拖拽分隔条 ----
+    #   为什么不用 ttk.Panedwindow：clam 主题下分隔条的厚度/配色不可控
+    #   （element_options 为空，实测调样式不生效），客户抓不住那条缝。
+    #   自己画一条 16px 的握把，尺寸/配色/吸附范围全部可控。
+    SPLIT_H = 16            # 分隔条厚度（含上下留白，16px 才好抓）
+    LOG_PANE_DEFAULT = 156  # 日志默认高度（原 236 → 让 3 行给视频列表）
+    LOG_PANE_MIN = 96       # 日志最小高度（约 3 行日志）
+    LIST_PANE_MIN = 240     # 列表最小高度（工具栏 + 2~3 行）
+
     def _setup_theme(self):
         """统一 ttk 主题（v3.1.2）。失败必须 logger.warn，不许静默。"""
         ui = "Microsoft YaHei UI"
@@ -3176,7 +3204,8 @@ class App:
             if self.cfg.auto_download
             else " 视频列表（捕获不会自动下载：选中后点『下载』或双击行） ",
             padding=4)
-        self.list_frame.pack(fill="both", expand=True, pady=4)
+        # ★ v3.1.3：列表底部不再留 pady —— 下面紧跟可拖拽分隔条（见日志区前）
+        self.list_frame.pack(fill="both", expand=True, pady=(4, 0))
         listf = self.list_frame
 
         # 工具栏分两行：先 pack 管理行（最底），再 pack 下载行（其上）
@@ -3491,18 +3520,57 @@ class App:
         #   这样无论窗口怎么变、列表区多贪，日志区都稳占 320px。
         # ★ v3.1.2：210 → 236。日志控件从右侧竖排改到顶部一行（见下），
         #   多出的 26px 用来补回那一行，文本可见行数不变。
-        _log_holder = tk.Frame(main, height=236, bg="#f4f6f9")
+        # ★ v3.1.3：236 → 用户可拖拽（默认 156，把高度让给视频列表）。
+        #   高度值来自 self._log_h（配置项 log_pane 有记忆值就用记忆值）。
+        self._log_h = self._split_default_h()
+        _log_holder = tk.Frame(main, height=self._log_h, bg=self.C_PAGE)
         # ★★ v2.9.9 关键：必须用 before=self.list_frame ★★
         #   Tk 的 pack 按调用顺序分配空间：
         #   list_frame 在 2994 行就先 pack 了（expand=True，抢走全部剩余），
         #   等 3295 行才 pack 日志区时已经没空间可分了 → 只剩 30px。
         #   before= 强制把日志区插到列表区**之前**的分配顺序里，
-        #   这样日志区先拿到 320px，列表区再吃剩下的。
+        #   这样日志区先拿到固定高度，列表区再吃剩下的。
         _log_holder.pack(side="bottom", fill="x", expand=False,
                          pady=(0, 0), before=self.list_frame)
         _log_holder.pack_propagate(False)      # ★ 锁死高度，不让子控件改变它
+        self._log_holder = _log_holder
+
+        # ---- v3.1.3：列表 / 日志 之间的可拖拽分隔条 ----
+        #   pack 顺序很关键（P41 的教训：别人吃剩的空间不靠谱）：
+        #     ① 日志区先 pack(side="bottom", before=list_frame)  → 独占底部
+        #     ② 分隔条随后 pack(side="bottom", before=list_frame) → 落在日志区之上
+        #     ③ 列表区 expand=True 吃掉剩下的全部 → 拖分隔条时列表自动让位
+        #   三者都用 before=list_frame，保证在"列表抢空间"之前就分好。
+        # ★ 为什么用 Canvas 而不是「一个 Frame + 三个 Frame 小横杠」：
+        #   实测（exe + 真实鼠标）：压在 2px 高的子横杠上拖**不动**，
+        #   按在横杠旁边的空白处才能拖。子控件是独立窗口，在 200% 缩放下
+        #   这种 4 物理像素高的窗口命中极不稳定，而用户偏偏就爱点那三条杠。
+        #   改成一个 Canvas 铺满整条，三条杠用 canvas item 画 —— 命中区
+        #   就是一整块，点哪儿都能拖。
+        self.split_grip = tk.Canvas(main, height=self.SPLIT_H, bg=self.C_PAGE,
+                                    bd=0, highlightthickness=0,
+                                    cursor="sb_v_double_arrow", takefocus=0)
+        self.split_grip.pack(side="bottom", fill="x", before=self.list_frame)
+        self._grip_items = [
+            self.split_grip.create_rectangle(0, 0, 46, 2,
+                                             fill="#aab8cc", outline="")
+            for _ in range(3)
+        ]
+        self.split_grip.bind("<Configure>", self._draw_grip)
+        self.split_grip.bind("<Enter>", lambda e: self._split_hover(True), add="+")
+        self.split_grip.bind("<Leave>", lambda e: self._split_hover(False), add="+")
+        self.split_grip.bind("<Button-1>", self._on_split_press)
+        self.split_grip.bind("<B1-Motion>", self._on_split_drag)
+        self.split_grip.bind("<ButtonRelease-1>", self._on_split_release)
+        # 双击复位到默认高度（客户拖乱了能一键还原）
+        self.split_grip.bind("<Double-Button-1>", self._on_split_reset)
+        self._tt(self.split_grip,
+                 "按住这条横条上下拖动，可调整「视频列表」与「日志」的高度。\n"
+                 "双击 = 恢复默认高度。拖动后的高度会自动记住。")
+
         logf = ttk.LabelFrame(_log_holder, text=" 日志 ", padding=4)
-        logf.pack(fill="both", expand=True)
+        # ★ v3.1.3：上方留 4px，别让「日志」标题贴住拖拽把手
+        logf.pack(fill="both", expand=True, pady=(4, 0))
 
         # ★ v3.1.2：控件从「右侧竖排」改到「顶部一行」。
         #   原来 checkbox 在右上、两个按钮在右下，属于同一个容器却分居两端，
@@ -3546,6 +3614,120 @@ class App:
         # 首次启动自动弹出「使用说明」（v2.0.16）
         if not self.cfg.guide_auto_shown:
             self.root.after(300, self._open_guide)
+
+    # ---------------- 列表 / 日志 高度拖拽（v3.1.3） ----------------
+    def _split_default_h(self) -> int:
+        """日志区初始高度：配置有记忆值就用，否则出厂默认。"""
+        h = 0
+        try:
+            h = int(getattr(self.cfg, "log_pane", 0) or 0)
+        except Exception as e:          # 配置项被手改成非数字
+            logger.warn(f"读取日志区高度配置失败，改用默认值：{type(e).__name__}: {e}")
+            h = 0
+        if h <= 0:
+            h = self.LOG_PANE_DEFAULT
+        # 防御：手改配置文件写了个离谱值（负数/9999）也不能把界面挤没
+        return max(self.LOG_PANE_MIN, min(h, 600))
+
+    def _apply_log_h(self, want: int):
+        """把日志区高度设为 want，自动夹在 [LOG_MIN, 可用总高-LIST_MIN]。
+
+        ★ 关键（实测踩过）：「可用总高」必须用**按下那一刻**冻结的值。
+          拖动中每次 configure() 后几何要等 idle 才更新，如果这里现读
+          list_frame.winfo_height()，拿到的是上一帧的旧值 → 连续移动时
+          上限会一级级累加（实测日志被拖到 544px，列表本该兜底却也跟着涨）。
+          冻结 span = 列表高 + 日志高（窗口不变时是不变量）就没这问题。
+        """
+        span = int(getattr(self, "_split_span", 0) or 0)
+        if span <= 0:                       # 非拖动场景（如双击复位）
+            try:
+                span = (self.list_frame.winfo_height()
+                        + self._log_holder.winfo_height())
+            except Exception:
+                span = 0
+        hi = (span - self.LIST_PANE_MIN) if span > 0 else 900
+        hi = max(self.LOG_PANE_MIN, min(hi, 900))
+        h = max(self.LOG_PANE_MIN, min(int(want), hi))
+        if h == self._log_h:
+            return
+        self._log_h = h
+        try:
+            self._log_holder.configure(height=h)
+        except Exception as e:          # 窗口正在销毁
+            logger.warn(f"调整日志区高度失败：{type(e).__name__}: {e}")
+
+    def _on_split_press(self, _ev=None):
+        # 拖动开始：冻结两个不变量（可用总高 / 日志底边），全程只用它们
+        try:
+            self._split_span = (self.list_frame.winfo_height()
+                                + self._log_holder.winfo_height())
+            holder = self._log_holder
+            self._split_bottom = holder.winfo_rooty() + holder.winfo_height()
+            # 启动瞬间布局还没结算时两个值可能还是 1/0，这种"假不变量"
+            # 会把日志直接夹到最小值 —— 干脆不用它，退回现读几何
+            if self._split_span < self.LOG_PANE_MIN + self.LIST_PANE_MIN:
+                self._split_span = 0
+        except Exception as e:
+            logger.warn(f"读取分隔条起始位置失败：{type(e).__name__}: {e}")
+            self._split_span, self._split_bottom = 0, 0
+        self._split_hover(True)
+
+    def _on_split_drag(self, ev):
+        """拖动分隔条：日志高度 = 冻结的日志底边 - 鼠标 y。"""
+        try:
+            bottom = int(getattr(self, "_split_bottom", 0) or 0)
+            if bottom <= 0:
+                bottom = (self._log_holder.winfo_rooty()
+                          + self._log_holder.winfo_height())
+            self._apply_log_h(bottom - ev.y_root)
+        except Exception as e:
+            logger.warn(f"拖动分隔条失败：{type(e).__name__}: {e}")
+
+    def _on_split_release(self, _ev=None):
+        self._split_hover(False)
+        self._split_span = 0                # 松开后恢复"现读几何"模式
+        self._split_bottom = 0
+        # 记住高度（写配置文件；值没变就不写，避免频繁落盘）
+        try:
+            if int(getattr(self.cfg, "log_pane", 0) or 0) != int(self._log_h):
+                self.cfg.log_pane = int(self._log_h)
+                self.cfg.save()
+        except Exception as e:
+            logger.warn(f"保存日志区高度失败：{type(e).__name__}: {e}")
+
+    def _on_split_reset(self, _ev=None):
+        """双击分隔条 = 回到默认高度。"""
+        try:
+            self._split_span = 0            # 先用现读几何算准，再应用
+            self._apply_log_h(self.LOG_PANE_DEFAULT)
+            self.cfg.log_pane = int(self._log_h)
+            self.cfg.save()
+            self._append_log("info",
+                             f"界面：视频列表/日志高度已恢复默认（日志 {self._log_h}px）")
+        except Exception as e:
+            logger.warn(f"重置分隔条失败：{type(e).__name__}: {e}")
+
+    def _split_hover(self, on: bool):
+        """悬停高亮：让客户看得出这条横杠可以拖。"""
+        try:
+            for item in self._grip_items:
+                self.split_grip.itemconfigure(
+                    item, fill="#5b7291" if on else "#aab8cc")
+            self.split_grip.configure(bg="#e9eef6" if on else self.C_PAGE)
+        except Exception:
+            pass
+
+    def _draw_grip(self, _ev=None):
+        """三条短杠画在握把正中（窗口变宽时跟着重画）。"""
+        try:
+            w = self.split_grip.winfo_width() or 1200
+            h = self.split_grip.winfo_height() or self.SPLIT_H
+            cx, cy = w // 2, h // 2
+            for i, item in enumerate(self._grip_items):
+                y = cy - 6 + i * 6
+                self.split_grip.coords(item, cx - 23, y - 1, cx + 23, y + 1)
+        except Exception as e:
+            logger.warn(f"绘制分隔条握把失败：{type(e).__name__}: {e}")
 
     # ---------------- 引擎控制 ----------------
     def _on_restore_proxy(self):

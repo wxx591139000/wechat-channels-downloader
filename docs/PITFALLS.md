@@ -1451,3 +1451,111 @@ finally:
 1. 线程里**只碰纯 Python 数据**：路径、列表、字符串。Tk 变量一律先在主线程取值
 2. 「界面卡 busy」类问题，先看线程是不是已经死了 —— 而线程死掉**默认不留任何 UI 痕迹**
 3. 后台线程必须有 `except` + `logger`，并且 `finally` 里补发「结束」事件
+
+
+---
+
+## P43 ★★ 拖拽时读 `winfo_height()` 拿到的是**上一帧**的值 → 夹紧上限一级级放大
+
+**现象**：拖动「列表/日志」分隔条往上拉，日志区能长到 544px，
+本该在 284px（= 可用总高 - 列表下限 240）封顶。列表也没被挤小。
+
+**根因**（关键认知）：`widget.configure(height=...)` 之后，
+几何要等 **idle 才重算**。拖动回调里现读 `list_frame.winfo_height()`
+拿到的是本次 `configure` **之前**的高度：
+
+```python
+# 错误写法：每次拖动都用"上一帧"的列表高度算上限
+grow = max(0, self.list_frame.winfo_height() - LIST_MIN)
+hi = self._log_h + grow        # ← _log_h 已经是新的，list_h 还是旧的
+```
+motion 事件连发时（一次拖动 = 几十个事件），每帧都多让一截 → 累加漂移。
+真实鼠标下几何更新穿插在事件之间，偶尔看不出来；用 `event_generate`
+连发就直接暴露（这也是它能被测试抓住的原因）。
+
+**修法**：把**不变量**在 `Button-1` 那一刻冻结，全程只用它：
+
+```python
+def _on_split_press(self, _ev):
+    self._split_span = (self.list_frame.winfo_height()
+                        + self._log_holder.winfo_height())   # 窗口不变时不变
+    self._split_bottom = holder.winfo_rooty() + holder.winfo_height()
+
+def _apply_log_h(self, want):
+    hi = self._split_span - LIST_PANE_MIN      # 不再现读几何
+    h  = max(LOG_PANE_MIN, min(int(want), hi))
+```
+松手（`ButtonRelease-1`）把 `_split_span` 置 0，回到"现读几何"模式，
+这样双击复位等非拖动场景仍然按当前真实布局算。
+
+**判据**：拖到越界后，`日志高 + 列表高 == 拖动开始时的总和`（差 0~1px）。
+不等就是又被旧几何带偏了。
+
+---
+
+## P44 ★ `event_generate("<Double-Button-1>")` 直接抛 TclError
+
+```
+_tkinter.TclError: Double, Triple, or Quadruple modifier not allowed
+```
+Tk 的双击/三击是**事件识别器**在真实鼠标事件流里合成出来的，
+不允许脚本自己"生成"一个带 Double 修饰符的事件。
+
+**测试怎么写**：
+```python
+# ✅ 验证绑定在：读 bind() 非空
+assert grip.bind("<Double-Button-1>")
+# ✅ 验证逻辑对：直接调绑上去的 handler（和双击走同一段代码）
+app._on_split_reset(None)
+```
+不要为了"像真的双击"去连发两次 `<Button-1>` —— Tk 的识别器还要
+校验时间戳与坐标，`event_generate` 造不出合规序列，结果是假阴性。
+
+---
+
+## P45 ★ 本项目 `logger.warn()` / `info()` / `error()` 只收**一个**字符串
+
+```python
+logger.warn("xxx：%s", e)        # ❌ TypeError: warn() takes 2 positional arguments
+logger.warn(f"xxx：{e}")          # ✅
+```
+`Logger` 是自研类（sphdl/logger.py），不是标准 logging，
+没有 `%s` 占位符通道。写完记得跑一次：异常分支真的走到时才会炸，
+平时全绿看不出来。
+
+
+---
+
+## P46 ★★ 拖拽把手用小 Frame 拼「三条杠」→ 客户点的正好是那三条，却拖不动
+
+**现象**（exe + 真实鼠标实测）：分隔条做成
+`Frame(16px) + 3 个 Frame(46x2) 小横杠`，按在**横杠旁边空白处**能拖，
+按在**横杠上**纹丝不动 —— 而用户下意识就是去按那三条杠。
+
+**根因**：Tk 每个控件都是独立 HWND。那三条杠是 **2px 高**的子窗口，
+200% 缩放下只有 4 物理像素高，`WindowFromPoint` 命中不稳定；
+按住后 Tk 的隐式 grab 落在子窗口上，事件链与父容器不是同一条。
+
+**修法**：把手用**一个 Canvas** 铺满整条，三条杠用 `create_rectangle`
+画上去（canvas item 不参与窗口命中测试）：
+```python
+self.split_grip = tk.Canvas(main, height=16, cursor="sb_v_double_arrow", ...)
+self._grip_items = [self.split_grip.create_rectangle(0,0,46,2,
+                                                   fill="#aab8cc", outline="")
+                    for _ in range(3)]
+self.split_grip.bind("<Configure>", self._draw_grip)   # 宽度变化时居中重画
+```
+整块 16px 都是可点区，点哪儿都能拖。
+
+**教训（通用）**：**凡是"看起来能点"的装饰，必须自己也是可点区**。
+把可视线索做成小尺寸子控件、只给父控件绑事件，等于给用户挖坑。
+而且这种坑**源码级 `event_generate` 测不出来** —— 它绕过 OS 命中测试，
+直接把事件塞给你指定的控件，只有真机鼠标能暴露（这次就是真机才抓到）。
+
+**真机验证怎么做**（本机 200% 缩放，两个坑都踩过）：
+1. `SetProcessDpiAwareness(2)`；屏幕物理 2520x1680，Tk 报 1260x840
+   —— 坐标必须统一到**物理像素**，否则点偏一半屏幕。
+2. 先把窗口真正切前台（`AttachThreadInput` + `SetForegroundWindow`），
+   否则点击落到别的窗口上，看起来像"程序没反应"。
+3. 定位控件别靠"扫颜色"：界面别处也有同色像素，会把位置平均歪
+   （实测算出 y=609，真实 y=1246）。用 `EnumChildWindows` 读控件 HWND 矩形。
