@@ -29,6 +29,12 @@ class DouyinWindow:
         self._stop = False
         self._busy = False
         self._rows = {}           # iid -> index
+        # ★ v3.1.5：每条的状态/落盘文件（持久化用）；idx -> (status, file)
+        #   status: pending / done / failed
+        self._meta = {}
+        self._carry_status = {}   # 重新解析时把上次"已下载"接回来
+        self._store_job = None
+        self._store_dirty = False
         self.root = app.root
 
         self.win = tk.Toplevel(self.root)
@@ -41,6 +47,11 @@ class DouyinWindow:
         self.win.resizable(True, True)
         self._build()
         self._refresh_login_state()
+        # ★ v3.1.5：把上次解析的清单恢复出来（客户：重开工具清单是空的）
+        try:
+            self._restore_list()
+        except Exception as e:                     # noqa: BLE001
+            logger.warn(f"抖音清单恢复失败（按空清单继续）：{type(e).__name__}: {e}")
         # ★ v2.5.2（客户要求）：点 ✕ 只隐藏，**不中断**解析/下载。
         #   拦截系统标题栏的关闭按钮，统一走 _hide_window。
         try:
@@ -144,11 +155,15 @@ class DouyinWindow:
         wrap.pack(fill="both", expand=True, padx=14)
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                  height=10, selectmode="extended")
-        heads = {"sel": ("✓", 34), "title": ("标题", 360),
+        heads = {"sel": ("✓", 34), "title": ("标题", 430),
                  "author": ("作者", 130), "dur": ("时长", 70),
                  "size": ("大小", 80), "status": ("状态", 150)}
         for c in cols:
-            self.tree.heading(c, text=heads[c][0])
+            # 表头对齐跟数据对齐一致（v3.1.4 在主窗口定下的规矩：
+            # 表头一律居中、数据一律左对齐 → 看着散）
+            self.tree.heading(c, text=heads[c][0],
+                              anchor=("center" if c in ("sel", "dur", "size")
+                                      else "w"))
             self.tree.column(c, width=heads[c][1],
                              anchor="center" if c in ("sel", "dur", "size")
                              else "w",
@@ -159,6 +174,17 @@ class DouyinWindow:
         vs.pack(side="right", fill="y")
         # 点「✓」列切换勾选
         self.tree.bind("<Button-1>", self._on_click)
+        # ★ v3.1.5：长标题被列宽硬切时，悬停 0.35 秒看全文
+        #   （客户对"标题显示不完整"很敏感；抖音标题尤其长，还带话题标签）
+        try:
+            from tkinter import font as tkfont
+
+            from .gui import RowTip
+            self._tip_font = tkfont.Font(family=FONT, size=9)
+            self._rowtip = RowTip(self.tree, self._tip_text_for_cell)
+        except Exception as e:                     # noqa: BLE001
+            self._tip_font = None
+            logger.warn(f"抖音列表悬停提示启用失败：{type(e).__name__}: {e}")
 
         # ③ 操作条
         bar2 = tk.Frame(pad, bg="#ffffff")
@@ -189,6 +215,124 @@ class DouyinWindow:
         self.lbl_stat.pack(fill="x", padx=14, pady=(0, 8))
 
     # ────────────────── 内部工具 ──────────────────
+    def _tip_text_for_cell(self, iid, col_0):
+        """悬停提示取文本：只有标题列**真的放不下**时才返回全文。
+
+        跟主窗口同一套判据（字体实测像素宽 vs 当前列宽）：
+        没被切的格子返回空串，不会满屏冒气泡。
+        """
+        if col_0 != 1:                       # 0=勾选列，1=标题列
+            return ""
+        try:
+            vals = self.tree.item(iid, "values")
+        except Exception:
+            return ""
+        if len(vals) <= 1:
+            return ""
+        text = str(vals[1])
+        if not text or getattr(self, "_tip_font", None) is None:
+            return text
+        try:
+            avail = int(self.tree.column("title", "width"))
+            need = self._tip_font.measure(text) + 12
+        except Exception:
+            return text
+        return text if need > avail else ""
+
+    def _meta_of(self, idx) -> tuple:
+        """取某条的状态 → (status, 文件路径)。"""
+        m = self._meta.get(idx) or {}
+        return (m.get("status") or "pending", m.get("file") or "")
+
+    def _set_meta(self, idx, status=None, file=None):
+        m = self._meta.setdefault(idx, {})
+        if status is not None:
+            m["status"] = status
+        if file is not None:
+            m["file"] = file
+
+    # ── 清单持久化（v3.1.5：关掉工具后清单不丢） ──
+    def _restore_list(self):
+        """把上次解析的清单读回来铺进表格。
+
+        ★ 客户 2026-11-03：「重新启动工具后，发现上一次解析出的抖音博主
+          清单是空的」。原来清单只在内存，进程一退就没了。
+
+        恢复出来的条目：play_url 可能已过期（抖音签名地址有有效期），
+        真正下载时若失败会自动重新解析一次（见 _download_worker）。
+        """
+        from . import douyin_store
+
+        entries = douyin_store.load()
+        if not entries:
+            return
+        loaded = done = 0
+        for e in entries:
+            v = douyin_store.entry_to_video(e)
+            if v is None or not getattr(v, "aweme_id", ""):
+                continue
+            url = f"https://www.douyin.com/video/{v.aweme_id}"
+            fpath = str(e.get("file") or "")
+            st = str(e.get("status") or "pending")
+            if fpath and Path(fpath).exists():
+                st = "done"
+            elif st == "done":
+                # 记录说完成、文件却没了（被挪走或删了）→ 当没下过
+                st, fpath = "pending", ""
+            mark = "☐" if st == "done" else "☑"
+            txt = ("✅ 已完成" if st == "done"
+                   else ("❌ 上次失败" if st == "failed" else "待下载"))
+            idx = len(self.videos)
+            self.videos.append((url, v))
+            iid = self.tree.insert("", "end", values=(
+                mark, one_line(v.title or "(无标题)"), v.author or "-",
+                v.duration_text, v.size_text, txt))
+            self._rows[iid] = idx
+            self._meta[idx] = {"status": st, "file": fpath}
+            loaded += 1
+            if st == "done":
+                done += 1
+        if not loaded:
+            return
+        self.lbl_count.config(text=f"上次清单 {loaded} 条（已下载 {done} 条）")
+        self.lbl_stat.config(text=f"已恢复上次的清单：{loaded} 条")
+        self._log("info", f"已恢复上次解析的抖音清单：{loaded} 条"
+                          f"（其中 {done} 条已下载）")
+        if done:
+            self._log("info", "已下载的条目默认不勾选；要重下请手动勾上。")
+
+    def _mark_dirty(self):
+        """清单有变化 → 1.2 秒后合并写盘（逐条解析时不会疯狂写文件）。"""
+        try:
+            self._store_dirty = True
+            if self._store_job is None and self._alive():
+                self._store_job = self.win.after(1200, self._flush_store)
+        except Exception:
+            pass
+
+    def _flush_store(self):
+        self._store_job = None
+        if not self._store_dirty:
+            return
+        self._store_dirty = False
+        self._write_store()
+
+    def _write_store(self):
+        """把当前清单按真实状态写盘（失败只记日志，绝不打断下载）。"""
+        try:
+            from . import douyin_store
+
+            rows = []
+            for i, (_url, v) in enumerate(self.videos):
+                if v is None or not getattr(v, "aweme_id", ""):
+                    continue
+                st, fpath = self._meta_of(i)
+                rows.append(douyin_store.video_to_entry(v, status=st,
+                                                        file=fpath))
+            douyin_store.save(rows)
+        except Exception as e:                     # noqa: BLE001
+            logger.warn(f"抖音清单写盘失败：{type(e).__name__}: {e}")
+
     def _dir(self) -> Path:
         base = Path(self.app.dir_var.get() or
                     Path.home() / "抖音下载")
@@ -549,10 +693,22 @@ class DouyinWindow:
                     self._log("warn", f"  {su} → 无法判断类型"
                                       f"（{r.get('error', '未知')}），按作品尝试")
 
+        # ★ v3.1.5：先记住上一份清单里「已下载」的作品（aweme_id → 文件）。
+        #   重新解析同一个博主时，状态能接回来 —— 客户不会看到明明下过的
+        #   作品又变成「待下载」而重复下一遍 40GB。
+        self._carry_status = {}
+        for _i, (_u, _v) in enumerate(self.videos):
+            if _v is None or not getattr(_v, "aweme_id", ""):
+                continue
+            _st, _fp = self._meta_of(_i)
+            if _st == "done" and _fp:
+                self._carry_status[_v.aweme_id] = _fp
+
         for i in list(self.tree.get_children()):
             self.tree.delete(i)
         self._rows.clear()
         self.videos.clear()
+        self._meta.clear()
         self._stop = False
 
         if profile_urls:
@@ -619,10 +775,12 @@ class DouyinWindow:
         if not iid:
             return
         if v.ok:
+            self._set_meta(i, "pending")
             self.tree.item(iid, values=(
                 "☑", one_line(v.title or "(无标题)"), v.author or "-",
                 v.duration_text, v.size_text, "待下载"))
         else:
+            self._set_meta(i, "failed")
             self.tree.item(iid, values=(
                 "☐", f"（失败）{url[:36]}", "-", "-", "-",
                 (v.error or "解析失败")[:26]))
@@ -633,9 +791,14 @@ class DouyinWindow:
         ★ v3.1.1：主页条目来自 aweme_list，本身字段完整
           （play_url / desc / duration / 大小 / 作者都有），
           不需要再走 resolve_many。直接填表即可下载。
+
+        ★ v3.1.5：接回上次的「已下载」状态（_carry_status），
+          已下过的默认不勾选 —— 客户重解析同一博主不会白下一遍。
         """
         if not self._alive():
             return
+        carry = getattr(self, "_carry_status", {}) or {}
+        done_n = 0
         for i, v in enumerate(videos):
             url = f"https://www.douyin.com/video/{v.aweme_id}" \
                   if getattr(v, "aweme_id", "") else ""
@@ -643,6 +806,15 @@ class DouyinWindow:
                 self.videos[i] = (url, v)
             else:
                 self.videos.append((url, v))
+            # 状态：上次下过且文件还在 → 已完成，不勾选
+            aid = getattr(v, "aweme_id", "")
+            fpath = carry.get(aid, "")
+            is_done = bool(fpath) and Path(fpath).exists()
+            self._set_meta(i, "done" if is_done else "pending", fpath)
+            if is_done:
+                done_n += 1
+            mark = "☐" if is_done else "☑"
+            txt = "✅ 已完成" if is_done else "待下载"
             iid = None
             for k, idx in self._rows.items():
                 if idx == i:
@@ -650,14 +822,18 @@ class DouyinWindow:
                     break
             if iid is None:
                 iid = self.tree.insert("", "end", values=(
-                    "☑", one_line(v.title or "(无标题)"), v.author or "-",
-                    v.duration_text, v.size_text, "待下载"))
+                    mark, one_line(v.title or "(无标题)"), v.author or "-",
+                    v.duration_text, v.size_text, txt))
                 self._rows[iid] = i
             else:
                 self.tree.item(iid, values=(
-                    "☑", one_line(v.title or "(无标题)"), v.author or "-",
-                    v.duration_text, v.size_text, "待下载"))
+                    mark, one_line(v.title or "(无标题)"), v.author or "-",
+                    v.duration_text, v.size_text, txt))
         self._log("ok", f"主页作品已载入表格：{len(videos)} 条，可直接勾选下载")
+        if done_n:
+            self._log("info", f"其中 {done_n} 条上次已经下过（文件还在），"
+                              "默认不勾选，要重下请手动勾上")
+        self._mark_dirty()
 
     def parse_done(self, n: int):
         if not self._alive():
@@ -667,8 +843,44 @@ class DouyinWindow:
         self.lbl_count.config(text=f"共 {n} 条，可下载 {ok} 条")
         self._log("ok" if ok else "warn",
                   f"抖音解析完成：成功 {ok}/{n}")
+        self._mark_dirty()
 
     # ────────────────── 下载 ──────────────────
+    # 出现这些关键词 = 「播放地址过期/失效」，值得重新解析一次
+    _EXPIRED_KW = ("403", "404", "410", "过期", "失效", "太小",
+                   "Forbidden", "Not Found")
+
+    def _looks_expired(self, info) -> bool:
+        s = str(info or "")
+        if "已停止" in s:
+            return False
+        return any(k in s for k in self._EXPIRED_KW)
+
+    def _re_resolve(self, v):
+        """按 aweme_id 重新解析单条（阻塞，只在下载线程里调用）。
+
+        ★ 恢复出来的清单里 play_url 可能已过期，重新解析能拿到新签名地址；
+          断点文件按 aweme_id 命名，所以重新解析后照样从断点续传。
+        """
+        from .douyin import resolve_many
+
+        aid = getattr(v, "aweme_id", "")
+        if not aid:
+            return None
+        got = []
+        try:
+            resolve_many([f"https://www.douyin.com/video/{aid}"],
+                         on_item=lambda i, u, nv: got.append(nv),
+                         on_log=lambda lv, m: self._log(lv, m),
+                         should_stop=lambda: self._stop,
+                         use_cache=False)
+        except Exception as e:                     # noqa: BLE001
+            self._log("warn", f"重新解析失败：{type(e).__name__}: {e}")
+            return None
+        if not got:
+            return None
+        return got[0] if got[0].ok else None
+
     def _picked(self):
         out = []
         for iid in self.tree.get_children():
@@ -678,7 +890,9 @@ class DouyinWindow:
             if i is None or i >= len(self.videos):
                 continue
             u, v = self.videos[i]
-            if v and v.ok:
+            # ★ v3.1.5：有 aweme_id 但播放地址为空/失效的（清单恢复后常见）
+            #   也算可下载 —— 下载线程会先重新解析再下。
+            if v and (v.ok or getattr(v, "aweme_id", "")):
                 out.append((i, v))
         return out
 
@@ -732,8 +946,31 @@ class DouyinWindow:
                             self.app.ui_q.put(("dy_dl_prog", idx, got, tot,
                                                n, total))
 
+                        # ★ v3.1.5：清单恢复出来的条目可能压根没有可用播放地址
+                        #   （上次解析失败/只存了元数据）→ 先重新解析一次
+                        if (not v.ok and not self._stop
+                                and getattr(v, "aweme_id", "")):
+                            nv = self._re_resolve(v)
+                            if nv is not None:
+                                v = nv
+
                         ok, info = download(v, dest, on_progress=prog,
                                             should_stop=lambda: self._stop)
+
+                        # ★ v3.1.5：清单是持久化的，play_url 可能是上次存的、
+                        #   签名已过期（抖音地址有时效）。这时自动重新解析一次
+                        #   再下 —— 断点文件按 aweme_id 命名，续传照常有效。
+                        if (not ok and not self._stop
+                                and self._looks_expired(info)
+                                and getattr(v, "aweme_id", "")):
+                            self._log("warn",
+                                      f"下载地址可能已过期，重新解析后接着下："
+                                      f"{one_line(v.title)[:24]}")
+                            nv = self._re_resolve(v)
+                            if nv is not None and nv.ok:
+                                v = nv
+                                ok, info = download(v, dest, on_progress=prog,
+                                                    should_stop=lambda: self._stop)
                     except Exception as e:            # noqa: BLE001
                         ok, info = False, f"{type(e).__name__}: {e}"
 
@@ -802,12 +1039,16 @@ class DouyinWindow:
                     v[5] = "✅ 已完成"
                     self._log("ok", f"抖音下载完成：{Path(info).name}")
                 self.tree.item(iid, values=v)
+                # ★ v3.1.5：记下落盘路径，重启后能显示「已完成」并默认不勾选
+                self._set_meta(idx, "done", str(info))
             else:
                 v[5] = f"❌ {str(info)[:22]}"
                 self.tree.item(iid, values=v)
                 self._log("error", f"抖音下载失败：{info}")
+                self._set_meta(idx, "failed")
         if total:
             self.pbar["value"] = n * 100.0 / total
+        self._mark_dirty()
 
     def apply_all_done(self, done, failed, total):
         if not self._alive():

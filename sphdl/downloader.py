@@ -162,10 +162,36 @@ class MpdDownloader:
 
     def _download_streaming(self) -> bool:
         """单连接顺序下载；网络中断/超时后从已下载字节处 Range 续传。
-        用户停止时抛 DownloadCancelled（临时文件由 finally 清理）。"""
+
+        ★ v3.1.5（客户：下载到一半能续传）：
+          **开跑前先看磁盘上有没有上一次留下的 .tmp**，有就从它的字节数
+          接着下（Range）。临时文件名由 pipeline 用稳定 key 生成，
+          所以关掉工具、重启电脑、第二天再点下载，都能接着走。
+        """
         tmp = self.save_path + ".tmp"
         pos = 0
         try:
+            # ---- 复用已有断点（可能是上一个进程留下的）----
+            try:
+                if os.path.exists(tmp):
+                    pos = os.path.getsize(tmp)
+            except Exception:
+                pos = 0
+            if pos and self.total_size and pos > self.total_size:
+                # 比目标还大 → 不是同一个文件（或元数据变了），丢掉重来
+                logger.warn(f"断点文件比目标还大（{format_size(pos)} > "
+                            f"{format_size(self.total_size)}），重新下载")
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                pos = 0
+            if pos and self.total_size and pos == self.total_size:
+                logger.info(f"断点已完整（{format_size(pos)}），直接收尾")
+                return self._finalize(tmp, pos)
+            if pos:
+                logger.info(f"从断点续传：已下载 {format_size(pos)}"
+                            f"（{pos * 100 // max(1, self.total_size)}%）")
             for attempt in range(self.MAX_RESUMES + 1):
                 if self._cancelled():
                     raise DownloadCancelled()
@@ -257,16 +283,15 @@ class MpdDownloader:
         return False
 
     def _keep_tmp(self) -> bool:
-        """失败时是否保留 .tmp。
+        """失败/中断时是否保留 .tmp。
 
-        ★ 用户主动「停止下载」→ 不保留（用户明确不要了，别占磁盘）
-        ★ 网络/代理等原因失败 → 保留（下次可续传）
+        ★ v3.1.5 改：**用户主动停止也保留**。
+          客户要的就是「下了 60% 关掉，晚点接着下」；
+          旧版在用户点停止时把 .tmp 删掉，等于把已下的几百 MB 扔掉。
+          临时文件按稳定 key 命名（pipeline.raw_path_for），
+          下次点下载会从断点续传；超过 7 天没动过由启动清理回收。
         """
-        # _cancelled() 为真 = 用户主动停；否则视为意外中断
-        try:
-            return not self._cancelled()
-        except Exception:
-            return True
+        return True
 
     def _finalize(self, tmp: str, pos: int) -> bool:
         """下载完成：校验大小（若已知）→ 原子改名。"""

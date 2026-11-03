@@ -1174,7 +1174,15 @@ class App:
         # 下载管线 + 嗅探插件（管线独立于代理，停止嗅探后仍可下载/重试）
         # GUI 模式：默认捕获只进列表不自动下载；「⚙ 自动下载」开关打开后
         # 捕获即自动入队（v1.2.5，状态持久化 config.json）
-        self.pipeline = Pipeline(self.cfg.download_dir, on_event=self._on_pipeline_event)
+        #
+        # ★ v3.1.5：like_stats_getter 让管线知道「点赞增强包」是否已激活
+        #   —— 激活时下载的 mp4 文件名里带点赞数。用 lambda 而不是布尔值，
+        #   是因为此刻授权还没加载完（_apply_tier 在更后面），而且换码后
+        #   要立刻生效，不能缓存死。
+        self.pipeline = Pipeline(
+            self.cfg.download_dir, on_event=self._on_pipeline_event,
+            like_stats_getter=lambda: bool(getattr(self, "_like_stats_ok", False)))
+
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
@@ -4210,12 +4218,15 @@ class App:
         self.mode_label.config(text=" | ".join(parts))
 
     def _cleanup_stale_tmp(self):
-        """启动时清理超期断点文件（v2.2.0）。
+        """启动时清理超期断点文件（v2.2.0 / v3.1.5 扩到 .part 子目录）。
 
-        ★ 背景：为了让"停止嗅探/网络中断"后能续传，失败时保留 .tmp。
-          但客户可能有一堆失败任务，.tmp 会占磁盘。
-          规则：只删 **7 天以上未修改** 的 .tmp。
-          （正在使用的不可能 7 天没动过，安全）
+        ★ 背景：为了让"停止下载/网络中断/关掉工具"后能接着下，
+          下载失败时会**保留**断点文件。但攒多了会占磁盘。
+          规则：只删 **7 天以上未修改** 的断点。
+          （正在用的不可能 7 天没动过，安全）
+
+        ★ v3.1.5：临时文件改为 `下载目录/.part/<key>.part`（稳定命名，
+          重启也能续），所以除了老的 `*.tmp` 还要扫这个子目录。
         """
         try:
             d = Path(self.cfg.download_dir)
@@ -4224,8 +4235,14 @@ class App:
             cutoff = time.time() - 7 * 86400
             removed = 0
             freed = 0
-            for f in d.glob("*.tmp"):
+            targets = list(d.glob("*.tmp"))
+            part_dir = d / ".part"
+            if part_dir.is_dir():
+                targets += list(part_dir.glob("*"))
+            for f in targets:
                 try:
+                    if not f.is_file():
+                        continue
                     st = f.stat()
                     if st.st_mtime < cutoff:
                         freed += st.st_size
@@ -5591,6 +5608,14 @@ class App:
                     self.push_log("info", f"首选原始画质: {best.get('label')}")
         vd = VideoData(url=url, decode_key=rec.decode_key, size=size,
                        description=rec.title, is_image=rec.is_image)
+        # ★ v3.1.5：把统计字段一起带进管线 —— 授权含「点赞增强包」时，
+        #   下载文件名要用点赞数（Pipeline 读 vd.like_count）。
+        #   原来这里只给了 url/标题/大小，管线永远拿不到点赞数。
+        vd.like_count = int(getattr(rec, "like_count", 0) or 0)
+        vd.forward_count = int(getattr(rec, "forward_count", 0) or 0)
+        vd.recommend_count = int(getattr(rec, "recommend_count", 0) or 0)
+        vd.video_id = str(getattr(rec, "video_id", "") or "")
+
         self.store.update(rid, status="pending", progress=0, error="")
         self._dirty = True
         self.pipeline.submit(vd)

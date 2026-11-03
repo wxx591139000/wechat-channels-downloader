@@ -37,6 +37,7 @@ import os
 import random
 import re
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1023,12 +1024,138 @@ def _ffmpeg_merge(video_path: Path, audio_path: Path, out_path: Path,
         return False, f"{type(e).__name__}: {str(e)[:100]}"
 
 
+def _http_to_file(url: str, path: Path, *, headers: dict, timeout: int = 300,
+                  max_retries: int = 5, should_stop=None, on_progress=None,
+                  expected_size: int = 0, t0: float = 0.0):
+    """把 url 落盘到 path，**支持跨进程断点续传**。返回 (ok, err, size)。
+
+    为什么单独抽出来（2026-11-03 客户需求）：
+      「下载到一半的东西希望能断点续传」。
+      旧实现每次 `open(part, "wb")` 从零写，异常分支还把 .part **删掉** ——
+      客户下了一半的 800MB，重启后只能从头再来。
+
+    规则：
+      · path 已存在 → 用 `Range: bytes=N-` 从已有字节数续传
+      · 服务端忽略 Range（回 200）→ 老实从头（先截断，免得旧尾巴留在文件里）
+      · 416 → 起点已到文件末尾，按"已下完"处理
+      · 4xx（403/404）→ 立刻失败：链接过期重试没意义，但**断点保留**
+      · 网络中断 / 超时 / 服务端提前结束 → 保留已下字节并重试
+    """
+    path = Path(path)
+    try:
+        pos = path.stat().st_size if path.exists() else 0
+    except Exception:
+        pos = 0
+
+    total = int(expected_size or 0)
+    last_err = ""
+    for attempt in range(max_retries + 1):
+        if should_stop and should_stop():
+            return False, "已停止（断点已保留，下次可续传）", pos
+        h = dict(headers)
+        if pos:
+            h["Range"] = f"bytes={pos}-"
+        try:
+            req = urllib.request.Request(url, headers=h)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                status = int(getattr(r, "status", 200) or 200)
+                clen = int(r.headers.get("Content-Length") or 0)
+                if status == 206:
+                    # 服务端接受续传：本次声明的字节数 + 已有 = 真总长
+                    end_target = pos + clen if clen else max(total, pos)
+                    total = max(total, end_target)
+                else:
+                    if pos:
+                        # 服务端不支持 Range，只能从头；显式截断，避免旧数据残尾
+                        pos = 0
+                    end_target = clen
+                    total = clen or total
+                mode = "r+b" if (pos and path.exists()) else "wb"
+                with open(path, mode) as f:
+                    if pos:
+                        f.seek(pos)
+                    else:
+                        f.truncate(0)
+                        f.seek(0)
+                    while True:
+                        if should_stop and should_stop():
+                            try:
+                                f.flush()
+                            except Exception:
+                                pass
+                            return False, "已停止（断点已保留，下次可续传）", pos
+                        chunk = r.read(262144)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        pos += len(chunk)
+                        if on_progress:
+                            try:
+                                on_progress(pos, total,
+                                            max(0.0, time.time() - (t0 or time.time())))
+                            except Exception:
+                                pass
+            # 流正常结束：服务端声明的量没给满 → 继续续传
+            if end_target and pos < end_target:
+                last_err = f"只收到 {pos}/{end_target} 字节"
+                if attempt >= max_retries:
+                    return False, f"{last_err}（多次提前结束，断点已保留）", pos
+                time.sleep(1.5)
+                continue
+            return True, "", pos
+        except urllib.error.HTTPError as e:
+            code = int(getattr(e, "code", 0) or 0)
+            if code == 416:
+                return True, "", pos
+            last_err = f"HTTP {code}"
+            if 400 <= code < 500 and code not in (408, 429):
+                return False, f"HTTP {code}（地址可能已过期，断点已保留）", pos
+            if attempt >= max_retries:
+                return False, last_err, pos
+            time.sleep(2.0)
+        except Exception as e:                      # noqa: BLE001
+            last_err = f"{type(e).__name__}: {str(e)[:100]}"
+            if should_stop and should_stop():
+                return False, "已停止（断点已保留，下次可续传）", pos
+            if attempt >= max_retries:
+                return False, last_err, pos
+            time.sleep(2.0)
+    return False, last_err or "下载失败", pos
+
+
+def _aligned_part(dest_dir: Path, base: str, aweme_id: str) -> Path:
+    """找这一条的断点文件：优先按当前标题，失败则按 aweme_id 兜底。
+
+    ★ 为什么要有兜底（v3.1.5）：
+      清单恢复后可能重新解析，标题万一变了（作者改过文案），
+      `.part` 文件名会跟着变 → 断点对不上、续传失效。
+      aweme_id 永远不会变，用它兜住这种情况。
+    """
+    p = dest_dir / f"{base}.part"
+    try:
+        if p.exists():
+            return p
+        if aweme_id:
+            picked = sorted(dest_dir.glob(f"*_{aweme_id}.part"),
+                            key=lambda f: f.stat().st_size, reverse=True)
+            if picked:
+                return picked[0]
+    except Exception:
+        pass
+    return p
+
+
 def download(video: DouyinVideo, dest_dir: Path, on_progress=None,
-             should_stop=None, timeout: int = 300) -> tuple[bool, str]:
+             should_stop=None, timeout: int = 300,
+             max_retries: int = 5) -> tuple[bool, str]:
     """下载单条（音视频合一的 MP4，无需 ffmpeg）。
 
     返回 (成功?, 文件路径或错误信息)。
     ★ 只需要 Referer，不需要 cookies（实测：只带 UA → 403）。
+
+    ★ 2026-11-03：**支持断点续传**。临时文件名只由 aweme_id 决定
+      （`<标题>_<aweme_id>.part`），所以重启工具 / 下午接着下、
+      甚至换了新的 play_url 重新解析，都能从已下字节继续。
     """
     if not video.ok:
         return False, video.error or "没有下载地址"
@@ -1037,7 +1164,7 @@ def download(video: DouyinVideo, dest_dir: Path, on_progress=None,
     dest_dir.mkdir(parents=True, exist_ok=True)
     base = safe_name(f"{video.title or video.aweme_id}_{video.aweme_id}")
     final = dest_dir / f"{base}.mp4"
-    part = dest_dir / f"{base}.part"
+    part = _aligned_part(dest_dir, base, video.aweme_id)
 
     # 已存在且大小一致 → 跳过
     if final.exists() and video.size and abs(final.stat().st_size
@@ -1045,71 +1172,65 @@ def download(video: DouyinVideo, dest_dir: Path, on_progress=None,
         return True, str(final)
 
     headers = {"User-Agent": UA, "Referer": "https://www.douyin.com/"}
-    try:
-        req = urllib.request.Request(video.play_url, headers=headers)
-        got = 0
-        t0 = time.time()
-        with urllib.request.urlopen(req, timeout=timeout) as r, \
-                open(part, "wb") as f:
-            total = int(r.headers.get("Content-Length") or video.size or 0)
-            while True:
-                if should_stop and should_stop():
-                    raise RuntimeError("用户已停止")
-                chunk = r.read(262144)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if on_progress:
-                    try:
-                        on_progress(got, total, time.time() - t0)
-                    except Exception:
-                        pass
-        # ★ 下限 8KB：够拦掉错误页/空响应，又不误杀很短的视频
-        if got < 8192:
-            part.unlink(missing_ok=True)
-            return False, f"文件太小（{got} 字节），地址可能已失效"
-        os.replace(part, final)
+    t0 = time.time()
 
-        # ★ 兜底路径才需要合并：play_addr 已是音视频合一，audio_url 为空
-        if video.audio_url:
-            ap = dest_dir / f"{base}.audio.part"
-            try:
-                areq = urllib.request.Request(
-                    video.audio_url,
-                    headers={"User-Agent": UA,
-                             "Referer": "https://www.douyin.com/"})
-                with urllib.request.urlopen(areq, timeout=timeout) as r, \
-                        open(ap, "wb") as f:
-                    while True:
-                        chunk = r.read(262144)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                merged = dest_dir / f"{base}.merged.mp4"
-                ok, msg = _ffmpeg_merge(final, ap, merged)
-                ap.unlink(missing_ok=True)
-                if ok:
-                    final.unlink(missing_ok=True)
-                    os.replace(merged, final)
-                    return True, str(final)
-                # 合并失败 → 保留无声版，但**明确告知**
-                merged.unlink(missing_ok=True)
-                return True, (str(final)
-                              + "|WARN|这条只有画面没有声音（合并失败："
-                              + msg + "）")
-            except Exception as e:                  # noqa: BLE001
-                try:
-                    ap.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                return True, (str(final)
-                              + "|WARN|这条只有画面没有声音"
-                              + f"（音轨下载失败：{type(e).__name__}）")
-        return True, str(final)
-    except Exception as e:                          # noqa: BLE001
+    # 断点正好等于元数据大小（上一轮其实下完了，只差改名）→ 直接收尾
+    try:
+        if (part.exists() and video.size
+                and part.stat().st_size == video.size):
+            os.replace(part, final)
+            return True, str(final)
+    except Exception:
+        pass
+
+    ok, err, size = _http_to_file(
+        video.play_url, part, headers=headers, timeout=timeout,
+        max_retries=max_retries, should_stop=should_stop,
+        on_progress=on_progress, expected_size=video.size, t0=t0)
+    if not ok:
+        return False, err
+    # ★ 下限 8KB：够拦掉错误页/空响应，又不误杀很短的视频
+    if size < 8192:
         try:
             part.unlink(missing_ok=True)
         except Exception:
             pass
-        return False, f"{type(e).__name__}: {str(e)[:120]}"
+        return False, f"文件太小（{size} 字节），地址可能已失效"
+    try:
+        os.replace(part, final)
+    except Exception as e:                          # noqa: BLE001
+        return False, f"保存文件失败: {type(e).__name__}: {e}"
+
+    # ★ 兜底路径才需要合并：play_addr 已是音视频合一，audio_url 为空
+    if video.audio_url:
+        ap = dest_dir / f"{base}.audio.part"
+        aok, aerr, asize = _http_to_file(
+            video.audio_url, ap,
+            headers={"User-Agent": UA, "Referer": "https://www.douyin.com/"},
+            timeout=timeout, max_retries=max_retries,
+            should_stop=should_stop, t0=time.time())
+        if not aok:
+            return True, (str(final) + "|WARN|这条只有画面没有声音"
+                          f"（音轨下载失败：{aerr}）")
+        merged = dest_dir / f"{base}.merged.mp4"
+        mok, msg = _ffmpeg_merge(final, ap, merged)
+        try:
+            ap.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if mok:
+            try:
+                final.unlink(missing_ok=True)
+                os.replace(merged, final)
+                return True, str(final)
+            except Exception as e:                  # noqa: BLE001
+                return True, (str(final) + "|WARN|这条只有画面没有声音"
+                              f"（替换合并文件失败：{type(e).__name__}）")
+        # 合并失败 → 保留无声版，但**明确告知**
+        try:
+            merged.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return True, (str(final) + "|WARN|这条只有画面没有声音（合并失败："
+                      + msg + "）")
+    return True, str(final)
