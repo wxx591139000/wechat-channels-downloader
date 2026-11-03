@@ -1738,3 +1738,89 @@ v3.1.5 首轮跑出 2 条红灯，**两条都是测试脚本的错，产品本�
 **规矩**：新增任何 Treeview，`heading()` 里的 `anchor` 要和 `column()`
 的 `anchor` 成对写，别指望默认值。
 
+
+---
+
+## P55 ★★★ 字段名和业务语义相反：`fav_count` 才是点赞，`like_count` 是推荐
+
+**现象**（客户截图，2026-11-03）：同一条视频，视频号页面「大拇指 1284 /
+心形 512」，下载器「👍 点赞」列显示 **512**。客户原话：
+「看着是推荐数，不是点赞数」。
+
+**根因**：微信接口的字段名与界面语义**是反的**。真机报文：
+
+```
+条目层：
+  "like_count": 2570     ← 心形（推荐）
+  "fav_count": 4703      ← 大拇指（点赞）
+monotonic_data.count_info：
+  "fav_count": 4703
+  "thumb_up_count": {"thumb_up_count": 4703}   ← 与 fav_count 一模一样
+  "like_count": 2570
+```
+
+旧代码 `_STAT_ALIASES["like_count"]` 把 `like_count` 放在第一位 → 取到心形数。
+数字本身是真的，只是**贴错了标签**。
+
+**怎么确认的（方法比结论重要）**：不是猜字段名，而是找**同一份数据里的两处
+互证**——`fav_count` 与 `thumb_up_count.thumb_up_count` 相等，说明它们描述
+同一种行为；`like_count` 是另一个数。再加上客户截图（512 = 心形），三点对上
+才改的。**只有一个来源时不要改语义**。
+
+**修法**：
+
+```python
+_STAT_ALIASES = {
+    "like_count":      ("fav_count", "favCount", "thumb_up_count", ...),
+    "recommend_count": ("like_count", "likeCount", ...),
+    "fav_count":       ("collectCount", ...),   # 真·收藏，报文里没有
+}
+```
+
+**连带两件事**：
+
+1. **老数据要搬**。改语义不改存量 = 客户的清单继续显示错数字。
+   加 `stat_sem` 标记（0=旧/1=新），加载时搬迁一次并置 1 —— **必须幂等**，
+   否则每次启动都来回交换。
+2. **统计数可能被包一层**：`{"thumb_up_count": {"thumb_up_count": 4703}}`。
+   `int(dict)` 会抛异常/返回 0，于是"有值"被当成"没值"。
+
+**规矩**：凡是从第三方接口取语义字段，先找**同义字段互相印证**再定名；
+名字只是字符串，语义要靠数据证明。改语义必须同时给存量数据做幂等迁移。
+
+---
+
+## P56 ★★★ 建列表时 `self._like_stats_ok = False`，把刚算好的授权状态覆盖掉
+
+**现象**（v3.1.6 打包后截图才发现）：顶部明明写着「已授权：视频号 永久」，
+`_has_like_stats()` 实测返回 `True`，但**列表里所有行的「👍 点赞」列都是「—」**。
+
+**根因**：
+
+```python
+# _build_ui 前半段
+self._like_stats_ok = self._has_like_stats()      # → True
+
+# 同一个 _build_ui，后面建列表时
+cols = (...)
+self._like_stats_ok = False                       # ← 覆盖
+self.tree = ttk.Treeview(...)
+```
+
+**为什么一直没被发现**：新捕获的行走 `_on_capture`，那条路径里又会重算一次
+（`self._like_stats_ok = self._has_like_stats()`），所以当场看着是好的；
+只有**重启后从 records.json 恢复的历史行**才是「—」。
+而客户抱怨的正是"重启后"的场景，两件事叠在一起看就更像"数据没解析到"。
+
+**修法**：把这一行改成重新取值，别写死 False。
+
+```python
+self._like_stats_ok = self._has_like_stats()
+```
+
+**通用教训**：`xxx_ok = False` 这种「先给个默认值」的写法，只要后面有人
+算过又有别人覆盖，就会静默回退。判断依据要看**两条路径**：
+新数据进来时算一次、老数据恢复时也算一次 —— 只测一条路径会漏。
+
+**顺带**：测试里不要手动 `app._like_stats_ok = True` 再断言（那等于绕过被测逻辑）。
+正确姿势是从 config 里放一个真授权码，让程序自己算，再断言界面。

@@ -4,6 +4,64 @@
 
 
 
+## [3.1.6] - 2026-11-03
+
+- v3.1.6 修正点赞取到心形（推荐）；修重启后历史行点赞列显示为—
+- v3.1.6 修正点赞取到心形（推荐）；修重启后历史行点赞列显示为—
+- v3.1.6 修正点赞取到心形（推荐）的字段错位；老记录自动搬正
+- v3.1.6 修正「👍 点赞」取到的是心形（推荐）而不是大拇指（点赞）
+
+### 客户反馈
+
+同一条视频，视频号页面「大拇指 1284 / 心形 512」，下载器「👍 点赞」列显示
+512 —— 数字本身没错，但取错了字段。
+
+### 根因：微信这两个字段的名字是反的
+
+真机报文（`reference/channels-decrypt/wx_response.json`）里：
+
+```
+条目层：
+  "like_count": 2570      ← 页面上心形（推荐）的数字
+  "fav_count": 4703       ← 页面上大拇指（点赞）的数字
+monotonic_data.count_info：
+  "fav_count": 4703
+  "thumb_up_count": {"thumb_up_count": 4703}   ← 与 fav_count 完全一致
+  "like_count": 2570
+```
+
+`fav_count == thumb_up_count == 4703`，两处互相印证：**fav_count 才是点赞**。
+旧代码把 `like_count` 当点赞，于是显示的是心形数。
+
+### 改动
+
+- `_STAT_ALIASES` 对调口径：
+  `like_count` ← `fav_count` / `thumb_up_count`；
+  `recommend_count` ← `like_count`（客户口径：心形 = 推荐）；
+  `fav_count` 只留真·收藏字段（报文里没有，保持 0，不拿心形滥竽充数）
+- `_as_int()` 支持被包一层对象的统计数：`{"thumb_up_count": {"thumb_up_count": N}}`
+- `extract_stats()` 增加对 `entry.monotonic_data.count_info` 的下探（深度 4，
+  跳过 `media`/`object_desc`/`version_data`，避免把 `data_version` 时间戳当统计数）
+- **老记录自动搬迁**：`Record.stat_sem` 标记口径版本；加载到旧记录时
+  把 `like_count`(心形) 移到 `recommend_count`、`fav_count`(大拇指) 移到
+  `like_count`，幂等（存盘再读不会来回搬）。启动日志会写明修正了多少条。
+  当年没取到大拇指数的那批记录 → 点赞显示「—」，不拿心形冒充。
+
+### 顺带修掉一个更隐蔽的 bug：重启后历史行点赞列全是「—」
+
+打包后真跑 exe 截图才发现：顶部写着「已授权：视频号 永久」，
+`_has_like_stats()` 也返回 True，但列表里每行点赞都是「—」。
+
+原因：`_build_ui()` 前半段算好了 `_like_stats_ok`，**建列表时又写了
+`self._like_stats_ok = False` 把它覆盖掉**。新捕获的行走 `_on_capture`
+会再算一次所以看着正常，**只有重启后从 records.json 恢复的历史行是「—」**
+—— 恰好是客户最容易遇到的场景。已改成重新取值（P56）。
+
+验证：`tests/verify_v316_like_semantics.py` **25 项全绿**
+（真实报文 + 搬迁幂等 + 真授权码下的真实 Tk 列表）
+
+---
+
 ## [3.1.5] - 2026-11-03
 
 - v3.1.5 抖音清单持久化 + 断点续传跨重启（抖音/视频号）+ 点赞数写进 mp4 文件名

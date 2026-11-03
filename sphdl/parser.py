@@ -108,33 +108,82 @@ def _pick(mapping: dict, *names):
 #   找到哪些键会记进 _last_stat_keys，方便诊断真实字段名。
 # ═══════════════════════════════════════════════════════════════════
 
+# ★★★ 2026-11-03 真机报文实证：微信这两个字段的名字是**反的** ★★★
+#
+#   报文样本：reference/channels-decrypt/wx_response.json
+#
+#     条目层（object_desc 的兄弟位置）：
+#        "like_count": 2570     ← 页面上**心形**的数字（喜欢）
+#        "fav_count": 4703      ← 页面上**大拇指**的数字（点赞）
+#
+#     monotonic_data.count_info 里两处互相印证：
+#        "fav_count": 4703  ==  "thumb_up_count": {"thumb_up_count": 4703}
+#
+#   客户截图佐证：同一条视频页面「大拇指 1284 / 心形 512」，
+#   下载器却显示 512 —— 就是因为把 like_count 当成了点赞。
+#
+#   客户口径（2026-11-03 明确）：**大拇指 = 点赞，心形 = 推荐**。
+#
+#   所以对外统一口径（Record / 界面 / 文件名都用这个）：
+#        like_count      = 大拇指点赞  ← fav_count / thumb_up_count
+#        recommend_count = 心形推荐    ← like_count
+#        fav_count       = 真·收藏（报文里没有这个字段，留 0，别乱填）
+#
+#   想改回去之前先解释清楚：报文里 fav_count 与 thumb_up_count 数值相同
+#   （4703），like_count 是另一个数（2570）—— 这不是命名猜测，是两处对上了。
 _STAT_ALIASES = {
-    "like_count": ("likeCount", "like_count", "likeNum", "like_num",
-                   "diggCount", "digg_count", "praiseCount", "praise_count",
-                   "favLikeCount", "thumbUpCount", "thumb_up_count"),
-    "forward_count": ("forwardCount", "forward_count", "shareCount",
+    "like_count": ("fav_count", "favCount",
+                   "thumb_up_count", "thumbUpCount",
+                   "thumbUpCountValue", "dingCount", "ding_count"),
+    "recommend_count": ("like_count", "likeCount", "likeNum", "like_num",
+                        "recommend_count", "recommendCount", "recCount",
+                        "rec_count", "recommendNum", "recommend_num"),
+    "forward_count": ("forward_count", "forwardCount", "shareCount",
                       "share_count", "transmitCount", "transmit_count",
                       "forwardNum", "forward_num"),
-    "recommend_count": ("recommendCount", "recommend_count", "recCount",
-                        "rec_count", "recommendNum", "recommend_num"),
-    "fav_count": ("favCount", "fav_count", "collectCount", "collect_count",
-                  "favoriteCount", "favorite_count", "favNum", "fav_num"),
-    "comment_count": ("commentCount", "comment_count", "commentNum",
+    "fav_count": ("collectCount", "collect_count", "favoriteCount",
+                  "favorite_count", "favNum", "fav_num", "starCount"),
+    "comment_count": ("comment_count", "commentCount", "commentNum",
                       "comment_num", "commentsCount"),
 }
 
 # 统计字段常常挂在这些子对象里
 _STAT_CONTAINERS = ("stat", "stats", "statistics", "counts", "counter",
-                    "extInfo", "ext_info", "baseInfo", "base_info")
+                    "count_info", "extInfo", "ext_info", "baseInfo",
+                    "base_info", "monotonic_data")
 
 _last_stat_keys: dict = {}       # 诊断用：最近一次实际命中的键名
 
 
 def _as_int(v):
+    """统计字段取值。
+
+    ★ v3.1.6：微信常把统计数**再包一层对象**，例如
+          "thumb_up_count": {"thumb_up_count": 4703}
+          "fav_count": {"fav_count": 4703, "version_data": {...}}
+      原来直接 int(dict) → 0，等于把有值的字段当成没值。
+      现在按字段名往里探一层（跳过 version_data / *_flag 这类非数值兄弟）。
+    """
     try:
         if isinstance(v, bool):
             return 0
-        return max(0, int(v))
+        if isinstance(v, dict):
+            for k, vv in v.items():
+                kl = str(k).lower()
+                if kl == "version_data" or kl.endswith("_flag"):
+                    continue
+                if (kl.endswith("count") or kl.endswith("_num")
+                        or kl in ("value", "num", "count")):
+                    n = _as_int(vv)
+                    if n:
+                        return n
+            return 0
+        if isinstance(v, (int, float)):
+            return max(0, int(v))
+        if isinstance(v, str):
+            s = v.strip()
+            return int(s) if s.isdigit() else 0
+        return 0
     except Exception:
         return 0
 
@@ -154,10 +203,10 @@ def extract_stats(obj: Any, entry: Any = None) -> dict:
         {
           "id": "15042040784711457411",
           "object_desc": { ...12 个字段... },
-          "like_count": 135,        ← 点赞
-          "forward_count": 94,      ← 转发
-          "comment_count": 0,       ← 评论数
-          "fav_count": 527,         ← 收藏
+          "like_count": 2570,       ← **心形**（喜欢），不是点赞！
+          "forward_count": 2602,    ← 转发
+          "comment_count": 268,     ← 评论数
+          "fav_count": 4703,        ← **大拇指点赞**（与 thumb_up_count 一致）
           "createtime": 1793150995,
           ...
         }
@@ -206,6 +255,28 @@ def extract_stats(obj: Any, entry: Any = None) -> dict:
                     _scan(json.loads(sub))
                 except Exception:
                     pass
+
+    # ★ v3.1.6：条目层也可能把统计数**埋两层**，例如
+    #     entry.monotonic_data.count_info.thumb_up_count = {"thumb_up_count": N}
+    #   有些版本的 entry 顶层并没有 fav_count，只在 count_info 里给。
+    #   下探深度限 4 层，且跳过 media / object_desc / version_data
+    #   （媒体信息量太大、version_data 里的 data_version 是时间戳，都不是统计数）。
+    def _scan_deep(d, depth=0):
+        if not isinstance(d, dict) or depth > 4:
+            return
+        _scan(d)
+        for k, v in d.items():
+            kl = str(k).lower()
+            if kl in ("version_data", "media", "object_desc"):
+                continue
+            if isinstance(v, dict):
+                _scan_deep(v, depth + 1)
+
+    if isinstance(entry, dict):
+        for ck in _STAT_CONTAINERS:
+            sub = entry.get(ck)
+            if isinstance(sub, dict):
+                _scan_deep(sub, 1)
 
     _last_stat_keys = found
     return out

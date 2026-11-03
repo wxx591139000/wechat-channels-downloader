@@ -604,10 +604,15 @@ class Record:
     nonce_id: str = ""
     # ★ v2.5.0：统计数据（客户需求：点赞/转发/推荐 + 按点赞排序）
     #   0 = 没解析到（界面显示「—」），不编造数据
+    #   ★ v3.1.6 口径修正：like_count = 大拇指点赞（微信字段 fav_count），
+    #     recommend_count = 心形推荐（微信字段 like_count）。见 parser.py 顶部说明。
     like_count: int = 0
     forward_count: int = 0
     recommend_count: int = 0
     fav_count: int = 0
+    # ★ v3.1.6：统计口径版本。0/缺失 = 旧版（把心形当成了点赞），1 = 新口径。
+    #   加载旧记录时按它做一次性搬迁，之后不再动（幂等）。
+    stat_sem: int = 1
     comment_count: int = 0
     # ★ v2.2.12：视频号评论（客户需求）
     #   "先在清单里点开看评论，跟视频号评论区一样的展示效果"
@@ -633,6 +638,7 @@ class RecordStore:
         self.items: dict = {}      # id -> Record
         self.order: list = []      # 新 → 旧
         self.trimmed_on_load = 0   # 启动时因上限被裁掉的旧记录数（供 GUI 提示）
+        self.migrated_stats = 0    # v3.1.6：启动时被搬正口径的记录数（供 GUI 提示）
         self._load()
 
     def _load(self):
@@ -663,6 +669,11 @@ class RecordStore:
                         kw[_f] = int(d.get(_f) or 0)
                     except Exception:
                         kw[_f] = 0
+                # ★ v3.1.6：老记录的统计口径是反的，靠这个标记做一次性搬迁
+                try:
+                    kw["stat_sem"] = int(d.get("stat_sem") or 0)
+                except Exception:
+                    kw["stat_sem"] = 0
                 # ★ v2.2.12：评论字段同样必须显式读回（seq 踩过这个坑）
                 kw["nonce_id"] = d.get("nonce_id") or ""
                 kw["comments"] = d.get("comments") or []
@@ -674,6 +685,9 @@ class RecordStore:
                 if not kw.get("platform"):
                     kw["platform"] = "视频号"   # 老数据默认视频号
                 r = Record(**kw)
+                # ★ v3.1.6：把老口径的点赞/推荐搬正（幂等，见 _migrate_stat_sem）
+                if getattr(r, "stat_sem", 1) != 1:
+                    self._migrate_stat_sem(r)
                 # 上次退出时正在处理中的，标记为失败；
                 # "waiting"（还没开始下载）保持不变，重启后仍可点选下载
                 if r.status in ("pending", "downloading", "decrypting"):
@@ -714,6 +728,34 @@ class RecordStore:
             pass
         except Exception:
             self.items, self.order = {}, []
+
+    def _migrate_stat_sem(self, r):
+        """把 v3.1.5 及更早记录的统计口径搬正（只做一次，靠 stat_sem 标记幂等）。
+
+        旧口径（错）：like_count = 心形(推荐)、fav_count = 大拇指(点赞)
+        新口径（对）：like_count = 大拇指、recommend_count = 心形
+
+        为什么敢直接搬：旧解析其实**两个字段都取到了**（fav_count 的别名表里
+        本来就有 "fav_count"），只是标签贴反了。所以搬迁不丢数据。
+
+        老记录若 fav_count 恰好为 0（那版报文没这个字段），点赞就留 0 →
+        界面显示「—」。宁可显示没有，也不拿心形数冒充点赞。
+        """
+        try:
+            old_like = int(getattr(r, "like_count", 0) or 0)
+            old_fav = int(getattr(r, "fav_count", 0) or 0)
+            r.like_count = old_fav
+            if old_like and not int(getattr(r, "recommend_count", 0) or 0):
+                r.recommend_count = old_like
+            r.fav_count = 0
+            r.stat_sem = 1
+            if old_like or old_fav:
+                self.migrated_stats += 1
+        except Exception:
+            try:
+                r.stat_sem = 1
+            except Exception:
+                pass
 
     def is_full(self) -> bool:
         """列表是否已达档位上限。
@@ -1163,6 +1205,13 @@ class App:
                 f"⚠️ 列表上限 {self._limit_text()}：启动时已裁掉 {self.store.trimmed_on_load} "
                 "条最早的历史记录（磁盘文件不受影响）。\n"
                 "如需保留更多记录，请把「列表上限」调到更大档位后重新拉取。")
+        # ★ v3.1.6：老记录口径修正提示（不提示的话客户会觉得数字自己变了）
+        if getattr(self.store, "migrated_stats", 0):
+            self.push_log(
+                "info",
+                f"📊 已修正 {self.store.migrated_stats} 条历史记录的点赞数："
+                "之前把「心形（推荐）」当成了点赞，现在按「大拇指（点赞）」重新对齐。"
+                "部分老记录若当时没取到大拇指数，会显示「—」，重新捕获即可。")
         if self.store.is_full():
             self.push_log(
                 "warn",
@@ -3443,7 +3492,12 @@ class App:
         #   加回 cols + heads + _row_values 三处即可。
         cols = ("no", "status", "title", "platform", "size", "source",
                 "like", "time", "file")
-        self._like_stats_ok = False
+        # ★ v3.1.6 修复（P56）：这里原来写死 `_like_stats_ok = False`，
+        #   把 _build_ui 前面刚算好的授权状态**覆盖成未授权**。
+        #   后果：新捕获的行（走 _on_capture 会重算一次）有数字，
+        #   但**启动时从 records.json 恢复的历史行全是「—」** ——
+        #   客户买了点赞包，重启工具却像没买。
+        self._like_stats_ok = self._has_like_stats()
         self.tree = ttk.Treeview(listf, columns=cols, show="headings", height=16,
                                  selectmode="extended")
         # ★ v2.2.20：「大小」列也不再显示（客户要求）

@@ -15,10 +15,13 @@ class VideoData:
     # ★ v2.5.0：视频统计数据（客户需求：点赞/转发/推荐，并可按点赞排序）
     #   字段名不固定（微信不同版本叫法不同），parser 里做容错提取；
     #   提不到就是 0，界面显示「—」，绝不假装有数据。
-    like_count: int = 0        # 点赞
+    #   ★ v3.1.6 口径（与客户界面一致）：大拇指 = 点赞，心形 = 推荐。
+    #     微信字段名是反的 —— like_count 存的是心形、fav_count 存的是大拇指，
+    #     由 parser._STAT_ALIASES 一次性对调，此处只看结果不看微信原名。
+    like_count: int = 0        # 点赞（大拇指）
     forward_count: int = 0     # 转发
-    recommend_count: int = 0   # 推荐
-    fav_count: int = 0         # 收藏（暂不展示，留作后续）
+    recommend_count: int = 0   # 推荐（心形）
+    fav_count: int = 0         # 真·收藏（报文里没这个字段，通常是 0）
     comment_count: int = 0     # 评论总数（视频自己的评论数，不是抓到的条数）
     # 稳定视频标识：media.md5sum（同一视频内容恒定，与 token/URL 无关）。
     # 用于去重——同一视频反复播放会产生新 token/URL，按 URL 去重会失效。
