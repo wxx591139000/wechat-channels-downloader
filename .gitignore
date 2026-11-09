@@ -66,3 +66,7 @@ diag_object_desc/
 docs/**/__pycache__/
 docs/**/*.pyc
 docs/**/*.tmp
+
+# B 站清单（本机数据，不入库；跟 douyin_records.json 同性质）
+bilibili_records.json
+douyin_records.json

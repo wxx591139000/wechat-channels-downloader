@@ -61,9 +61,6 @@ class BilibiliWindow:
         top.pack_propagate(False)
         tk.Label(top, text="  B 站视频下载", bg="#0f172a", fg="#ffffff",
                  font=(FONT, 13, "bold"), anchor="w").pack(side="left")
-        tk.Label(top, text="不需要装证书 · 粘贴链接就能下  ",
-                 bg="#0f172a", fg="#94a3b8",
-                 font=(FONT, 9)).pack(side="right")
 
         def _btn(txt, cmd, tip):
             b = tk.Button(top, text=txt, command=cmd, bg="#1e293b",
@@ -78,6 +75,13 @@ class BilibiliWindow:
         _btn("✕", self._hide_window, "隐藏窗口（解析/下载会在后台继续）")
         self.btn_max = _btn("□", self._toggle_max, "最大化 / 还原窗口")
         _btn("—", self.win.iconify, "最小化到任务栏")
+        # ★ 提示文字必须**最后** pack：pack(side="right") 是按调用顺序从右往左
+        #   排的，先 pack 文字就会被推到最右，尾部直接被窗口边缘裁掉
+        #   （2026-11-09 截图抓出来的，原来「不需要装证书 · 粘贴链接就能下」
+        #    只剩半个「下」字，还压在 ✕ 右边）。
+        tk.Label(top, text="免证书 · 直接粘贴就能下  ",
+                 bg="#0f172a", fg="#94a3b8",
+                 font=(FONT, 9)).pack(side="right", padx=(0, 4))
 
         # 提示条：把「能下多清」这句话摆在最显眼的位置，
         # 免得客户下完发现是 720P 来问（这不是 bug，是匿名上限）
@@ -113,6 +117,9 @@ class BilibiliWindow:
         self.btn_parse = tk.Button(
             bar1, text="② 解析链接", command=self._on_parse,
             bg="#2563eb", fg="#ffffff", relief="flat",
+            # ★ 解析/下载中会 disable，默认的灰字压在蓝底上几乎看不见
+            #   （截图放大才发现），给个接近白的禁用色
+            disabledforeground="#dbeafe",
             font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2")
         self.btn_parse.pack(side="left")
         self.lbl_count = tk.Label(bar1, text="", bg="#ffffff",
@@ -137,10 +144,10 @@ class BilibiliWindow:
         wrap.pack(fill="both", expand=True, padx=14)
         self.tree = ttk.Treeview(wrap, columns=cols, show="headings",
                                  height=11, selectmode="extended")
-        heads = {"sel": ("✓", 34), "title": ("标题", 460),
-                 "owner": ("UP 主", 120), "dur": ("时长", 74),
+        heads = {"sel": ("✓", 34), "title": ("标题", 420),
+                 "owner": ("UP 主", 136), "dur": ("时长", 74),
                  "quality": ("清晰度", 72), "size": ("大小", 82),
-                 "status": ("状态", 150)}
+                 "status": ("状态", 168)}
         for c in cols:
             # 表头对齐跟数据对齐一致（v3.1.4 定的规矩）
             self.tree.heading(c, text=heads[c][0],
@@ -177,6 +184,7 @@ class BilibiliWindow:
         self.btn_dl = tk.Button(
             bar2, text="③ 下载选中", command=self._on_download,
             bg="#059669", fg="#ffffff", relief="flat",
+            disabledforeground="#d1fae5",
             font=(FONT, 10, "bold"), padx=16, pady=6, cursor="hand2")
         self.btn_dl.pack(side="left", padx=8)
         self.btn_stop = tk.Button(
@@ -495,11 +503,20 @@ class BilibiliWindow:
         threading.Thread(target=_worker, daemon=True).start()
 
     def apply_video(self, video, page: int = 0):
-        """（主线程）展开一个视频的全部分P。"""
+        """（主线程）展开一个视频的全部分P。
+
+        ★ 按 (bvid, cid) 去重：客户把同一个链接粘两次、或解析完再解析一遍，
+          原来会把同一批分P 又插一遍（截图里出现过 12 行 = 6 行重复），
+          下完第一遍第二遍靠「文件已存在」跳过，界面看着很乱。
+        """
         if not self._alive():
             return
-        added = 0
+        have = {(v.bvid, p.cid) for v, p in self.rows}
+        added = skipped = 0
         for p in video.parts:
+            if (video.bvid, p.cid) in have:
+                skipped += 1
+                continue
             idx = len(self.rows)
             self.rows.append((video, p))
             self._set_meta(idx, "pending", "")
@@ -513,6 +530,8 @@ class BilibiliWindow:
                 self._dur(p.duration), "-", "-", "待下载"))
             self._rows[iid] = idx
             added += 1
+        if skipped:
+            self._log("info", f"  跳过 {skipped} 个重复分P（这份视频已经在清单里了）")
         self._log("ok", f"解析到：{video.title}（{video.owner}）"
                         f"{'，' + str(len(video.parts)) + ' 个分P' if video.multi else ''}")
         if added:
@@ -662,7 +681,12 @@ class BilibiliWindow:
             elif "已停止" in err:
                 vals[6] = "⏸ 已停止（断点已留）"
             else:
-                vals[6] = f"❌ {err[:40]}"
+                # ★ 只留一句短的：完整错误已经进日志了。
+                #   Treeview **不会**把文字裁到列宽里，写长了会横穿整张表
+                #   （2026-11-09 截图抓出来的：40 字版本直接画到窗口外面）。
+                #   10 字 ≈ 110px，168px 的列装得下，还留一点余量。
+                short = err if len(err) <= 10 else err[:9] + "…"
+                vals[6] = f"❌ {short}"
             self.tree.item(iid, values=vals)
         if ok:
             self._log("ok", f"  ✅ {self.rows[idx][0].title[:24]} "

@@ -352,6 +352,16 @@ def test_window():
         sels = [win.tree.item(k, "values")[0] for k in win.tree.get_children()]
         check("?p=2 时只勾第 2P", sels == ["☐", "☑", "☐"], sels)
 
+        # ── 重复解析同一个链接：不该把分P 又插一遍 ──
+        win.apply_video(v, 0)
+        root.update()
+        check("重复解析同一视频不会插重复行",
+              len(win.tree.get_children()) == 3,
+              len(win.tree.get_children()))
+        check("日志说明跳过了重复分P",
+              any("跳过 3 个重复分P" in m for _, m in app.logs),
+              [m for _, m in app.logs if "跳过" in m])
+
         # ── 全选 / 全不选 ──
         win._toggle_all()
         sels = [win.tree.item(k, "values")[0] for k in win.tree.get_children()]
