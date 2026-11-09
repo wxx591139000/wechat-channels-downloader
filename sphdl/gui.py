@@ -3266,6 +3266,18 @@ class App:
                          foreground="#78909c")
             st.map("DyLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v3.2.0：B 站入口。用品牌粉（#fb7299 的白底变体），
+            #   与「绿=主操作 / 青=抖音 / 橙=公众号 / 琥珀=授权」都区分得开，
+            #   白卡片上一眼能找到，又不会抢掉主操作按钮的位置。
+            st.configure("Bili.TButton", background="#fb7299",
+                         foreground="#ffffff")
+            st.map("Bili.TButton",
+                   background=[("active", "#fc8bab"),
+                               ("pressed", "#e45c84")])
+            st.configure("BiliLocked.TButton", background="#eceff1",
+                         foreground="#78909c")
+            st.map("BiliLocked.TButton",
+                   background=[("active", "#e0e4e7")])
             # ★ v3.1.4 两个"要找得到"的按钮（客户：授权管理 / 打开文件夹
             #   太不起眼，一眼扫过去以为是普通文字）
             #   · 授权管理 = 权益/解锁路径 → 琥珀色（暖、亮，但避开绿色的
@@ -3293,6 +3305,8 @@ class App:
                                ("Danger.TButton", "#f3b6b6"),
                                ("Dy.TButton", "#00897b"),
                                ("DyLocked.TButton", "#d3dae0"),
+                               ("Bili.TButton", "#e45c84"),
+                               ("BiliLocked.TButton", "#d3dae0"),
                                ("License.TButton", "#f59e0b"),
                                ("Folder.TButton", "#93c5fd")):
                 try:
@@ -3324,6 +3338,21 @@ class App:
                  "  · 下载的是 1080P 音视频合一的 MP4\n\n"
                  "用法：粘贴链接 → 解析 → 勾选 → 下载\n"
                  "（每条之间自动间隔 2~5 秒，避免抖音限流）")
+        # ★ v3.2.0：B 站下载（单条 + 多P）。跟着视频号授权走 ——
+        #   B 站不需要证书/代理，属于附加能力，不单独发码（不碰已发出的码）。
+        self.btn_bili = ttk.Button(_row1, text="🎬 B 站下载 🔒", width=13,
+                                   style="BiliLocked.TButton",
+                                   command=self._on_bilibili)
+        self.btn_bili.pack(side="left", padx=(6, 2))
+        self._tt(self.btn_bili,
+                 "【B 站视频下载】单条链接 + 多P合集。\n"
+                 "随「视频号」授权一起开通，不需要另买。\n\n"
+                 "特点：\n"
+                 "  · 不需要装证书（B 站接口直连，不走代理）\n"
+                 "  · 多P 视频会按分P 各列一行，勾哪个下哪个\n"
+                 "  · 断点续传：下到一半关掉，下次接着下\n"
+                 "  · 免登录最高 720P；1080P+/4K 需登录态（本版没做）\n\n"
+                 "用法：粘贴链接（BV 号 / 链接 / b23.tv 短链）→ 解析 → 勾选 → 下载")
         self._tt(self.btn_mp,
                  "【公众号文章视频】下载公众号文章里的视频（附加功能）。\n"
                  "\n"
@@ -3337,6 +3366,7 @@ class App:
                  "此功能需专用授权码开启；未授权时点它会提示如何解锁。")
         self._refresh_mp_button()
         self._refresh_dy_button()
+        self._refresh_bili_button()
         self._like_stats_ok = self._has_like_stats()
         self._refresh_like_column()
 
@@ -5499,6 +5529,66 @@ class App:
             pass
         return has_dy
 
+    # ────────── B 站下载（v3.2.0）──────────
+    def _refresh_bili_button(self) -> bool:
+        """刷新「🎬 B 站下载」按钮外观，返回是否可用。
+
+        ★ v3.2.0 授权口径：**跟着视频号授权走**，不单独发码。
+          理由：B 站走接口直连，不用证书、不用代理，属于「同一份授权下的
+          额外入口」；单独开码位要动 license.py 和发码工具，会让**已经发
+          出去的码**语义变复杂，风险不值得。
+          以后若要单卖，把这里换成 is_bili_product(...) 即可，界面不用动。
+        """
+        if getattr(self, "btn_bili", None) is None:
+            return False
+        try:
+            has_bili = self._license_info(lic.PRODUCT_VIDEO) is not None
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"B 站按钮授权判定失败（按未授权显示）：{e}")
+            has_bili = False
+        # 被作废的码不给用（与视频号/公众号一致）
+        if getattr(self, "_revoked_reason", ""):
+            has_bili = False
+        try:
+            self.btn_bili.config(
+                text="🎬 B 站下载" if has_bili else "🎬 B 站下载 🔒",
+                style="Bili.TButton" if has_bili else "BiliLocked.TButton",
+                state="normal")
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"B 站按钮外观刷新失败：{e}")
+        return has_bili
+
+    def _on_bilibili(self):
+        """「🎬 B 站下载」入口。未授权给说明，已授权开窗口（单例复用）。"""
+        if not self._refresh_bili_button():
+            messagebox.showinfo(
+                "B 站下载（需要视频号授权）",
+                "「B 站视频下载」随**视频号授权**一起开通，不单独收费。\n\n"
+                "特点：\n"
+                "  · 不需要安装证书（B 站接口直连，不走代理）\n"
+                "  · 单条链接 + 多P 合集，按分P 勾选下载\n"
+                "  · 断点续传，关掉工具下次接着下\n"
+                "  · 免登录最高 720P\n\n"
+                "激活视频号授权码后，此按钮自动变成可点状态。",
+                parent=self.root)
+            return
+        try:
+            w = getattr(self, "_bili_win", None)
+            if w is not None and w.win.winfo_exists():
+                w.show()
+                return
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"B 站窗口复用检查失败（将新开一个）：{e}")
+        try:
+            from .bilibili_ui import BilibiliWindow
+            self._bili_win = BilibiliWindow(self)
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("error", f"打开 B 站窗口失败：{e}")
+            messagebox.showerror(
+                "打开失败",
+                f"B 站下载窗口启动失败：\n{e}\n\n请把这段报错发给发布方。",
+                parent=self.root)
+
     # ────────── 小程序短剧入清单（v2.7.8）──────────
     def _add_miniapp_record(self, ep: str, path: str, size: int):
         """把已落盘的小程序短剧加入清单（状态已完成，可直接双击打开）。"""
@@ -6799,6 +6889,31 @@ class App:
                         pass
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"抖音窗口事件处理出错：{e}")
+        elif kind in ("bili_video", "bili_parse_done", "bili_fail",
+                      "bili_dl_start", "bili_dl_prog", "bili_dl_done",
+                      "bili_all_done"):
+            # ★ v3.2.0：B 站下载窗口的事件
+            w = getattr(self, "_bili_win", None)
+            if w is None:
+                return
+            try:
+                if kind == "bili_video":
+                    w.apply_video(item[1], item[2])
+                elif kind == "bili_fail":
+                    w.apply_fail(item[1], item[2])
+                elif kind == "bili_parse_done":
+                    w.parse_done(item[1], item[2])
+                elif kind == "bili_dl_start":
+                    w.apply_dl_start(item[1], item[2], item[3])
+                elif kind == "bili_dl_prog":
+                    w.apply_dl_prog(item[1], item[2], item[3],
+                                    item[4], item[5])
+                elif kind == "bili_dl_done":
+                    w.apply_dl_done(item[1], item[2], item[3], item[4])
+                elif kind == "bili_all_done":
+                    w.apply_all_done(item[1], item[2], item[3])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"B 站窗口事件处理出错：{e}")
         elif kind == "miniapp_saved":
             # ★ v2.7.8：小程序短剧落盘 → 加入清单（客户要求在列表里看到）
             try:

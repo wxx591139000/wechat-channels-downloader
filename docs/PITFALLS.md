@@ -1824,3 +1824,50 @@ self._like_stats_ok = self._has_like_stats()
 
 **顺带**：测试里不要手动 `app._like_stats_ok = True` 再断言（那等于绕过被测逻辑）。
 正确姿势是从 config 里放一个真授权码，让程序自己算，再断言界面。
+
+
+## P57 ★★ 网上说「B 站 playurl 必须 WBI 签名、否则 412」，实测匿名直连能过
+
+2026-11-09 加 B 站下载时，先看了一圈社区文章（含 2026-10 的实测帖）：
+「自 2023Q4 起 playurl 强制校验 `w_rid`/`wts`，缺了回 -403/-412」，
+`yt-dlp 2026.06.9` 也确实还在吃 412。
+
+**但按那个结论动手就会白折腾。** 实测（带完整 `Referer: https://www.bilibili.com/`
++ 真实 Chrome UA）：
+
+| 请求 | 结果 |
+|---|---|
+| `x/web-interface/view?bvid=` | HTTP 200、code=0 |
+| `x/player/playurl?bvid=&cid=&qn=80&fnval=0`（**不带任何签名**） | HTTP 200、code=0 |
+| `x/web-interface/nav`（匿名） | code=-101（未登录），但仍返回 `wbi_img` 的 key |
+
+**判据**：能拿到的 code=0 和 39010 字节 JSON 是硬证据，比文章里的结论可信。
+差异很可能来自端点：社区打的是 `x/player/wbi/playurl`（新的、真要签名），
+我用的是 `x/player/playurl`（老的、游客还开放）+ 请求头完整。
+
+**教训**：
+- 第三方文章（哪怕写了"实测"）只能当线索，**结论必须用自己的请求验一遍**
+- 报 412/-403 时先看「端点对不对、Referer/UA 全不全」，再怀疑签名
+- 这类老端点随时可能收紧 → 代码里必须能重取、能降级，不能"调通一次就当永远通"
+
+## P58 ★★ 要"更高清"反而要传更小的 fnval；以及 CDN 只认 Referer
+
+同一个 `playurl`，两套返回：
+
+| fnval | 返回 | 实测清晰度 | 要不要 ffmpeg |
+|---|---|---|---|
+| 16（DASH） | `dash.video[]` + `dash.audio[]` 分离 | 匿名只给 **480P/360P** | 要（合流） |
+| 0 / 1 | `durl[0]` 单文件 | **720P**（`quality=64`） | 不要 |
+
+直觉是"fnval 越大越高级"，实际匿名状态下 **fnval=16 反而更差**：
+接口把高清档留给了登录态，匿名连 720P 都不给 DASH 流。
+
+**另一个硬门槛**：同一个 CDN 地址，
+- 带 `Referer: https://www.bilibili.com/` → `206` + `Content-Range` + `Accept-Ranges: bytes`
+- 不带 → **403**（不是偶发，稳定复现）
+
+所以下载器里 Referer 不是"锦上添花"，是**能不能下**的分界线；
+`Accept-Ranges: bytes` 也意味着断点续传天然可用，不用自己造 Range 服务器验证。
+
+**教训**：参数名里的数字大小跟能力高低没有必然关系；
+先枚举几个取值把返回结构打出来看，比读文档快。
