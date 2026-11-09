@@ -613,6 +613,18 @@ def build_one_edition(v: tuple, force: bool, locked, args,
 def commit_and_tag(v: tuple, note: str):
     ver = f"{v[0]}.{v[1]}.{v[2]}"
     run(["git", "add", "-u"])
+    # ★ v3.2.0 修复：`git add -u` 只暂存**已跟踪**文件的改动，
+    #   本次新增的模块（bilibili.py / bilibili_store.py / bilibili_ui.py）
+    #   全被漏在提交外 —— 产物 exe 是完整的（PyInstaller 直接读磁盘），
+    #   但仓库缺代码，别人 clone 下来跑不起来，tag 也就成了假的。
+    #
+    #   ⚠️ 这里**绝对不能用 `git add -A`**：
+    #   `.gitignore` 里只有单层的 `dist/*`，它匹配不到
+    #   `dist/v3.2.0/微信视频号下载器/...` 这种二级路径，
+    #   -A 会把几百 MB 构建产物一起送进库（2026-10-16 已经翻过同样的车）。
+    #   所以按「源码后缀白名单」逐个补，宁可多写几行。
+    for _pat in ("sphdl/*.py", "tests/*.py", "docs/*.md", "*.md"):
+        run(["git", "add", _pat])
     run(["git", "add", str(PKG), str(CHANGELOG), str(ROOT / "release.py"),
          str(ROOT / ".gitignore"), str(ROOT / "README.md")])
     if git("diff", "--cached", "--quiet").returncode == 0:
