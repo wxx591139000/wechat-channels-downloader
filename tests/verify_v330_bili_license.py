@@ -263,6 +263,35 @@ def test_gui():
     run_case("视频号 + B 站", {1: video_code, 4: bili_code}, True,
              "已授权 · 永久")
 
+    # 未授权点按钮 → 必须弹「购买引导」，不能什么都不发生
+    write_config({})
+    try:
+        app = G.App()
+    except Exception as e:                       # noqa: BLE001
+        check("未授权点 B 站按钮：启动 App", False, f"{type(e).__name__}: {e}")
+        return
+    try:
+        from unittest import mock
+        with mock.patch.object(G.messagebox, "askyesno", return_value=False) as m:
+            app._on_bilibili()
+            check("未授权点 B 站按钮 → 弹出购买引导", m.called,
+                  f"调用 {m.call_count} 次")
+            txt = ""
+            if m.called:
+                txt = " ".join(str(a) for a in m.call_args[0])
+            check("引导文案写明「独立产品」", "独立产品" in txt, txt[:60])
+            check("引导文案写明「B 站视频下载」授权码", "B 站视频下载" in txt)
+            check("引导文案写明视频号码不含 B 站", "不含 B 站" in txt)
+    finally:
+        try:
+            app.store.save()
+        except Exception:
+            pass
+        try:
+            app.root.destroy()
+        except Exception:
+            pass
+
 
 def main():
     print("=" * 66)
