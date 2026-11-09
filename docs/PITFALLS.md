@@ -1871,3 +1871,104 @@ self._like_stats_ok = self._has_like_stats()
 
 **教训**：参数名里的数字大小跟能力高低没有必然关系；
 先枚举几个取值把返回结构打出来看，比读文档快。
+
+
+## P59 ★★★ 「赠送口径」一旦发出去就收不回来；产品线白名单要一次改全
+
+客户要求「把 B 站也做成单独授权卖」。技术上很轻：授权码的产品线一直是
+载荷里的**一个字节**，加一条产品线只是多一个取值 `4` —— 老码一个字节都没动。
+
+**但真正的风险不在算法，在三件"看不见"的事上：**
+
+### ① 已发出的赠送承诺不能单方面收回
+
+v3.2.0 里 B 站是「随视频号授权免费开通」。这版能直接改成独立，
+唯一的前提是**那一版没发给过任何客户**（客户确认过）。
+如果已经有客户在用，直接改判定 = 客户某天打开工具发现功能没了，
+而且他手里的码在后台查还是"有效"的 —— 这种 bug 无法用道歉解决。
+所以改口径前必须先问一句：**这个口径有没有落进任何一个已售出的码？**
+
+### ② 同一份算法有两份实现，必须交叉验证
+
+发码后台 `server/sphdl_admin.py` 是单文件标准库部署（不能 import 客户端包），
+里面有一份**独立重写**的 `make_code`。两份只要一处不一致，
+作者在后台发出来的码客户就激活不了 —— 而**本地单侧测试永远发现不了**，
+因为两边各自 round-trip 都是通的。
+
+所以测试的方向必须是「后台生成 → 客户端校验」，不是各自自证：
+
+```python
+a_code = adm.make_code(0, product=adm.PRODUCT_BILI)
+assert lic.verify_code(a_code)["product"] == 4     # ← 这才是真实链路
+```
+
+### ③ "新增产品要改哪些地方"没有单一事实源
+
+这次加 product=4，实际要同步 6 处，漏任何一处都是**静默 bug**：
+
+| 位置 | 漏了会怎样 |
+|---|---|
+| `license.PRODUCTS_NO_TIER` | `make_code` 按视频号校验档位 → 直接抛「不支持的档位」 |
+| `license.PRODUCT_LABELS` | `verify_code` 认不出 `product=4` → 码**静默失效** |
+| `license.FLAG_ALL` | 位掩码算不全（本版 7→15） |
+| `gui._check_revocations` 的遍历元组 | **后台作废了码，本地还能用** |
+| `gui._license_info(None)` 的兜底顺序 | 只买新产品码的客户，通用展示区显示「未授权」 |
+| `admin.PRODUCT_LABEL` / `NO_TIER_LABEL` | 台账里没有产品标签，翻记录分不清卖的哪条线 |
+
+第 4 条最危险：作废是防盗版手段，漏遍历等于那道门是虚掩的。
+本版把 `(PRODUCT_VIDEO, PRODUCT_MP_ARTICLE)` 这种硬编码遍历改成
+`for prod in lic.PRODUCT_LABELS` —— 以后再加产品线不会再漏。
+
+**下次加产品线时照着这张表走，别只改 `PRODUCT_LABELS` 就以为完事。**
+
+
+## P60 ★★ 测试「先 import 后写配置」是无效的：`CONFIG_FILE` 是模块级常量
+
+给 v3.3.0 写授权测试时遇到一个很难看的现象：**同一份脚本，跑第一次全绿，
+跑第二次大面积报「未授权」**，而产品代码一个字没改。
+
+两个独立的原因叠在一起：
+
+### ① `gui.CONFIG_FILE` 在 import 那一刻就定死了
+
+```python
+# sphdl/gui.py:62
+CONFIG_FILE = userdata.resolve("config.json")
+```
+
+`resolve()` 里第一步是「目标文件存在就直接用，否则走迁移分支」。
+测试脚本原来的顺序是：
+
+```python
+from sphdl import gui as G          # ← 此刻 CONFIG_FILE 已被求值
+write_config({1: code})             # ← 之后才写 config.json，白写
+app = G.App()                       # ← 读的是旧路径，code_of() 全空
+```
+
+**修法**：在 `import gui` **之前**先把 `config.json` 落到 `SPHDL_DATA_DIR`，
+再 import。顺序反了就永远读不到。
+
+### ② 密钥缓存会把「暂时没有密钥」变成「永远没有密钥」
+
+`license.get_secret()` 有个缓存：
+
+```python
+except Exception:
+    _secret_cache = b""      # ← 失败也缓存
+```
+
+而 `release.py` 打完包会删掉 `sphdl/_lic_key.py`。
+所以「发版 → 立刻跑测试」这个**最该跑的时刻**，恰好是密钥不存在的时候：
+测试脚本先 import 了 license（此时缓存住空值），再写 `_lic_key.py`，
+后面所有 `verify_code()` 一律返回 None。
+
+**修法**：写完密钥文件后显式 `lic._secret_cache = None`，并 assert 一次。
+
+### 教训
+
+- 「全绿的测试」和「可信的测试」是两件事。测试失败时先问
+  **「这个失败是产品坏了，还是测试自己的时序不对？」**
+  这里连续两轮 9 项红，全部是测试自身问题，产品一行没错。
+- 凡是**模块级常量**（路径、配置、缓存）参与的逻辑，测试必须保证
+  「常量的求值时机」在环境准备好之后。
+- 缓存「失败结果」要格外小心：它会把一次偶发失败固化成永久失败。

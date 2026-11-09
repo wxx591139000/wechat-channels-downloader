@@ -135,20 +135,33 @@ PRODUCT_MP_ARTICLE = 2     # 公众号文章视频下载（不分档）
 # ★ v2.6.0：抖音批量下载（独立产品，不分档）
 #   客户要求：「把抖音跟公众号一样做成单独授权，并提示用户联系购买抖音授权」
 PRODUCT_DOUYIN = 3         # 抖音批量下载（不分档）
+# ★ v3.3.0：B 站视频下载（独立产品，不分档）
+#   客户要求：「把 B 站也做成单独授权卖，发码平台支持」
+#   ★ 与 v3.2.0 的差别：v3.2.0 里 B 站是「随视频号授权免费开通」，
+#     本版**收回**成独立产品 —— 视频号码不再含 B 站。
+#     之所以能直接收回：带 B 站的那版（v3.2.0）**没有发给过客户**。
+#     如果以后要再改口径，必须先看有没有已售出的码，别直接改判定。
+PRODUCT_BILIBILI = 4       # B 站视频下载（不分档）
 
 PRODUCT_LABELS = {
     PRODUCT_VIDEO: "视频号下载",
     PRODUCT_MP_ARTICLE: "公众号文章视频下载",
     PRODUCT_DOUYIN: "抖音批量下载",
+    PRODUCT_BILIBILI: "B 站视频下载",
 }
 
 # 兼容旧代码：把「产品」映射成「功能位」（内部判定仍用位掩码，便于扩展）
 FLAG_VIDEO_CHANNEL = PRODUCT_VIDEO            # 1
 FLAG_MP_ARTICLE_VIDEO = PRODUCT_MP_ARTICLE    # 2
 FLAG_DOUYIN = PRODUCT_DOUYIN                  # 3
+FLAG_BILIBILI = PRODUCT_BILIBILI              # 4
 # 注意：一个码只解锁一条产品线（v2.0.19 起的规则），
 # FLAG_ALL 仅作历史兼容，不代表"全产品"
-FLAG_ALL = 7
+FLAG_ALL = 15
+
+# ★ 不分档的产品（tier 固定 0）。新增产品时**必须**加到这里，
+#   否则 make_code 会按视频号去校验档位，直接抛「不支持的档位」。
+PRODUCTS_NO_TIER = (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN, PRODUCT_BILIBILI)
 
 FEATURE_LABELS = PRODUCT_LABELS
 
@@ -358,13 +371,14 @@ def make_code(tier: int, days: int = 0, rand: bytes = b"", flags: int = 0,
             raise ValueError(f"不支持的档位: {tier}（可选 {sorted(TIER_TO_CODE)}）")
         prod = PRODUCT_VIDEO
         tier_code = TIER_TO_CODE[tier]
-    elif prod in (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN):
-        # 公众号 / 抖音 不分档：tier 固定为 0，忽略调用方传入的档位
+    elif prod in PRODUCTS_NO_TIER:
+        # 公众号 / 抖音 / B 站 不分档：tier 固定为 0，忽略调用方传入的档位
         tier = 0
         tier_code = 0
     else:
         raise ValueError(
-            f"不支持的产品线: {prod}（可选 1=视频号 / 2=公众号 / 3=抖音）")
+            f"不支持的产品线: {prod}（可选 1=视频号 / 2=公众号 / "
+            f"3=抖音 / 4=B站）")
 
     # ---- ★ v2.6.0：能力位（caps）----
     # caps>0 时强制走 ver=5 码型（能力位只能写在 ver=5 里）
@@ -638,6 +652,16 @@ def is_douyin_product(info: Optional[dict]) -> bool:
     return has_feature(info, PRODUCT_DOUYIN)
 
 
+def is_bilibili_product(info: Optional[dict]) -> bool:
+    """是否 B 站产品（不分档）。★ v3.3.0
+
+    ★ 判定就是「码里的 product == 4」，**不含视频号授权**。
+      v3.2.0 的「随视频号开通」已被客户明确推翻：
+      「视频号授权，B 站授权单独卖」。
+    """
+    return has_feature(info, PRODUCT_BILIBILI)
+
+
 def label_of_product(info: Optional[dict]) -> str:
     """产品展示名（给界面用）。"""
     if not info:
@@ -647,6 +671,8 @@ def label_of_product(info: Optional[dict]) -> str:
         return "公众号视频版（不分档）"
     if p == PRODUCT_DOUYIN:
         return "抖音批量下载版（不分档）"
+    if p == PRODUCT_BILIBILI:
+        return "B 站视频下载版（不分档）"
     return label_of_tier(info.get("tier") or 0)
 
 
@@ -681,6 +707,20 @@ def selftest() -> list:
     code = make_code(1000, days=365)
     info = verify_code(code)
     out.append(("有效期解析", bool(info) and info["days"] == 360, f"{info}"))
+    # ★ v3.3.0：B 站产品线往返 + 产品互斥
+    _bcode = make_code(0, product=PRODUCT_BILIBILI)
+    _binfo = verify_code(_bcode)
+    out.append(("B 站码往返",
+                bool(_binfo) and _binfo["product"] == PRODUCT_BILIBILI
+                and _binfo["tier"] == 0,
+                f"{_bcode} → {_binfo}"))
+    out.append(("B 站码不当视频号",
+                not has_feature(_binfo, PRODUCT_VIDEO)
+                and not has_feature(_binfo, PRODUCT_DOUYIN),
+                ""))
+    out.append(("视频号码不含 B 站",
+                not has_feature(verify_code(make_code(500)), PRODUCT_BILIBILI),
+                ""))
     # 篡改档位字符 → 必须失败
     bad = code[:-1] + ("A" if code[-1] != "A" else "B")
     out.append(("篡改末位被拒", verify_code(bad) is None, bad))

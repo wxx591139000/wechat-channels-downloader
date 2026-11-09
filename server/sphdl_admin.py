@@ -58,6 +58,11 @@ MSG_V5 = b"SPHDLv5"          # ★ v2.6.0：能力位码型
 PRODUCT_VIDEO, PRODUCT_MP = 1, 2
 # ★ v2.6.0：抖音独立产品线 + 点赞增强能力位
 PRODUCT_DOUYIN = 3
+# ★ v3.3.0：B 站独立产品线（客户要求「B 站也做成单独授权卖」）
+PRODUCT_BILI = 4
+# ★ 不分档的产品：tier 固定 0。新增产品必须加进来，
+#   否则会按视频号去查档位表，静默变成 0 档。
+PRODUCTS_NO_TIER = (PRODUCT_MP, PRODUCT_DOUYIN, PRODUCT_BILI)
 V5 = 5                       # ver=5：带能力位（caps）的码型
 CAP_LIKE_STATS = 1 << 0      # 点赞增强包
 CAP_LABELS = {CAP_LIKE_STATS: "点赞增强包"}
@@ -65,7 +70,12 @@ TIER_TO_CODE = {500: 1, 1000: 2, 2000: 3, 20000: 4}
 CODE_TO_TIER = {v: k for k, v in TIER_TO_CODE.items()}
 TIER_LABEL = {500: "轻量（500 条）", 1000: "标准（1000 条）",
               2000: "旗舰（2000 条）", 20000: "至尊（2 万条）"}
-PRODUCT_LABEL = {PRODUCT_VIDEO: "视频号下载", PRODUCT_MP: "公众号文章视频"}
+PRODUCT_LABEL = {PRODUCT_VIDEO: "视频号下载", PRODUCT_MP: "公众号文章视频",
+                 PRODUCT_DOUYIN: "抖音批量下载", PRODUCT_BILI: "B 站视频下载"}
+# 不分档产品的展示名（台账 tier_label / 列表标签共用，别再各写一份）
+NO_TIER_LABEL = {PRODUCT_MP: "公众号视频版（不分档）",
+                 PRODUCT_DOUYIN: "抖音批量下载（不分档）",
+                 PRODUCT_BILI: "B 站视频下载（不分档）"}
 
 SESSION = {}          # sid -> 过期时间戳
 SESSION_TTL = 12 * 3600
@@ -114,6 +124,8 @@ def code_label(tier: int, product: int, caps: int = 0,
     """
     if product == PRODUCT_DOUYIN:
         return "抖音批量下载授权码："
+    if product == PRODUCT_BILI:
+        return "B 站视频下载授权码："
     if product == PRODUCT_MP:
         return "公众号视频授权码："
     # 视频号：档位 + 台数
@@ -1059,6 +1071,7 @@ class H(BaseHTTPRequestHandler):
 <option value="1">视频号下载（4 档）</option>
 <option value="2">公众号文章视频（不分档）</option>
 <option value="3">抖音批量下载（不分档）</option>
+<option value="4">B 站视频下载（不分档）</option>
 </select>
 <label>增值功能（可多选，★会生成 ver=5 码）</label>
 <label class="capbox">
@@ -1101,7 +1114,7 @@ class H(BaseHTTPRequestHandler):
         try:
             product = int(form.get("product") or PRODUCT_VIDEO)
             tier = int(form.get("tier") or 20000)
-            if product in (PRODUCT_MP, PRODUCT_DOUYIN):
+            if product in PRODUCTS_NO_TIER:
                 tier = 0
             dev = form.get("device", "").strip()
             md_raw = (form.get("max_devices") or "").strip()
@@ -1130,8 +1143,7 @@ class H(BaseHTTPRequestHandler):
                 TIER_LABEL.get(tier, "视频号")
                 if product == PRODUCT_VIDEO and not caps
                 else ("点赞增强包" if caps
-                      else ("抖音批量下载" if product == PRODUCT_DOUYIN
-                            else "公众号视频版（不分档）"))),
+                      else NO_TIER_LABEL.get(product, "其它产品（不分档）"))),
             "caps": caps,
             "product": product,
             "days": 0,
@@ -1173,8 +1185,11 @@ class H(BaseHTTPRequestHandler):
                 tags.append("<span class='tag green'>绑定版</span>")
             if r.get("max_devices"):
                 tags.append(f"<span class='tag'>{r['max_devices']} 台</span>")
-            if r.get("product") == PRODUCT_MP:
-                tags.append("<span class='tag'>公众号</span>")
+            # ★ v3.3.0：产品标签改成按表查 —— 原来只判公众号，
+            #   抖音和 B 站码在列表里没有任何标识，翻台账分不清卖的哪条线。
+            _pl = PRODUCT_LABEL.get(int(r.get("product") or PRODUCT_VIDEO), "")
+            if int(r.get("product") or PRODUCT_VIDEO) != PRODUCT_VIDEO:
+                tags.append(f"<span class='tag'>{html.escape(_pl)}</span>")
             if r.get("renewed_from"):
                 tags.append("<span class='tag green'>已升级</span>")
             # ★ v2.1.9：显示**实际激活**的设备（来自上报库，不是发码时手填的）
@@ -1337,8 +1352,9 @@ class H(BaseHTTPRequestHandler):
         opts = "".join(
             f"<option value='{t}'{' selected' if (prod == PRODUCT_VIDEO and t == cur_tier) else ''}>"
             f"{lbl}</option>" for t, lbl in TIER_LABEL.items())
-        if prod == PRODUCT_MP:
-            opts = "<option value='0' selected>公众号视频版（不分档）</option>"
+        if prod in NO_TIER_LABEL:
+            opts = (f"<option value='0' selected>"
+                    f"{html.escape(NO_TIER_LABEL[prod])}</option>")
         # ★ 台数下拉必须**准确预选客户原来的台数**，否则升级会静默放宽限制。
         #
         #   事故（2026-10-17）：dan 原本是 ver=4「限 1 台」，升级 20000 后变成
@@ -1574,7 +1590,7 @@ class H(BaseHTTPRequestHandler):
         try:
             prod = int(old.get("product") or PRODUCT_VIDEO)
             tier = int(form.get("tier") or 0)
-            if prod == PRODUCT_MP:
+            if prod in PRODUCTS_NO_TIER:
                 tier = 0
             md_raw = (form.get("max_devices") or "").strip()
             dev = (old.get("device") or "").strip()   # 绑定版沿用原绑定
@@ -1599,9 +1615,11 @@ class H(BaseHTTPRequestHandler):
         rec = {
             "code": new_code,
             "tier": tier,
-            "tier_label": (TIER_LABEL.get(tier, "公众号视频版（不分档）")
+            # ★ v3.3.0 顺带修：原来视频号的兜底写成「公众号视频版（不分档）」，
+            #   档位不在表里时会把一条视频号码标成公众号产品。
+            "tier_label": (TIER_LABEL.get(tier, "视频号")
                            if prod == PRODUCT_VIDEO
-                           else "公众号视频版（不分档）"),
+                           else NO_TIER_LABEL.get(prod, "其它产品（不分档）")),
             "product": prod,
             "days": 0,
             "customer": old.get("customer", ""),      # ★ 沿用

@@ -1331,10 +1331,31 @@ class App:
         n = self.store.max_records if n is None else int(n)
         return config.name_of(n)
 
+    def _has_other_product(self) -> bool:
+        """是否激活了视频号以外的产品线（公众号/抖音/B 站）。
+
+        ★ v3.3.0：只买 B 站码的客户，视频号确实是「未授权」，
+          但直接写「未授权」会让他以为**整单没生效**。
+          所以显示档位时要加限定词「视频号未授权」。
+        """
+        for p in (lic.PRODUCT_MP_ARTICLE, lic.PRODUCT_DOUYIN,
+                  lic.PRODUCT_BILIBILI):
+            try:
+                if self._license_info(p):
+                    return True
+            except Exception as _e:                  # noqa: BLE001
+                logger.warn(f"其它产品线授权判定失败（{p}）：{_e}")
+        return False
+
     def _tier_label_of(self, n=None) -> str:
         """档位完整展示名（如「标准（1000 条）」）。"""
         n = self.store.max_records if n is None else int(n)
-        return config.label_of(n)
+        base = config.label_of(n)
+        # n<=0 = 视频号未授权。已经买了别的产品时，限定成「视频号未授权」，
+        # 免得客户以为"码没激活"（v3.3.0）
+        if n <= 0 and self._has_other_product():
+            return "视频号" + base
+        return base
 
     def _license_info(self, product: int = None):
         """授权解析（v2.0.19：按产品线）。
@@ -1357,8 +1378,11 @@ class App:
             if info and int(info.get("product") or 0) == int(product):
                 return self._check_bound(info)
             return None
-        # 无指定产品：优先视频号，其次公众号
-        for p in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE):
+        # 无指定产品：按「信息量」优先取，视频号 → 公众号 → 抖音 → B 站
+        # ★ v3.3.0：补上抖音/B 站 —— 只买了 B 站码的客户，通用展示区
+        #   原本会显示「未授权」，让人以为码没激活成功。
+        for p in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE,
+                  lic.PRODUCT_DOUYIN, lic.PRODUCT_BILIBILI):
             code = self.cfg.code_of(p)
             info = lic.verify_code(code) if code else None
             if info:
@@ -1428,6 +1452,13 @@ class App:
             return "未授权 · 默认档"
         if self._license_expired():
             return "授权已过期 · 默认档"
+        # ★ v3.3.0：只有 B 站/抖音码时，档位仍是默认档，但人确实付过钱，
+        #   写「已授权」会让人误会视频号也开通了 → 明确说清是别的产品
+        p = int(info.get("product") or 0)
+        if p in (lic.PRODUCT_BILIBILI, lic.PRODUCT_DOUYIN,
+                 lic.PRODUCT_MP_ARTICLE):
+            name = lic.PRODUCT_LABELS.get(p, "其它产品")
+            return f"{name}已授权 · 视频号默认档"
         if info["days"]:
             left = lic.days_left(info["days"], self.cfg.license_activated_at)
             return f"已授权 · 剩余 {left} 天"
@@ -1528,14 +1559,14 @@ class App:
                 self.cfg.license_activated_at.pop(int(product), None)
             except Exception:
                 pass
-            name = ("公众号视频版" if int(product) == lic.PRODUCT_MP_ARTICLE
-                    else "视频号下载")
+            name = lic.PRODUCT_LABELS.get(int(product), f"产品{product}")
             self.push_log("warn", f"🗑 已清除「{name}」授权")
         self.cfg.save()
         self._apply_tier(self._resolve_tier(), reason="清除授权")
         try:
             self._refresh_mp_button()
             self._refresh_dy_button()
+            self._refresh_bili_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -1587,7 +1618,7 @@ class App:
         _has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
         # ★ 抖音、点赞增强包：能力位/产品线可能存在于**另一个码**里
         #   （方案 A 叠加售卖），所以要遍历所有已激活的码，不能只看 info。
-        _has_dy = _has_like = False
+        _has_dy = _has_like = _has_bili = False
         try:
             for _c in self._all_license_codes():
                 _i = lic.verify_code(_c)
@@ -1595,10 +1626,12 @@ class App:
                     continue
                 if lic.is_douyin_product(_i):
                     _has_dy = True
+                if lic.is_bilibili_product(_i):
+                    _has_bili = True
                 if lic.has_capability(_i, lic.CAP_LIKE_STATS):
                     _has_like = True
-        except Exception:
-            pass
+        except Exception as _e:                      # noqa: BLE001
+            logger.warn(f"功能授权列表遍历失败（按未授权显示）：{_e}")
         feat_row = ttk.Frame(pad)
         feat_row.grid(row=1, column=2, columnspan=2, sticky="w",
                       padx=(12, 0), pady=(0, 2))
@@ -1641,6 +1674,16 @@ class App:
               "支持：粘贴链接批量下载、1080P 音视频合一、\n"
               "      登录后可提高限额、不需要装证书。\n\n"
               "如需使用，请联系发布方购买「抖音批量下载版」授权码。")
+        # ★ v3.3.0：B 站独立产品（客户要求「B 站也单独卖」）
+        _feat("B站", _has_bili,
+              "B 站视频下载（独立授权）\n"
+              "未授权请联系发布方购买「B 站视频下载」授权码",
+              "「B 站视频下载」是独立产品，需专用授权码\n"
+              "（视频号码不能下 B 站，B 站码也不能抓视频号）。\n\n"
+              "支持：粘贴 BV 号/链接/b23.tv 短链/分享文案，\n"
+              "      单条 + 多P 合集、断点续传、不需要装证书。\n"
+              "免登录最高 720P。\n\n"
+              "如需使用，请联系发布方购买「B 站视频下载」授权码。")
         _feat("点赞增强包", _has_like,
               "点赞/转发/推荐数展示 + 按点赞排序（增值功能）\n"
               "未授权请联系发布方购买「点赞增强包」授权码\n"
@@ -1827,7 +1870,6 @@ class App:
             return False
 
         prod = int(info.get("product") or lic.PRODUCT_VIDEO)
-        is_mp = (prod == lic.PRODUCT_MP_ARTICLE)
 
         # ★ v2.0.19 设备绑定校验：绑定码必须在本机激活
         #   传分量列表 → 支持"4 项取 2"，抗硬件变动（换硬盘/重装系统仍可用）
@@ -1892,32 +1934,41 @@ class App:
         self.cfg.save()
 
         # 日志：按产品线分别说清楚，避免客户以为自己买了视频号却没生效
-        name = ("公众号视频版" if is_mp
-                else config.label_of(info["tier"]))
-        other = lic.PRODUCT_VIDEO if is_mp else lic.PRODUCT_MP_ARTICLE
+        # ★ v3.3.0：不分档的产品用产品名（B 站/抖音/公众号），
+        #   视频号仍用档位名 —— 别把「轻量版（500 条）」换成「视频号下载」，
+        #   客户要靠档位名确认买的是哪一档。
+        name = (config.label_of(info["tier"])
+                if prod == lic.PRODUCT_VIDEO
+                else lic.PRODUCT_LABELS.get(prod, "未知产品"))
+        # 其它产品线已经激活的，明确告诉客户「没被顶掉」
+        # ★ v3.3.0：原来只判「另一条」= 视频号/公众号二选一，
+        #   现在有 4 条产品线，改成把剩余的都说出来。
+        _others = [p for p in lic.PRODUCT_LABELS
+                   if p != prod and self.cfg.code_of(p)]
         other_txt = ""
-        if self.cfg.code_of(other):
-            other_name = ("公众号视频版" if other == lic.PRODUCT_MP_ARTICLE
-                          else "视频号下载")
-            other_txt = f"（另一产品「{other_name}」的授权保持不变）"
+        if _others:
+            _names = "、".join(lic.PRODUCT_LABELS[p] for p in _others)
+            other_txt = f"（其它已激活授权保持不变：{_names}）"
         self.push_log("ok",
                       f"🔑 授权成功：{name}，"
                       + ("永久有效" if not info["days"]
                          else f"{info['days']} 天（自首次激活）")
                       + other_txt)
 
-        # 档位统一由 _resolve_tier() 决定（内部已处理公众号产品）：
+        # 档位统一由 _resolve_tier() 决定（内部已处理不分档产品）：
         #   · 视频号码 → 用码里的档位
-        #   · 公众号码 → 回落到默认档，**绝不设成 0**
-        #     （公众号 tier=0，误用会把上限设成 0 —— 客户实测过的 bug）
+        #   · 公众号/抖音/B站码 → 回落到默认档，**绝不设成 0**
+        #     （这类码 tier=0，误用会把上限设成 0 —— 客户实测过的 bug）
         self._apply_tier(self._resolve_tier(),
-                         reason=("公众号产品（不影响视频号档位）" if is_mp
+                         reason=("非视频号产品（不影响视频号档位）"
+                                 if prod != lic.PRODUCT_VIDEO
                                  else "授权码解锁"))
 
-        # 换码后刷新公众号按钮（可能新解锁/失去该功能）+ 顶部防盗横幅
+        # 换码后刷新各功能按钮（可能新解锁/失去该功能）+ 顶部防盗横幅
         try:
             self._refresh_mp_button()
             self._refresh_dy_button()
+            self._refresh_bili_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -2537,8 +2588,21 @@ class App:
             if mp:
                 parts.append("公众号 永久" if not mp.get("days")
                              else f"公众号 {mp['days']}天")
+            # ★ v3.3.0：抖音 / B 站同样是独立产品线，买了就必须在这里体现
+            #   —— 否则只买 B 站码的客户，顶部一直写「未授权」，
+            #   他会以为码没激活成功（截图为证，确实如此）。
+            for _p, _short in ((lic.PRODUCT_DOUYIN, "抖音"),
+                               (lic.PRODUCT_BILIBILI, "B 站")):
+                _i = self._license_info(_p)
+                if _i:
+                    parts.append(_short + (" 永久" if not _i.get("days")
+                                           else f" {_i['days']}天"))
+            _vc_ok = bool(vc) and not self._license_expired()
             if parts:
                 txt = "✅ 已授权：" + " ｜ ".join(parts)
+                # 视频号没开通时要说清：上面列的是别的产品，别让人误以为能抓视频号
+                if not _vc_ok:
+                    txt += "（视频号未授权）"
                 fg = "#a5f3a0"
             else:
                 txt = "未授权 · 请点「🔑 授权管理」激活"
@@ -3338,18 +3402,17 @@ class App:
                  "  · 下载的是 1080P 音视频合一的 MP4\n\n"
                  "用法：粘贴链接 → 解析 → 勾选 → 下载\n"
                  "（每条之间自动间隔 2~5 秒，避免抖音限流）")
-        # ★ v3.2.0：B 站下载（单条 + 多P）。跟着视频号授权走 ——
-        #   B 站不需要证书/代理，属于附加能力，不单独发码（不碰已发出的码）。
+        # ★ v3.2.0 新增 / v3.3.0 改独立授权：B 站下载（单条 + 多P）
         self.btn_bili = ttk.Button(_row1, text="🎬 B 站下载 🔒", width=13,
                                    style="BiliLocked.TButton",
                                    command=self._on_bilibili)
         self.btn_bili.pack(side="left", padx=(6, 2))
         self._tt(self.btn_bili,
-                 "【B 站视频下载】单条链接 + 多P合集。\n"
-                 "随「视频号」授权一起开通，不需要另买。\n\n"
+                 "【B 站视频下载】**独立产品**，需专用授权码。\n"
+                 "未授权时点它会提示购买方式。\n\n"
                  "特点：\n"
                  "  · 不需要装证书（B 站接口直连，不走代理）\n"
-                 "  · 多P 视频会按分P 各列一行，勾哪个下哪个\n"
+                 "  · 单条链接 + 多P 合集，按分P 各列一行，勾哪个下哪个\n"
                  "  · 断点续传：下到一半关掉，下次接着下\n"
                  "  · 免登录最高 720P；1080P+/4K 需登录态（本版没做）\n\n"
                  "用法：粘贴链接（BV 号 / 链接 / b23.tv 短链）→ 解析 → 勾选 → 下载")
@@ -4551,7 +4614,9 @@ class App:
         codes = [c for c in (self.cfg.license_codes or {}).values() if c]
         if self.cfg.license_code:
             codes.append(self.cfg.license_code)
-        for prod in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE):
+        # ★ v3.3.0：遍历改成「所有已知产品线」，别再手写 1/2 ——
+        #   漏掉新加的产品就等于「B 站码被作废了但本地还在用」。
+        for prod in lic.PRODUCT_LABELS:
             try:
                 c = self.cfg.code_of(prod)
                 if c:
@@ -4606,6 +4671,7 @@ class App:
             try:
                 self._refresh_mp_button()
                 self._refresh_dy_button()
+                self._refresh_bili_button()
                 self._like_stats_ok = self._has_like_stats()
                 self._refresh_like_column()
                 self._refresh_watermark()
@@ -5529,20 +5595,23 @@ class App:
             pass
         return has_dy
 
-    # ────────── B 站下载（v3.2.0）──────────
+    # ────────── B 站下载（v3.2.0 / 授权改独立 v3.3.0）──────────
     def _refresh_bili_button(self) -> bool:
         """刷新「🎬 B 站下载」按钮外观，返回是否可用。
 
-        ★ v3.2.0 授权口径：**跟着视频号授权走**，不单独发码。
-          理由：B 站走接口直连，不用证书、不用代理，属于「同一份授权下的
-          额外入口」；单独开码位要动 license.py 和发码工具，会让**已经发
-          出去的码**语义变复杂，风险不值得。
-          以后若要单卖，把这里换成 is_bili_product(...) 即可，界面不用动。
+        ★ v3.3.0 授权口径：**独立产品线（PRODUCT_BILIBILI=4），单独发码**。
+          客户原话：「视频号授权，B 站授权单独卖」。
+          v3.2.0 曾是「随视频号授权免费开通」，已按客户要求收回；
+          能直接收回的前提是**那版没发给过客户**（客户确认）。
+
+        未授权 → 显示 🔒 但**仍可点**（点了给购买引导，比禁用更利于成交
+        —— 与抖音/公众号按钮一致）。
         """
         if getattr(self, "btn_bili", None) is None:
             return False
         try:
-            has_bili = self._license_info(lic.PRODUCT_VIDEO) is not None
+            has_bili = lic.is_bilibili_product(
+                self._license_info(lic.PRODUCT_BILIBILI))
         except Exception as e:                      # noqa: BLE001
             logger.warn(f"B 站按钮授权判定失败（按未授权显示）：{e}")
             has_bili = False
@@ -5559,18 +5628,23 @@ class App:
         return has_bili
 
     def _on_bilibili(self):
-        """「🎬 B 站下载」入口。未授权给说明，已授权开窗口（单例复用）。"""
+        """「🎬 B 站下载」入口。未授权给购买引导，已授权开窗口（单例复用）。"""
         if not self._refresh_bili_button():
-            messagebox.showinfo(
-                "B 站下载（需要视频号授权）",
-                "「B 站视频下载」随**视频号授权**一起开通，不单独收费。\n\n"
-                "特点：\n"
-                "  · 不需要安装证书（B 站接口直连，不走代理）\n"
-                "  · 单条链接 + 多P 合集，按分P 勾选下载\n"
-                "  · 断点续传，关掉工具下次接着下\n"
-                "  · 免登录最高 720P\n\n"
-                "激活视频号授权码后，此按钮自动变成可点状态。",
-                parent=self.root)
+            if messagebox.askyesno(
+                    "B 站下载（未授权）",
+                    "「B 站视频下载」是**独立产品**，需要专用授权码\n"
+                    "（视频号授权码不含 B 站，B 站码也不能抓视频号）。\n\n"
+                    "特点：\n"
+                    "  · 不需要安装证书（B 站接口直连，不走代理）\n"
+                    "  · 单条链接 + 多P 合集，按分P 勾选下载\n"
+                    "  · 断点续传，关掉工具下次接着下\n"
+                    "  · 免登录最高 720P\n\n"
+                    "如需使用，**请联系发布方购买「B 站视频下载」授权码**，\n"
+                    "拿到后在「🔑 授权管理」粘贴激活即可（立即生效，"
+                    "可与其它授权码共存）。\n\n"
+                    "要去「🔑 授权管理」查看/输入授权码吗？",
+                    parent=self.root):
+                self._on_license_input()
             return
         try:
             w = getattr(self, "_bili_win", None)
