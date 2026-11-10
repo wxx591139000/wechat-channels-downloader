@@ -453,6 +453,95 @@ def run_sniff(args):
             logger.ok("系统代理已恢复")
 
 
+def run_selftest_xiaoe(args) -> int:
+    """小鹅通自检：证明模块真被打进包 + 纯函数正确（v3.4.0）。
+
+    ★ 为什么必须有这个自检：
+      v3.4.0 新引入 `cryptography`（AES-128 解密）。PyInstaller 一旦漏收它的
+      OpenSSL DLL，**源码跑得好好的、打包出来的 exe 一解密就炸**，而且报错
+      位置在几百个分片之后，客户看到的是「下到一半失败」。
+      这个自检把「解密库可用」提前到发布前一行命令验证。
+    """
+    fails = []
+
+    def ck(name, ok, detail=""):
+        print(("  [PASS] " if ok else "  [FAIL] ") + name
+              + (f"   [{detail}]" if detail else ""))
+        if not ok:
+            fails.append(name)
+        return ok
+
+    print("小鹅通自检（v3.4.0）")
+
+    # ① 解密库
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        import cryptography
+        ck("cryptography 可用", True, getattr(cryptography, "__version__", "?"))
+        # 真做一次 AES-128-CBC 加解密往返（只 import 成功不代表 DLL 能用）
+        key = bytes(range(16))
+        iv = b"\x00" * 16
+        plain = b"SPHDLv340-AES16!"    # 必须正好 16 字节（CBC 块长）
+        enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        ct = enc.update(plain) + enc.finalize()
+        dec = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        back = dec.update(ct) + dec.finalize()
+        ck("AES-128 加解密往返", back == plain, back.hex()[:16])
+    except Exception as e:                     # noqa: BLE001
+        ck("AES-128 加解密往返", False, f"{type(e).__name__}: {e}")
+
+    # ② 模块与控制台编码
+    try:
+        from sphdl import xiaoe
+        ck("xiaoe 模块已打包", True)
+    except Exception as e:                     # noqa: BLE001
+        ck("xiaoe 模块已打包", False, f"{type(e).__name__}: {e}")
+        return 1
+
+    # ★ 窗口模块也要能 import 成功：selftest 不启动 GUI，但至少能证明
+    #   PyInstaller 没漏收这两个文件（漏了的话点按钮才崩，客户先看到报错）。
+    for mod in ("sphdl.xiaoe_ui", "sphdl.xiaoe_store"):
+        try:
+            __import__(mod)
+            ck(f"{mod.split('.')[-1]} 已打包", True)
+        except Exception as e:                 # noqa: BLE001
+            ck(f"{mod.split('.')[-1]} 已打包", False,
+               f"{type(e).__name__}: {e}")
+
+    t = xiaoe.parse_target(
+        "https://appkxt2fvhl1688.h5.xiaoeknow.com/p/course/video/v_abc12345"
+        "?product_id=p_def67890")
+    ck("链接解析", t.get("kind") == "video" and t.get("appid") == "appkxt2fvhl1688"
+       and t.get("resource_id") == "v_abc12345", str(t))
+
+    pl = ("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,"
+          "URI=\"https://k/x\",IV=0x00000000000000000000000000000000\n"
+          "#EXTINF:2.0,\na_0.ts\n#EXT-X-ENDLIST\n")
+    info = xiaoe.parse_m3u8(pl, "https://c/d/v.m3u8")
+    ck("m3u8 解析（加密/分片/IV）",
+       info["encrypted"] and len(info["segments"]) == 1 and len(info["iv"]) == 16,
+       str(len(info["segments"])))
+
+    # ③ ffmpeg（非阻断：没有也能下，只是留 .ts）
+    exe = xiaoe.find_ffmpeg()
+    print(f"  [INFO] ffmpeg: {exe or '未找到（下载后保留 .ts，可正常播放）'}")
+
+    # ④ 联网解析（--online 才跑，避免发布机没网时误报）
+    if getattr(args, "online", False):
+        try:
+            res = xiaoe.fetch_video(xiaoe.parse_target(
+                "https://appkxt2fvhl1688.h5.xiaoeknow.com/p/course/video/"
+                "v_64b4b3cce4b007b201a6d98f"
+                "?product_id=p_62d7b05de4b00a4f372892372"))
+            ck("联网解析真实课程", bool(res.get("ok")),
+               (res.get("video").title if res.get("ok") else res.get("error")))
+        except Exception as e:                 # noqa: BLE001
+            ck("联网解析真实课程", False, f"{type(e).__name__}: {e}")
+
+    print("\n" + ("全部通过" if not fails else f"失败 {len(fails)} 项：{fails}"))
+    return 0 if not fails else 1
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="微信视频号下载器（嗅探 + 下载 + Isaac64 解密）",
@@ -489,6 +578,9 @@ def main():
                     help="抖音模块自检：playwright 能否驱动系统浏览器")
     ap.add_argument("--selftest-telemetry", action="store_true",
                     help="埋点自检：显示总开关状态 + 设备指纹采集（不发网络请求）")
+    ap.add_argument("--selftest-xiaoe", action="store_true",
+                    help="小鹅通自检：验证模块已打进包 + 纯函数正确"
+                         "（联网解析需配合 --online）")
     ap.add_argument("-v", "--verbose", action="store_true", help="调试输出")
     args = ap.parse_args()
 
@@ -563,6 +655,8 @@ def main():
         run_selftest_threaded(args)
     elif args.selftest_license:
         run_selftest_license(args)
+    elif getattr(args, "selftest_xiaoe", False):
+        sys.exit(run_selftest_xiaoe(args))
     elif args.paste or args.paste_text:
         run_paste(args)
     else:

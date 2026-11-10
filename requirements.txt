@@ -2,3 +2,4 @@
 # 建议使用 Python 3.10+
 mitmproxy>=10.0
 requests>=2.28
+cryptography>=42        # v3.4.0 小鹅通 HLS AES-128 解密

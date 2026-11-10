@@ -22,7 +22,7 @@ sec = (ROOT / ".license_secret").read_text(encoding="utf-8").strip()
     '"""tmp"""\nK = %r\n' % lic.obfuscate(bytes.fromhex(sec)), encoding="utf-8")
 import importlib  # noqa: E402
 importlib.reload(lic)
-CODE_FULL = lic.make_code(20000, flags=lic.FLAG_ALL)
+CODE_FULL = lic.make_code(0, product=lic.PRODUCT_MP_ARTICLE)
 
 import tkinter as tk  # noqa: E402
 r = tk.Tk()

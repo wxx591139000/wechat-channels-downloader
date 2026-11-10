@@ -592,43 +592,50 @@ class BilibiliWindow:
         out_dir = self._dir()
 
         def _worker():
+            # ★ P42-②：异常必须落日志 + finally 无条件补发结束事件，
+            #   否则线程静默死亡 → `_busy` 永远 True → 界面永久卡「下载中」。
             from .bilibili import download_part
 
             done = failed = 0
             total = len(picked)
-            for n, (idx, v, p) in enumerate(picked, 1):
-                if self._stop:
-                    break
-                self.app.ui_q.put(("bili_dl_start", idx, n, total))
-                last_put = [0.0]
+            try:
+                for n, (idx, v, p) in enumerate(picked, 1):
+                    if self._stop:
+                        break
+                    self.app.ui_q.put(("bili_dl_start", idx, n, total))
+                    last_put = [0.0]
 
-                def _prog(got, tot, _idx=idx, _n=n):
-                    # 节流：256KB 一块，49MB 文件会有 200 次回调，
-                    # 不节流会把主线程 UI 队列塞满
-                    now = time.time()
-                    if now - last_put[0] < 0.2:
-                        return
-                    last_put[0] = now
-                    self.app.ui_q.put(("bili_dl_prog", _idx, got, tot, _n, total))
+                    def _prog(got, tot, _idx=idx, _n=n):
+                        # 节流：256KB 一块，49MB 文件会有 200 次回调，
+                        # 不节流会把主线程 UI 队列塞满
+                        now = time.time()
+                        if now - last_put[0] < 0.2:
+                            return
+                        last_put[0] = now
+                        self.app.ui_q.put(("bili_dl_prog", _idx, got, tot, _n, total))
 
-                res = download_part(
-                    v, p, out_dir,
-                    on_progress=_prog,
-                    should_stop=lambda: self._stop,
-                    on_log=lambda lv, m: self._log(lv, m),
-                    gap=0.0,                 # 间隔统一在下面控制，避免双重等待
-                )
-                if res.get("ok"):
-                    done += 1
-                elif "已停止" not in (res.get("error") or ""):
-                    failed += 1
-                self.app.ui_q.put(("bili_dl_done", idx, res, n, total))
-                if self._stop:
-                    break
-                if n < total and gap:
-                    # 拟人间隔：随机抖动，别做成匀速机器
-                    time.sleep(gap * random.uniform(0.8, 1.3))
-            self.app.ui_q.put(("bili_all_done", done, failed, total))
+                    res = download_part(
+                        v, p, out_dir,
+                        on_progress=_prog,
+                        should_stop=lambda: self._stop,
+                        on_log=lambda lv, m: self._log(lv, m),
+                        gap=0.0,             # 间隔统一在下面控制，避免双重等待
+                    )
+                    if res.get("ok"):
+                        done += 1
+                    elif "已停止" not in (res.get("error") or ""):
+                        failed += 1
+                    self.app.ui_q.put(("bili_dl_done", idx, res, n, total))
+                    if self._stop:
+                        break
+                    if n < total and gap:
+                        # 拟人间隔：随机抖动，别做成匀速机器
+                        time.sleep(gap * random.uniform(0.8, 1.3))
+            except Exception as e:             # noqa: BLE001
+                logger.warn(f"B 站下载线程异常：{type(e).__name__}: {e}")
+                self._log("error", f"下载线程异常：{type(e).__name__}: {e}")
+            finally:
+                self.app.ui_q.put(("bili_all_done", done, failed, total))
 
         threading.Thread(target=_worker, daemon=True).start()
 

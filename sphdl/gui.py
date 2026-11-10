@@ -1332,14 +1332,16 @@ class App:
         return config.name_of(n)
 
     def _has_other_product(self) -> bool:
-        """是否激活了视频号以外的产品线（公众号/抖音/B 站）。
+        """是否激活了视频号以外的产品线（公众号/抖音/B 站/小鹅通…）。
 
         ★ v3.3.0：只买 B 站码的客户，视频号确实是「未授权」，
           但直接写「未授权」会让他以为**整单没生效**。
           所以显示档位时要加限定词「视频号未授权」。
+        ★ 遍历 lic.PRODUCT_LABELS（唯一事实源），新加产品线不用改这里。
         """
-        for p in (lic.PRODUCT_MP_ARTICLE, lic.PRODUCT_DOUYIN,
-                  lic.PRODUCT_BILIBILI):
+        for p in sorted(lic.PRODUCT_LABELS):
+            if int(p) == int(lic.PRODUCT_VIDEO):
+                continue
             try:
                 if self._license_info(p):
                     return True
@@ -1378,11 +1380,13 @@ class App:
             if info and int(info.get("product") or 0) == int(product):
                 return self._check_bound(info)
             return None
-        # 无指定产品：按「信息量」优先取，视频号 → 公众号 → 抖音 → B 站
+        # 无指定产品：按「信息量」优先取，视频号 → 公众号 → 抖音 → B 站 → 小鹅通
         # ★ v3.3.0：补上抖音/B 站 —— 只买了 B 站码的客户，通用展示区
         #   原本会显示「未授权」，让人以为码没激活成功。
-        for p in (lic.PRODUCT_VIDEO, lic.PRODUCT_MP_ARTICLE,
-                  lic.PRODUCT_DOUYIN, lic.PRODUCT_BILIBILI):
+        # ★ v3.4.0（P59-⑤ 又重演了一次）：加小鹅通时这行又漏了。
+        #   现在不再手写元组，直接遍历 lic.PRODUCT_LABELS（唯一事实源），
+        #   以后再加产品线（如 ClassIn）**不需要**回来改这里。
+        for p in sorted(lic.PRODUCT_LABELS):
             code = self.cfg.code_of(p)
             info = lic.verify_code(code) if code else None
             if info:
@@ -1456,7 +1460,7 @@ class App:
         #   写「已授权」会让人误会视频号也开通了 → 明确说清是别的产品
         p = int(info.get("product") or 0)
         if p in (lic.PRODUCT_BILIBILI, lic.PRODUCT_DOUYIN,
-                 lic.PRODUCT_MP_ARTICLE):
+                 lic.PRODUCT_MP_ARTICLE, lic.PRODUCT_XIAOE):
             name = lic.PRODUCT_LABELS.get(p, "其它产品")
             return f"{name}已授权 · 视频号默认档"
         if info["days"]:
@@ -1567,6 +1571,7 @@ class App:
             self._refresh_mp_button()
             self._refresh_dy_button()
             self._refresh_bili_button()
+            self._refresh_xiaoe_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -1618,7 +1623,7 @@ class App:
         _has_mp = lic.has_feature(info, lic.FLAG_MP_ARTICLE_VIDEO)
         # ★ 抖音、点赞增强包：能力位/产品线可能存在于**另一个码**里
         #   （方案 A 叠加售卖），所以要遍历所有已激活的码，不能只看 info。
-        _has_dy = _has_like = _has_bili = False
+        _has_dy = _has_like = _has_bili = _has_x = False
         try:
             for _c in self._all_license_codes():
                 _i = lic.verify_code(_c)
@@ -1628,6 +1633,8 @@ class App:
                     _has_dy = True
                 if lic.is_bilibili_product(_i):
                     _has_bili = True
+                if lic.is_xiaoe_product(_i):
+                    _has_x = True
                 if lic.has_capability(_i, lic.CAP_LIKE_STATS):
                     _has_like = True
         except Exception as _e:                      # noqa: BLE001
@@ -1684,6 +1691,16 @@ class App:
               "      单条 + 多P 合集、断点续传、不需要装证书。\n"
               "免登录最高 720P。\n\n"
               "如需使用，请联系发布方购买「B 站视频下载」授权码。")
+        # ★ v3.4.0：小鹅通独立产品（客户要求「每个平台单独授权」）
+        _feat("小鹅通", _has_x,
+              "小鹅通课程下载（独立授权）\n"
+              "未授权请联系发布方购买「小鹅通课程下载」授权码",
+              "「小鹅通课程下载」是独立产品，需专用授权码\n"
+              "（视频号码不含小鹅通，小鹅通码也抓不了视频号）。\n\n"
+              "支持：粘贴课程视频链接（免费课免登录）、\n"
+              "      多节批量、8 路并发下载、分片断点续传、\n"
+              "      自动解密 AES-128 并转成 MP4。\n\n"
+              "如需使用，请联系发布方购买「小鹅通课程下载」授权码。")
         _feat("点赞增强包", _has_like,
               "点赞/转发/推荐数展示 + 按点赞排序（增值功能）\n"
               "未授权请联系发布方购买「点赞增强包」授权码\n"
@@ -1969,6 +1986,7 @@ class App:
             self._refresh_mp_button()
             self._refresh_dy_button()
             self._refresh_bili_button()
+            self._refresh_xiaoe_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -2592,7 +2610,8 @@ class App:
             #   —— 否则只买 B 站码的客户，顶部一直写「未授权」，
             #   他会以为码没激活成功（截图为证，确实如此）。
             for _p, _short in ((lic.PRODUCT_DOUYIN, "抖音"),
-                               (lic.PRODUCT_BILIBILI, "B 站")):
+                               (lic.PRODUCT_BILIBILI, "B 站"),
+                               (lic.PRODUCT_XIAOE, "小鹅通")):
                 _i = self._license_info(_p)
                 if _i:
                     parts.append(_short + (" 永久" if not _i.get("days")
@@ -3206,6 +3225,13 @@ class App:
         #   于是「下载目录 / 授权管理」被压成 1×1 像素（完全看不见）。
         _row1 = ttk.Frame(capf)
         _row1.pack(fill="x")
+        # ★ v3.4.0：平台入口单独占一行。
+        #   原来 4 个平台按钮挤在 _row1 右侧，加第 5 个（小鹅通）时
+        #   pack 直接把新按钮挤出窗口 —— **不报错、就是看不见**
+        #   （真跑 exe 截图才发现，代码层面完全正常）。
+        #   拆行后语义也更清楚：上面一行是「抓取选项」，下面一行是「功能入口」。
+        _row_plat = ttk.Frame(capf)
+        _row_plat.pack(fill="x", pady=(4, 0))
 
         # 自动下载开关（v1.2.5）：开 = 新捕获立即自动入队下载；
         # 关（默认）= 捕获只进列表，用户选中后手动下载（原行为）
@@ -3342,6 +3368,21 @@ class App:
                          foreground="#78909c")
             st.map("BiliLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v3.4.0：小鹅通入口。品牌橙（比公众号的暖橙更深），
+            #   与「绿=主操作 / 青=抖音 / 粉=B 站 / 橙黄=授权」区分。
+            #   ⚠️ 必须**单独 configure 底色和字色**：上面那个 bordercolor
+            #   循环只改描边，不设 background/foreground —— 漏了这一步的
+            #   后果是「深橙描边 + 默认灰底 + 深灰字」，真跑 exe 截图才发现
+            #   （代码层面完全正常，不报错）。
+            st.configure("Xiaoe.TButton", background="#c2410c",
+                         foreground="#ffffff")
+            st.map("Xiaoe.TButton",
+                   background=[("active", "#ea580c"),
+                               ("pressed", "#9a3412")])
+            st.configure("XiaoeLocked.TButton", background="#eceff1",
+                         foreground="#78909c")
+            st.map("XiaoeLocked.TButton",
+                   background=[("active", "#e0e4e7")])
             # ★ v3.1.4 两个"要找得到"的按钮（客户：授权管理 / 打开文件夹
             #   太不起眼，一眼扫过去以为是普通文字）
             #   · 授权管理 = 权益/解锁路径 → 琥珀色（暖、亮，但避开绿色的
@@ -3371,6 +3412,8 @@ class App:
                                ("DyLocked.TButton", "#d3dae0"),
                                ("Bili.TButton", "#e45c84"),
                                ("BiliLocked.TButton", "#d3dae0"),
+                               ("Xiaoe.TButton", "#c2410c"),
+                               ("XiaoeLocked.TButton", "#d3dae0"),
                                ("License.TButton", "#f59e0b"),
                                ("Folder.TButton", "#93c5fd")):
                 try:
@@ -3383,13 +3426,13 @@ class App:
             #   客户报障时完全看不出原因（本次 FONT 未定义就是这样被吞的）。
             logger.warn(f"按钮样式配置失败（界面配色将退化为默认灰）: "
                         f"{_style_err}")
-        self.btn_mp = ttk.Button(_row1, text="📄 公众号视频", width=16,
+        self.btn_mp = ttk.Button(_row_plat, text="📄 公众号视频", width=16,
                                  style="MpLocked.TButton",
                                  command=self._on_mp_article)
-        self.btn_mp.pack(side="left", padx=(16, 2))
+        self.btn_mp.pack(side="left", padx=(2, 2))
         # ★ v2.4.0：抖音批量下载（方案 A：粘贴链接）
         # 抖音按钮：未授权显示 🔒（仍可点 → 给购买引导）
-        self.btn_dy = ttk.Button(_row1, text="🎵 抖音批量下载 🔒", width=17,
+        self.btn_dy = ttk.Button(_row_plat, text="🎵 抖音批量下载 🔒", width=17,
                                  style="DyLocked.TButton",
                                  command=self._on_douyin)
         self.btn_dy.pack(side="left", padx=(6, 2))
@@ -3403,7 +3446,7 @@ class App:
                  "用法：粘贴链接 → 解析 → 勾选 → 下载\n"
                  "（每条之间自动间隔 2~5 秒，避免抖音限流）")
         # ★ v3.2.0 新增 / v3.3.0 改独立授权：B 站下载（单条 + 多P）
-        self.btn_bili = ttk.Button(_row1, text="🎬 B 站下载 🔒", width=13,
+        self.btn_bili = ttk.Button(_row_plat, text="🎬 B 站下载 🔒", width=13,
                                    style="BiliLocked.TButton",
                                    command=self._on_bilibili)
         self.btn_bili.pack(side="left", padx=(6, 2))
@@ -3416,6 +3459,21 @@ class App:
                  "  · 断点续传：下到一半关掉，下次接着下\n"
                  "  · 免登录最高 720P；1080P+/4K 需登录态（本版没做）\n\n"
                  "用法：粘贴链接（BV 号 / 链接 / b23.tv 短链）→ 解析 → 勾选 → 下载")
+        # ★ v3.4.0 新增：小鹅通课程下载（独立授权，与其它平台并列）
+        self.btn_xiaoe = ttk.Button(_row_plat, text="🎓 小鹅通课程 🔒", width=14,
+                                    style="XiaoeLocked.TButton",
+                                    command=self._on_xiaoe)
+        self.btn_xiaoe.pack(side="left", padx=(6, 2))
+        self._tt(self.btn_xiaoe,
+                 "【小鹅通课程下载】**独立产品**，需专用授权码。\n"
+                 "未授权时点它会提示购买方式。\n\n"
+                 "特点：\n"
+                 "  · 免费/公开课**不用登录**，粘贴链接就能下\n"
+                 "  · 付费课填一次网页版 Cookie 即可（不用装证书）\n"
+                 "  · 多节课程一次粘贴，8 路并发下载，实测 5~6 MB/s\n"
+                 "  · 分片级断点续传，关掉工具下次接着下\n"
+                 "  · 自动解密 AES-128 并转成 MP4\n\n"
+                 "用法：粘贴课程视频链接 → 解析 → 勾选 → 下载")
         self._tt(self.btn_mp,
                  "【公众号文章视频】下载公众号文章里的视频（附加功能）。\n"
                  "\n"
@@ -3430,6 +3488,7 @@ class App:
         self._refresh_mp_button()
         self._refresh_dy_button()
         self._refresh_bili_button()
+        self._refresh_xiaoe_button()
         self._like_stats_ok = self._has_like_stats()
         self._refresh_like_column()
 
@@ -4672,6 +4731,7 @@ class App:
                 self._refresh_mp_button()
                 self._refresh_dy_button()
                 self._refresh_bili_button()
+                self._refresh_xiaoe_button()
                 self._like_stats_ok = self._has_like_stats()
                 self._refresh_like_column()
                 self._refresh_watermark()
@@ -5661,6 +5721,72 @@ class App:
             messagebox.showerror(
                 "打开失败",
                 f"B 站下载窗口启动失败：\n{e}\n\n请把这段报错发给发布方。",
+                parent=self.root)
+
+    # ────────── 小鹅通课程下载（v3.4.0）──────────
+    def _refresh_xiaoe_button(self) -> bool:
+        """刷新「🎓 小鹅通课程」按钮外观，返回是否可用。
+
+        ★ v3.4.0 授权口径：**独立产品线（PRODUCT_XIAOE=5），单独发码**。
+          客户原话：「每个平台都做成单独售卖的授权」。
+          视频号码不含小鹅通，小鹅通码也不能抓视频号。
+
+        未授权 → 显示 🔒 但**仍可点**（点了给购买引导，比禁用更利于成交
+        —— 与抖音/公众号/B 站按钮一致）。
+        """
+        if getattr(self, "btn_xiaoe", None) is None:
+            return False
+        try:
+            has_x = lic.is_xiaoe_product(self._license_info(lic.PRODUCT_XIAOE))
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小鹅通按钮授权判定失败（按未授权显示）：{e}")
+            has_x = False
+        # 被作废的码不给用（与视频号/公众号一致）
+        if getattr(self, "_revoked_reason", ""):
+            has_x = False
+        try:
+            self.btn_xiaoe.config(
+                text="🎓 小鹅通课程" if has_x else "🎓 小鹅通课程 🔒",
+                style="Xiaoe.TButton" if has_x else "XiaoeLocked.TButton",
+                state="normal")
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小鹅通按钮外观刷新失败：{e}")
+        return has_x
+
+    def _on_xiaoe(self):
+        """「🎓 小鹅通课程」入口。未授权给购买引导，已授权开窗口（单例复用）。"""
+        if not self._refresh_xiaoe_button():
+            if messagebox.askyesno(
+                    "小鹅通课程下载（未授权）",
+                    "「小鹅通课程下载」是**独立产品**，需要专用授权码\n"
+                    "（视频号授权码不含小鹅通，小鹅通码也不能抓视频号）。\n\n"
+                    "特点：\n"
+                    "  · 免费/公开课不用登录，粘贴链接就能下\n"
+                    "  · 付费课填一次网页版 Cookie（不用装证书、不用抓包）\n"
+                    "  · 多节课程批量下载，8 路并发\n"
+                    "  · 分片级断点续传，自动解密并转成 MP4\n\n"
+                    "如需使用，**请联系发布方购买「小鹅通课程下载」授权码**，\n"
+                    "拿到后在「🔑 授权管理」粘贴激活即可（立即生效，"
+                    "可与其它授权码共存）。\n\n"
+                    "要去「🔑 授权管理」查看/输入授权码吗？",
+                    parent=self.root):
+                self._on_license_input()
+            return
+        try:
+            w = getattr(self, "_xiaoe_win", None)
+            if w is not None and w.win.winfo_exists():
+                w.show()
+                return
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小鹅通窗口复用检查失败（将新开一个）：{e}")
+        try:
+            from .xiaoe_ui import XiaeoWindow
+            self._xiaoe_win = XiaeoWindow(self)
+        except Exception as e:                      # noqa: BLE001
+            self.push_log("error", f"打开小鹅通窗口失败：{e}")
+            messagebox.showerror(
+                "打开失败",
+                f"小鹅通课程下载窗口启动失败：\n{e}\n\n请把这段报错发给发布方。",
                 parent=self.root)
 
     # ────────── 小程序短剧入清单（v2.7.8）──────────
@@ -6988,6 +7114,31 @@ class App:
                     w.apply_all_done(item[1], item[2], item[3])
             except Exception as e:                  # noqa: BLE001
                 self.push_log("warn", f"B 站窗口事件处理出错：{e}")
+        elif kind in ("xiaoe_video", "xiaoe_parse_done", "xiaoe_fail",
+                      "xiaoe_dl_start", "xiaoe_dl_prog", "xiaoe_dl_done",
+                      "xiaoe_all_done"):
+            # ★ v3.4.0：小鹅通课程下载窗口的事件
+            w = getattr(self, "_xiaoe_win", None)
+            if w is None:
+                return
+            try:
+                if kind == "xiaoe_video":
+                    w.apply_video(item[1])
+                elif kind == "xiaoe_fail":
+                    w.apply_fail(item[1], item[2])
+                elif kind == "xiaoe_parse_done":
+                    w.parse_done(item[1], item[2])
+                elif kind == "xiaoe_dl_start":
+                    w.apply_dl_start(item[1], item[2], item[3])
+                elif kind == "xiaoe_dl_prog":
+                    w.apply_dl_prog(item[1], item[2], item[3],
+                                    item[4], item[5], item[6])
+                elif kind == "xiaoe_dl_done":
+                    w.apply_dl_done(item[1], item[2], item[3], item[4])
+                elif kind == "xiaoe_all_done":
+                    w.apply_all_done(item[1], item[2], item[3])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"小鹅通窗口事件处理出错：{e}")
         elif kind == "miniapp_saved":
             # ★ v2.7.8：小程序短剧落盘 → 加入清单（客户要求在列表里看到）
             try:
@@ -7644,25 +7795,37 @@ class App:
                 f"{batch_txt}{stall_txt}")
 
     def _poll(self):
+        # ★ P64-④：整个泵体包在 try/finally 里，**finally 一定重新排期**。
+        #   原来 `_handle_event` 只兜住已知事件类型，一旦在别处（状态栏刷新、
+        #   看门狗、某个新事件分支）抛一次异常，`after(...)` 就再也排不上 →
+        #   事件泵永久停摆：捕获不显示、下载进度不动、日志不再刷新，
+        #   表面看像"程序卡了"，其实线程都活着。这类故障极难自查。
         try:
-            while True:
-                lvl, msg = self.log_q.get_nowait()
-                self._append_log(lvl, msg)
-        except queue.Empty:
-            pass
-        try:
-            while True:
-                self._handle_event(self.ui_q.get_nowait())
-        except queue.Empty:
-            pass
-        # 落盘节流（v2.0.17）：至尊 records.json 可达 13MB，每 300ms 全量
-        # 重写会造成 I/O 抖动。改为最多每 SAVE_MIN_INTERVAL 秒一次；退出/上限
-        # 变更/Done 等关键点仍会强制落盘（见 _force_save）。
-        if self._dirty and (time.time() - self._last_save) >= self.SAVE_MIN_INTERVAL:
-            self._force_save()
-        self._hook_watchdog()
-        self._update_status_bar()
-        self.root.after(self.POLL_MS, self._poll)
+            try:
+                while True:
+                    lvl, msg = self.log_q.get_nowait()
+                    self._append_log(lvl, msg)
+            except queue.Empty:
+                pass
+            try:
+                while True:
+                    self._handle_event(self.ui_q.get_nowait())
+            except queue.Empty:
+                pass
+            # 落盘节流（v2.0.17）：至尊 records.json 可达 13MB，每 300ms 全量
+            # 重写会造成 I/O 抖动。改为最多每 SAVE_MIN_INTERVAL 秒一次；退出/上限
+            # 变更/Done 等关键点仍会强制落盘（见 _force_save）。
+            if self._dirty and (time.time() - self._last_save) >= self.SAVE_MIN_INTERVAL:
+                self._force_save()
+            self._hook_watchdog()
+            self._update_status_bar()
+        except Exception as e:                     # noqa: BLE001
+            try:
+                logger.warn(f"UI 事件泵单轮异常（已继续）：{type(e).__name__}: {e}")
+            except Exception:                      # noqa: BLE001
+                pass
+        finally:
+            self.root.after(self.POLL_MS, self._poll)
 
     def _force_save(self):
         """立即落盘（原子写）。失败不抛异常——落盘失败不能影响界面。"""

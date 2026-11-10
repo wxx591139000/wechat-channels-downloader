@@ -142,12 +142,17 @@ PRODUCT_DOUYIN = 3         # 抖音批量下载（不分档）
 #     之所以能直接收回：带 B 站的那版（v3.2.0）**没有发给过客户**。
 #     如果以后要再改口径，必须先看有没有已售出的码，别直接改判定。
 PRODUCT_BILIBILI = 4       # B 站视频下载（不分档）
+# ★ v3.4.0：小鹅通课程下载（独立产品，不分档）
+#   客户要求：「每个平台都做成单独售卖的授权」。
+#   与视频号/公众号/抖音/B 站完全并列，**视频号码不含小鹅通**。
+PRODUCT_XIAOE = 5          # 小鹅通课程下载（不分档）
 
 PRODUCT_LABELS = {
     PRODUCT_VIDEO: "视频号下载",
     PRODUCT_MP_ARTICLE: "公众号文章视频下载",
     PRODUCT_DOUYIN: "抖音批量下载",
     PRODUCT_BILIBILI: "B 站视频下载",
+    PRODUCT_XIAOE: "小鹅通课程下载",
 }
 
 # 兼容旧代码：把「产品」映射成「功能位」（内部判定仍用位掩码，便于扩展）
@@ -155,13 +160,20 @@ FLAG_VIDEO_CHANNEL = PRODUCT_VIDEO            # 1
 FLAG_MP_ARTICLE_VIDEO = PRODUCT_MP_ARTICLE    # 2
 FLAG_DOUYIN = PRODUCT_DOUYIN                  # 3
 FLAG_BILIBILI = PRODUCT_BILIBILI              # 4
-# 注意：一个码只解锁一条产品线（v2.0.19 起的规则），
-# FLAG_ALL 仅作历史兼容，不代表"全产品"
-FLAG_ALL = 15
+FLAG_XIAOE = PRODUCT_XIAOE                    # 5
+# ⚠️ 一个码只解锁**一条**产品线（v2.0.19 起的规则）。
+# `make_code(flags=...)` 里的 flags 实际就是「产品号」，不是位掩码
+# （见 make_code：prod = int(product or flags or 0)）——所以**绝对不要**
+# 把 FLAG_ALL 当 flags 传进去，那等于要一个「产品号 31」的码。
+# FLAG_ALL 只是历史遗留的「全产品位掩码」，给老代码读着玩的。
+# ★ P64-③：原来写死 15，加了小鹅通(5) 之后就不再是"全部"了。
+#   改成从 PRODUCT_LABELS 推导，避免每加一条产品线都要回来改。
+FLAG_ALL = sum(1 << (int(p) - 1) for p in PRODUCT_LABELS)
 
 # ★ 不分档的产品（tier 固定 0）。新增产品时**必须**加到这里，
 #   否则 make_code 会按视频号去校验档位，直接抛「不支持的档位」。
-PRODUCTS_NO_TIER = (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN, PRODUCT_BILIBILI)
+PRODUCTS_NO_TIER = (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN, PRODUCT_BILIBILI,
+                    PRODUCT_XIAOE)
 
 FEATURE_LABELS = PRODUCT_LABELS
 
@@ -662,6 +674,15 @@ def is_bilibili_product(info: Optional[dict]) -> bool:
     return has_feature(info, PRODUCT_BILIBILI)
 
 
+def is_xiaoe_product(info: Optional[dict]) -> bool:
+    """是否小鹅通产品（不分档）。★ v3.4.0
+
+    客户口径：「每个平台都做成单独售卖的授权」—— 与 B 站同一套规则，
+    视频号码打不开小鹅通，小鹅通码也抓不了视频号。
+    """
+    return has_feature(info, PRODUCT_XIAOE)
+
+
 def label_of_product(info: Optional[dict]) -> str:
     """产品展示名（给界面用）。"""
     if not info:
@@ -673,6 +694,8 @@ def label_of_product(info: Optional[dict]) -> str:
         return "抖音批量下载版（不分档）"
     if p == PRODUCT_BILIBILI:
         return "B 站视频下载版（不分档）"
+    if p == PRODUCT_XIAOE:
+        return "小鹅通课程下载版（不分档）"
     return label_of_tier(info.get("tier") or 0)
 
 
@@ -720,6 +743,21 @@ def selftest() -> list:
                 ""))
     out.append(("视频号码不含 B 站",
                 not has_feature(verify_code(make_code(500)), PRODUCT_BILIBILI),
+                ""))
+    # ★ v3.4.0：小鹅通产品线往返 + 产品互斥
+    _xcode = make_code(0, product=PRODUCT_XIAOE)
+    _xinfo = verify_code(_xcode)
+    out.append(("小鹅通码往返",
+                bool(_xinfo) and _xinfo["product"] == PRODUCT_XIAOE
+                and _xinfo["tier"] == 0,
+                f"{_xcode} → {_xinfo}"))
+    out.append(("小鹅通码不当视频号",
+                not has_feature(_xinfo, PRODUCT_VIDEO)
+                and not has_feature(_xinfo, PRODUCT_BILIBILI)
+                and not has_feature(_xinfo, PRODUCT_DOUYIN),
+                ""))
+    out.append(("视频号码不含小鹅通",
+                not has_feature(verify_code(make_code(500)), PRODUCT_XIAOE),
                 ""))
     # 篡改档位字符 → 必须失败
     bad = code[:-1] + ("A" if code[-1] != "A" else "B")
