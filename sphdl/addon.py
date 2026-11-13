@@ -1292,7 +1292,19 @@ class SphAddon:
             obj = json.loads(body)
         except Exception:
             return
-        odes = list(iter_object_descs(obj))
+        # ★ v3.4.2：这里原来只取了 odes，却在下面引用 `_entries_map`
+        #   → 每次 bridge 回传都抛 NameError（日志里刷「bridge钩子 解析失败:
+        #   name '_entries_map' is not defined」），**自然捕获整条链路实际失效**，
+        #   只是 JS 回调路径把视频补上了，所以没人察觉。
+        #   改成与 bridge 钩子（v2.5.5）同一写法：带 entry 一起迭代，
+        #   统计数据（点赞/转发）就在 object_desc 的兄弟字段上。
+        _entries = list(iter_object_desc_entries(obj))
+        if _entries:
+            odes = [d for d, _e in _entries]
+            _entries_map = {id(d): e for d, e in _entries}
+        else:
+            odes = list(iter_object_descs(obj))
+            _entries_map = {}
         logger.info(f"🔍 API直嗅: {host} {flow.request.path[:60]} | {len(body)}B"
                     f" | object_desc={'✓ 命中×' + str(len(odes)) if odes else '✗ 未含'}")
         if not odes:
@@ -1326,7 +1338,7 @@ class SphAddon:
             seen = {p["key"] for p in self._pending}
             for od in odes:
                 vd = extract_from_object_desc(
-                    od, entry=_entries_map.get(id(od)))
+                    od, entry=(entries_map or {}).get(id(od)))
                 if not vd:
                     continue
                 key = vd.video_id or (vd.url, vd.decode_key)

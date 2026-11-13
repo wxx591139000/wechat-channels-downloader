@@ -5,6 +5,45 @@
 
 
 
+## [3.4.2] - 2026-11-13
+
+- 修 `API直嗅` 路径的 `NameError`：`response()` 里引用了未定义的
+  `_entries_map`，`_buffer_pending()` 里又把参数 `entries_map` 写成了
+  `_entries_map`
+
+### 现象与影响
+
+v3.4.0 的日志里每收到一次 bridge 回传就刷一行：
+
+```
+[ERROR] ❌ bridge钩子 解析失败: name '_entries_map' is not defined
+```
+
+**自然捕获整条链路实际是失效的** —— 候选缓存（`_buffer_pending`）一条都没
+进，`_capture_anchor` 也拿不到统计数据（点赞/转发就在 `object_desc` 的兄弟
+字段上）。之所以没人发现，是因为 JS 回调路径把视频补上了，界面看起来正常。
+
+### 改动
+
+`response()` 改成与 bridge 钩子（v2.5.5）同一写法：
+
+```python
+_entries = list(iter_object_desc_entries(obj))
+if _entries:
+    odes = [d for d, _e in _entries]
+    _entries_map = {id(d): e for d, e in _entries}
+else:
+    odes = list(iter_object_descs(obj)); _entries_map = {}
+```
+
+`_buffer_pending()` 里复用参数：`entry=(entries_map or {}).get(id(od))`。
+
+### 测试
+
+`verify_v341_stream.py` 增到 **18 项**，新增 3 条：多 objectDesc 的 API JSON
+不抛 `NameError`、`response()` 内确实定义了 `_entries_map`、
+`_buffer_pending` 用的是参数而非同名未定义变量。
+
 ## [3.4.1] - 2026-11-13
 
 - 修**打开嗅探后微信视频号无法播放**（关掉嗅探就恢复）：mitmproxy 默认把每个

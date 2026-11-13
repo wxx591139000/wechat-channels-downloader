@@ -16,7 +16,11 @@ import urllib3
 urllib3.disable_warnings()
 
 ROOT = Path(__file__).resolve().parent.parent
-EXE = ROOT / "dist" / "v3.4.1" / "微信视频号下载器" / "微信视频号下载器.exe"
+sys.path.insert(0, str(ROOT))
+VERSION = __import__("re").search(
+    r'__version__\s*=\s*"([^"]+)"',
+    (ROOT / "sphdl" / "__init__.py").read_text(encoding="utf-8")).group(1)
+EXE = ROOT / "dist" / f"v{VERSION}" / "微信视频号下载器" / "微信视频号下载器.exe"
 PORT = 18898
 URL = "https://dldir1v6.qq.com/weixin/Windows/WeChatSetup.exe"
 

@@ -126,6 +126,46 @@ def test_unit():
     ad.responseheaders(f5)
     check("视频号 CDN 保持流式", f5.response.stream is True)
 
+    # ⑥ v3.4.2：多 objectDesc 的 API JSON 不能抛 NameError
+    #    （原来 response() 里引用了未定义的 _entries_map，日志刷
+    #      "bridge钩子 解析失败: name '_entries_map' is not defined"）
+    import json as _json
+    payload = {"data": {"list": [
+        {"object_desc": {"id": "v1", "desc": {"title": "t1"},
+                         "media": [{"url": "http://x/1.mp4",
+                                    "decode_key": "k1"}]}, "like_count": 3},
+        {"object_desc": {"id": "v2", "desc": {"title": "t2"},
+                         "media": [{"url": "http://x/2.mp4",
+                                    "decode_key": "k2"}]}, "like_count": 4},
+    ]}}
+    f6 = tflow.tflow(resp=True)
+    f6.request.host = "channels.weixin.qq.com"
+    f6.request.path = "/cgi-bin/demo"
+    f6.response.headers["content-type"] = "application/json"
+    f6.response.set_content(_json.dumps(payload).encode())
+    try:
+        ad.response(f6)
+        check("多 objectDesc 的 API JSON 不抛 NameError", True)
+    except NameError as e:
+        check("多 objectDesc 的 API JSON 不抛 NameError", False, str(e))
+    except Exception as e:                    # noqa: BLE001
+        check("多 objectDesc 的 API JSON 不抛 NameError", True,
+              f"其它异常已忽略：{type(e).__name__}")
+
+    # ⑦ 源码级：response() 内不得再引用未定义名
+    a_src = (ROOT / "sphdl" / "addon.py").read_text(encoding="utf-8")
+    i = a_src.find("def response(self, flow")
+    j = a_src.find("def _buffer_pending", i)
+    body = a_src[i:j]
+    check("response() 里定义了 _entries_map",
+          "_entries_map = {" in body)
+    # _buffer_pending 必须用参数 entries_map，不是模块级 _entries_map
+    k = a_src.find("def _buffer_pending")
+    body2 = a_src[k:k + 2000]
+    check("_buffer_pending 用参数 entries_map（不是 _entries_map）",
+          "(entries_map or {}).get(id(od))" in body2
+          and "entry=_entries_map.get" not in body2)
+
 
 # ===================== C 实测 =====================
 def _wait(port, timeout=20):
