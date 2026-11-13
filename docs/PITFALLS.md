@@ -2170,3 +2170,106 @@ def _poll(self):
 
 修法：整段包 `try/except` 落日志，`finally` 里重新 `after`。**泵的重排期不能有前置条件。**
 
+
+---
+
+## P67 ★★★★ mitmproxy 默认全量缓冲 = 所有视频播不了（v3.4.1）
+
+### 现象
+
+客户装了 v3.4.0，点「启动嗅探」后微信视频号**完全播不了**；关掉嗅探立刻正常。
+重启微信无效。日志看起来一切正常：
+
+```
+✅ bridge 钩子已注入 #1: channels.weixin.qq.com/web/pages/home
+✅ 捕获到视频（JS回调）: …（一口气 35 条）
+💓 嗅探运行中 | 循环延迟 5ms | 页面注入 1 次 | 捕获 35 个
+```
+
+唯一异常是一行容易被忽略的指标：**「流活动 49s前」** —— 也就是十几分钟内
+几乎没有任何 206 视频流请求。播放器根本没把流拉起来。
+
+### 根因
+
+`mitmproxy 11` 的 `stream_large_bodies` 默认值是 `None`：
+
+```python
+if not (options.stream_large_bodies or options.body_size_limit):
+    return False          # ← 不流式，整条响应缓冲到内存再转发
+```
+
+后果：**首字节延迟 = 整个响应的下载时间**。实测（同一 URL、同一 5MB Range）：
+
+| 配置 | 首字节 | 收完 |
+|---|---|---|
+| 默认（不流式） | 5.94s / 10.18s | 5.95s |
+| `stream_large_bodies="1m"` | **0.54s** | 5.65s |
+| 直连（不经代理） | **0.34s** | 5.71s |
+
+视频号 mp4 几十上百 MB，播放器拿不到首字节（或拿得太慢）→ 直接判定
+「无法播放」。**这不是微信出问题，是代理把流憋住了**，所以重启微信没用。
+
+本项目从 v1.x 起就没设过这个参数，`addon.response()` 里还有一句
+`len(resp.content or b"")` 在每个响应上取 body —— 等于把「必须全缓冲」
+又固化了一遍。之前没炸，是因为早期抓的多是几 MB 的小程序 mp4；
+视频号正片变大之后就必然踩中。
+
+### 修法
+
+```python
+# SniffEngine._run / _amain，必须在 default_addons() 之后
+master.addons.add(*addons.default_addons())      # ← 选项在这里注册
+master.options.update(stream_large_bodies="1m")
+```
+
+配套（流式响应**无法读取/修改 body**，相关功能必须让路）：
+
+```python
+def responseheaders(self, flow):
+    # check_body_size 先跑、可能已把 stream 置 True；本钩子随后执行可覆盖
+    if host.endswith("wxamedia.com") and content_length <= 64MB:
+        resp.stream = False      # 小程序「边播边存」需要完整字节
+```
+
+```python
+def response(self, flow):
+    streaming = bool(getattr(resp, "stream", False))
+    ...  # 先记 206 流活动、按 path 做自然捕获（不依赖 body）
+    if streaming:
+        return                   # 后面的 JSON 解析/落盘对空 body 全是空转
+```
+
+### 判据（以后接任何代理型功能都适用）
+
+- **测「能不能播」不要只测「能不能抓到」**。抓得到 ≠ 播得了：JSON 接口几百
+  字节，全缓冲无感；视频几十 MB，全缓冲就是灾难。必须测**首字节时间**。
+- 一条命令就能查：`curl -x http://127.0.0.1:8899 -r 0-5000000 -w '%{time_starttransfer}'`。
+  **首字节 ≈ 总时间 → 就是全缓冲**。
+- 流式阈值要选在「接口响应」和「媒体响应」之间。本项目 JSON/HTML 均 <1MB，
+  视频必超 → 取 `1m`。
+- 开启流式前先搜一遍 `\.content`：每一处都在假设「body 是可读的」。
+  MITM 工具里这类假设通常是 P0 级隐患。
+
+### 关联
+
+- 与 P64 同族：**用户说「播不了 / 看不到」时，先分清是「功能没做」还是
+  「数据没送到」**。这次日志把「捕获正常」和「流为零」并排摆着，矛盾点就在那。
+- 与 P66③ 同族：线程/事件泵看起来都活着，但数据通路已经断了 —— 只有量化
+  指标（首字节、206 计数）能暴露。
+
+### 补记（同一天，被 exe 实测打脸两次）
+
+**① 「改了一处」不等于修好**：GUI 点「启动嗅探」走 `SniffEngine`，命令行
+`--no-auto-proxy` 走 `run_sniff`，是**两套独立的事件循环启动代码**。
+第一版只改了 GUI，exe 实测首字节仍 15.96s。→ 现在抽成
+`proxy_manager.apply_stream_policy(master)`，两边都调，测试里断言两处都在。
+
+**② 入口脚本不能用相对导入**：`main.py` 里写
+`from .proxy_manager import apply_stream_policy`，源码直跑没事，
+**打包成 exe 后抛 `attempted relative import with no known parent package`**，
+被 `except` 兜住只留一行 warn —— 表现就是「改了没效果」。
+入口脚本必须 `from sphdl.proxy_manager import ...`。
+
+**③ 这条链的调试方法**：`try/except` 里打 warn 是**唯一**能捞到这类错误的
+方式（P26/P34 的老规矩）。如果当时写 `except: pass`，就会得出
+「改完没效果，可能是 mitmproxy 的 bug」这种完全错误的结论。

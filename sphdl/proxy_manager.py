@@ -210,3 +210,33 @@ def check_proxy_alive(port: int, timeout: float = 3.0) -> bool:
         return r.status_code == 200
     except Exception:
         return False
+
+
+# ---------------- 引擎共同的流式策略（v3.4.1） ----------------
+
+# ★★★ 为什么必须设（P67，2026-11-13 客户报障）：
+#   mitmproxy 的 stream_large_bodies 默认 None = **每个响应都完整缓冲**，
+#   收完整个 body 才吐第一个字节。实测同一 5MB Range 请求：
+#       不流式 首字节 5.94s / 10.18s ；流式 0.54s ；直连 0.34s
+#   视频号 mp4 几十 MB → 播放器等不到数据，直接「无法播放」。
+#
+#   阈值 1m：本项目要读的 JSON/HTML 全在 1MB 以内（照常可解析可注入），
+#   视频流必定超过 → 走流式，播放器能边下边播。
+STREAM_LARGE_BODIES = "1m"
+
+
+def apply_stream_policy(master) -> str:
+    """给 mitmproxy Master 打开「大响应流式转发」。
+
+    ⚠️ 必须在 `master.addons.add(*addons.default_addons())` **之后**调用 ——
+    `stream_large_bodies` 这个选项由 proxyserver addon 注册，提前设置会抛
+    「No such option」。
+
+    ★ 抽成公共函数的原因：GUI（SniffEngine）和 CLI（run_sniff）是两套
+      独立的事件循环启动代码。v3.4.1 第一版只改了 GUI 一处，exe 实测
+      `--no-auto-proxy` 仍走全缓冲（首字节 6.15s）—— 又是 P65 那种
+      「同一件事有两份实现」的漏改。现在两边都调这里，测试里也有
+      源码级断言卡住「两处都调」。
+    """
+    master.options.update(stream_large_bodies=STREAM_LARGE_BODIES)
+    return f"大响应（>{STREAM_LARGE_BODIES}）已改为流式转发（避免播放卡死）"

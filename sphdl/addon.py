@@ -1013,6 +1013,10 @@ class SphAddon:
             return
         if resp.status_code not in (200, 206):
             return
+        # v3.4.1：流式响应拿不到 body（responseheaders 已尽量把它改回缓冲，
+        # 这里再兜一层，避免超大文件被误判为「空 body」反复重试）
+        if getattr(resp, "stream", False):
+            return
         body = resp.content or b""
         if not body:
             return
@@ -1186,13 +1190,48 @@ class SphAddon:
                          f"{covered / 1048576:.1f}/"
                          f"{rec['total'] / 1048576:.1f} MB")
 
+    # ---------- ⓿1 响应头：给「必须读 body」的个别域名关掉流式 ----------
+    def responseheaders(self, flow: http.HTTPFlow):
+        """★ v3.4.1：大响应默认流式转发（阈值在 SniffEngine 里设 1m）。
+
+        mitmproxy 的执行顺序是
+            check_body_size() → HttpResponseHeadersHook → start_response_stream()
+        即 `check_body_size` **先**按 stream_large_bodies 把 `resp.stream` 置 True，
+        随后本钩子执行 —— 所以这里改回 False 是有效的（实测过，不是推理）。
+
+        目前只有一处需要 body：小程序短剧 mp4 的「边播边存」（v2.7.7），
+        它必须拿到完整字节才能 tee 落盘。单集 3~7MB，全缓冲可接受。
+        """
+        resp = getattr(flow, "response", None)
+        if resp is None:
+            return
+        host = (flow.request.pretty_host or "").lower()
+        if not host.endswith("wxamedia.com"):
+            return
+        # 超大文件不硬扛（万一挂了长视频，全缓冲会把内存吃掉）
+        try:
+            cl = int(resp.headers.get("content-length") or 0)
+        except (TypeError, ValueError):
+            cl = 0
+        if cl > 64 * 1024 * 1024:
+            logger.debug(f"小程序媒体 {cl / 1048576:.0f}MB 过大，放弃落盘改流式")
+            return
+        if resp.stream:
+            resp.stream = False
+            logger.debug(f"小程序媒体改回缓冲以便落盘：{host} {cl / 1048576:.1f}MB")
+
     def response(self, flow: http.HTTPFlow):
         resp = flow.response
         if resp is None:
             return
+        # ★ v3.4.1：流式响应不保存 body（这是流式的定义）。
+        #   下面所有基于 content 的判断对它都是空转，而且 `len(content)` 会
+        #   恒为 0 —— 日志会误报「0B」。所以分开处理：先记流活动，再返回。
+        streaming = bool(getattr(resp, "stream", False))
         logger.debug(
             f"📡 ← {resp.status_code} {flow.request.host}{mask_url(flow.request.path)} | "
-            f"{len(resp.content or b'')}B | {(resp.headers.get('content-type') or '')[:40]}"
+            f"{'流式' if streaming else str(len(resp.content or b'')) + 'B'} | "
+            f"{(resp.headers.get('content-type') or '')[:40]}"
         )
         if resp.status_code not in (200, 206):
             return
@@ -1201,8 +1240,11 @@ class SphAddon:
         if resp.status_code == 206:
             self.last_stream_ts = time.time()
         # 自然捕获（v2.0.7）：播放器请求某条视频的流/封面 → 命中候选并捕获
+        #   ★ 只依赖 request.path，不需要 body → 流式下同样有效
         if "stodownload" in flow.request.path:
             self._maybe_capture_from_stream(flow.request.path)
+        if streaming:
+            return
 
         # ★★★ v2.7.9：小程序接口深挖 —— 诊断模式下把所有 JSON 响应落盘。
         #   目的：找出「剧集列表 / 剧集标题」接口（客户要求文件名对齐剧集名）。
@@ -1496,6 +1538,11 @@ class SphAddon:
     def _inject_js(self, flow: http.HTTPFlow):
         if self.injected:
             return
+        # 流式响应没有 body 可改（v3.4.1）；HTML 正常远小于 1MB，走到这里
+        # 说明是异常大的页面，宁可放弃注入也别把它读坏
+        if getattr(flow.response, "stream", False):
+            logger.warn("JS 注入跳过：该页面走了流式转发（体积过大）")
+            return
         try:
             content = flow.response.content.decode("utf-8", errors="ignore")
 
@@ -1538,6 +1585,10 @@ class SphAddon:
     # ---------- ④ bridge 钩子注入（2.7 方案） ----------
     def _inject_bridge_hook(self, flow: http.HTTPFlow):
         """往 HTML 页面的 </head> 前注入 WeixinJSBridge.invoke 包装器。"""
+        # 流式响应没有 body 可改（v3.4.1）
+        if getattr(flow.response, "stream", False):
+            logger.warn("bridge 注入跳过：该页面走了流式转发（体积过大）")
+            return
         try:
             content = flow.response.content.decode("utf-8", errors="ignore")
             if "__sphdl_hooked" in content:

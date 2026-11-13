@@ -5,6 +5,57 @@
 
 
 
+## [3.4.1] - 2026-11-13
+
+- 修**打开嗅探后微信视频号无法播放**（关掉嗅探就恢复）：mitmproxy 默认把每个
+  响应完整缓冲后才转发，视频流拿不到首字节 → 播放器判定失败
+
+### 根因（实测，不是推测）
+
+`stream_large_bodies` 默认是 `None`，即**所有响应全量缓冲**，收完整个 body 才
+吐第一个字节。同一个 5MB Range 请求实测：
+
+| 配置 | 首字节 | 收完 4.8MB |
+|---|---|---|
+| 现状（不流式） | **5.94 s / 10.18 s**（两次） | 5.95 s |
+| `stream_large_bodies="1m"` | **0.54 s** | 5.65 s |
+
+首字节延迟 = 整个文件下载时间。视频号 mp4 动辄几十 MB，播放器等不到数据直接
+放弃；关闭嗅探改走直连（0.34 s 首字节）立刻恢复。日志同时印证：捕获链路完全
+正常（35 条视频、bridge 注入成功、循环延迟 5~19ms），只有「流活动」长时间为 0。
+
+### 改动
+
+- `proxy_manager.apply_stream_policy()`（新增）：策略集中在此，阈值
+  `STREAM_LARGE_BODIES = "1m"`。**GUI（SniffEngine）与 CLI（run_sniff）都调它**
+  —— 第一版只改了 GUI，exe 实测 `--no-auto-proxy` 仍是全缓冲（首字节
+  15.96s），才补上 CLI 那处
+- 设置必须在 `default_addons()` **之后**（该选项由 proxyserver addon 注册）
+- `main.py` 用绝对导入 `from sphdl.proxy_manager import ...`：入口脚本不是包内
+  模块，相对导入在 exe 里抛 `attempted relative import with no known parent
+  package`（源码直跑不易发现，打出来才暴露）
+- `addon.responseheaders`（新增）：对 `wxamedia.com` 显式关掉流式 —— 小程序
+  短剧的「边播边存」必须拿完整字节；>64MB 不硬扛，保播放
+- `addon.response`：流式响应只记 header 后返回（不再对空 body 空转解析）
+- `_inject_js` / `_inject_bridge_hook` / `_save_miniapp_media`：加流式保护
+
+### 实测（同一 5MB Range 请求）
+
+| 路径 | 首字节 |
+|---|---|
+| 直连 | 0.34 s |
+| v3.4.0（全缓冲） | 5.94 s / 10.18 s / 15.96 s |
+| v3.4.1 GUI 引擎 | **0.51 s** |
+| v3.4.1 exe（CLI 模式） | **0.63 s** |
+
+### 测试
+
+`tests/verify_v341_stream.py` **15 项**（结构 8 + 单元 5 + 实测 3），
+含源码级断言「两套启动代码都必须调 apply_stream_policy」与
+「main.py 必须用绝对导入」—— 这两条都是先被 exe 实测打脸才补上的。
+另有 `tests/verify_v341_exe.py`（真 exe 起代理测首字节）与
+`tests/verify_v341_gui_engine.py`（SniffEngine 路径）。
+
 ## [3.4.0] - 2026-11-10
 
 - v3.4.0 新增**小鹅通课程下载**（单条 + 批量）；作为**第 5 条独立产品线**单独发码

@@ -988,6 +988,22 @@ class SniffEngine:
             master.addons.add(*addons.default_addons())
             master.addons.add(self.app.addon)
             self.master = master
+
+            # ★★★ v3.4.1：大响应改为流式转发（修「打开嗅探就播不了视频」）
+            #
+            #   mitmproxy 默认 stream_large_bodies=None → **每个响应都完整缓冲**，
+            #   收完整个 body 才吐第一个字节给客户端。实测（2026-11-13，同一
+            #   5MB Range 请求）：不流式首字节 10.18s，流式 0.49s —— 差 20 倍。
+            #   视频号播放器等不到数据，直接判定「无法播放」；关掉嗅探就恢复。
+            #
+            #   策略与阈值集中在 proxy_manager.apply_stream_policy（P67），
+            #   CLI 的 run_sniff 也调它 —— 别在这里另写一份。
+            try:
+                from .proxy_manager import apply_stream_policy
+                self.app.push_log("debug", "[引擎] " + apply_stream_policy(master))
+            except Exception as _e:               # noqa: BLE001
+                self.app.push_log("warn", f"设置流式转发失败（视频可能仍卡顿）：{_e}")
+
             # 事件循环延迟自测（v1.2.5，兜底侦测）：循环被同步操作阻塞时
             # 本任务会被延迟唤醒——延迟即拥塞证据，>1s 打警告
             wd = asyncio.ensure_future(self._loop_watchdog())

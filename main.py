@@ -438,6 +438,18 @@ def run_sniff(args):
         master = Master(opts)
         master.addons.add(*addons.default_addons())
         master.addons.add(addon)
+        # ★ v3.4.1：与 GUI 共用同一套流式策略（P67）。
+        #   CLI 模式曾被漏掉过一次 —— exe 实测 `--no-auto-proxy` 首字节 6.15s，
+        #   说明只改 GUI 不够。这里必须调同一个函数。
+        try:
+            # ★ 必须用绝对导入：main.py 是入口脚本，不属于 sphdl 包，
+            #   `from .proxy_manager import ...` 会抛
+            #   「attempted relative import with no known parent package」
+            #   （v3.4.1 首次打包后 exe 实测才暴露，源码直跑不易发现）
+            from sphdl.proxy_manager import apply_stream_policy
+            logger.info(apply_stream_policy(master))
+        except Exception as _e:               # noqa: BLE001
+            logger.warn(f"设置流式转发失败（视频可能卡顿）：{_e}")
         try:
             await master.run()
         finally:
