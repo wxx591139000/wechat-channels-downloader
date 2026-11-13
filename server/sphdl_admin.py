@@ -62,9 +62,12 @@ PRODUCT_DOUYIN = 3
 PRODUCT_BILI = 4
 # ★ v3.4.0：小鹅通独立产品线（客户要求「每个平台都做成单独售卖的授权」）
 PRODUCT_XIAOE = 5
+# ★ v3.4.6：小程序短剧（绿泡泡）独立产品线
+PRODUCT_MINIAPP = 6
 # ★ 不分档的产品：tier 固定 0。新增产品必须加进来，
 #   否则会按视频号去查档位表，静默变成 0 档。
-PRODUCTS_NO_TIER = (PRODUCT_MP, PRODUCT_DOUYIN, PRODUCT_BILI, PRODUCT_XIAOE)
+PRODUCTS_NO_TIER = (PRODUCT_MP, PRODUCT_DOUYIN, PRODUCT_BILI, PRODUCT_XIAOE,
+                    PRODUCT_MINIAPP)
 V5 = 5                       # ver=5：带能力位（caps）的码型
 CAP_LIKE_STATS = 1 << 0      # 点赞增强包
 CAP_LABELS = {CAP_LIKE_STATS: "点赞增强包"}
@@ -74,12 +77,14 @@ TIER_LABEL = {500: "轻量（500 条）", 1000: "标准（1000 条）",
               2000: "旗舰（2000 条）", 20000: "至尊（2 万条）"}
 PRODUCT_LABEL = {PRODUCT_VIDEO: "视频号下载", PRODUCT_MP: "公众号文章视频",
                  PRODUCT_DOUYIN: "抖音批量下载", PRODUCT_BILI: "B 站视频下载",
-                 PRODUCT_XIAOE: "小鹅通课程下载"}
+                 PRODUCT_XIAOE: "小鹅通课程下载",
+                 PRODUCT_MINIAPP: "小程序短剧下载（绿泡泡）"}
 # 不分档产品的展示名（台账 tier_label / 列表标签共用，别再各写一份）
 NO_TIER_LABEL = {PRODUCT_MP: "公众号视频版（不分档）",
                  PRODUCT_DOUYIN: "抖音批量下载（不分档）",
                  PRODUCT_BILI: "B 站视频下载（不分档）",
-                 PRODUCT_XIAOE: "小鹅通课程下载（不分档）"}
+                 PRODUCT_XIAOE: "小鹅通课程下载（不分档）",
+                 PRODUCT_MINIAPP: "小程序短剧下载（不分档）"}
 
 SESSION = {}          # sid -> 过期时间戳
 SESSION_TTL = 12 * 3600
@@ -132,6 +137,8 @@ def code_label(tier: int, product: int, caps: int = 0,
         return "B 站视频下载授权码："
     if product == PRODUCT_XIAOE:
         return "小鹅通课程下载授权码："
+    if product == PRODUCT_MINIAPP:
+        return "小程序短剧下载授权码："
     if product == PRODUCT_MP:
         return "公众号视频授权码："
     # 视频号：档位 + 台数
@@ -1079,6 +1086,7 @@ class H(BaseHTTPRequestHandler):
 <option value="3">抖音批量下载（不分档）</option>
 <option value="4">B 站视频下载（不分档）</option>
 <option value="5">小鹅通课程下载（不分档）</option>
+<option value="6">小程序短剧下载（绿泡泡 · 不分档）</option>
 </select>
 <label>增值功能（可多选，★会生成 ver=5 码）</label>
 <label class="capbox">

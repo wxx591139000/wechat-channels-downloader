@@ -290,12 +290,16 @@ class SphAddon:
     )
 
     def __init__(self, pipeline, on_capture=None, auto_download: bool = True,
-                 allow_images: bool = False):
+                 allow_images: bool = False, allow_miniapp: bool = True):
         """auto_download=False 时（GUI 模式）：只捕获进列表，
         不自动提交下载队列，由用户点选后再下载。
         allow_images=False 时（v2.0.4「🖼 下载图片」开关关闭；
         **v2.0.19 起为默认值**）：图片不捕获、不显示、不下载——直接跳过
-        （不占去重名额，重新开启后同一图片可再次被捕获）。"""
+        （不占去重名额，重新开启后同一图片可再次被捕获）。
+
+        allow_miniapp=False 时（v3.4.6「小程序短剧」独立授权）：小程序播放器的
+        媒体流**不落盘、不建文件、不进清单** —— 这条产品线是独立售卖的，
+        没买就不能白用。默认 True 只为兼容脚本/自检；GUI 必须显式传授权结果。"""
         self._intercept_re = [re.compile(p, re.I)
                               for p in self.INTERCEPT_HOST_PATTERNS]
         self._passthrough_re = [re.compile(p, re.I)
@@ -311,6 +315,9 @@ class SphAddon:
         #   由 GUI 把点赞/转发等累计数按 max 刷新（不插新行）。
         self.on_duplicate = None
         # ★ v2.7.8：小程序短剧
+        # ★ v3.4.6：独立产品线闸门。False = 未授权 → _save_miniapp_media 直接返回
+        self.allow_miniapp = bool(allow_miniapp)
+        self._miniapp_denied_logged = False
         self.out_dir = None           # 下载根目录（GUI 按用户配置注入）
         self.on_miniapp = None        # 回调 fn(ep_id, path, size)（GUI 加入清单）
         # ★ v2.8.6：小程序短剧集号跨会话持久化
@@ -1018,6 +1025,15 @@ class SphAddon:
         import os as _os
         import re as _re
         from pathlib import Path as _P
+
+        # ★ v3.4.6：**未授权 → 一律不落盘**（产品线独立售卖）。
+        #   闸门放在最前面：不解码、不建目录、不占空间，连日志也只提示一次。
+        if not getattr(self, "allow_miniapp", True):
+            if not getattr(self, "_miniapp_denied_logged", False):
+                self._miniapp_denied_logged = True
+                logger.info("🔒 小程序短剧：未授权，已跳过落盘"
+                            "（「小程序短剧/绿泡泡」是独立产品，需专用授权码）")
+            return
 
         resp = flow.response
         path = flow.request.path or ""

@@ -146,6 +146,13 @@ PRODUCT_BILIBILI = 4       # B 站视频下载（不分档）
 #   客户要求：「每个平台都做成单独售卖的授权」。
 #   与视频号/公众号/抖音/B 站完全并列，**视频号码不含小鹅通**。
 PRODUCT_XIAOE = 5          # 小鹅通课程下载（不分档）
+# ★ v3.4.6：小程序短剧下载（客户口语「绿泡泡短剧」，独立产品，不分档）
+#   客户要求：「绿泡泡也独立授权卖，放到发码平台里」。
+#   ★ 与其它产品线的差别：它不是「一个窗口 + 粘贴链接」的形态，
+#     而是**嗅探过程中被动落盘**（小程序播放器的流经代理时 tee 存盘）。
+#     所以闸门做在 addon 落盘那一步：未授权 → 不落盘、不建文件，
+#     避免"没买也能用"（否则整条产品线没法卖）。
+PRODUCT_MINIAPP = 6        # 小程序短剧下载（不分档）
 
 PRODUCT_LABELS = {
     PRODUCT_VIDEO: "视频号下载",
@@ -153,6 +160,7 @@ PRODUCT_LABELS = {
     PRODUCT_DOUYIN: "抖音批量下载",
     PRODUCT_BILIBILI: "B 站视频下载",
     PRODUCT_XIAOE: "小鹅通课程下载",
+    PRODUCT_MINIAPP: "小程序短剧下载（绿泡泡）",
 }
 
 # 兼容旧代码：把「产品」映射成「功能位」（内部判定仍用位掩码，便于扩展）
@@ -161,6 +169,7 @@ FLAG_MP_ARTICLE_VIDEO = PRODUCT_MP_ARTICLE    # 2
 FLAG_DOUYIN = PRODUCT_DOUYIN                  # 3
 FLAG_BILIBILI = PRODUCT_BILIBILI              # 4
 FLAG_XIAOE = PRODUCT_XIAOE                    # 5
+FLAG_MINIAPP = PRODUCT_MINIAPP                # 6
 # ⚠️ 一个码只解锁**一条**产品线（v2.0.19 起的规则）。
 # `make_code(flags=...)` 里的 flags 实际就是「产品号」，不是位掩码
 # （见 make_code：prod = int(product or flags or 0)）——所以**绝对不要**
@@ -173,7 +182,7 @@ FLAG_ALL = sum(1 << (int(p) - 1) for p in PRODUCT_LABELS)
 # ★ 不分档的产品（tier 固定 0）。新增产品时**必须**加到这里，
 #   否则 make_code 会按视频号去校验档位，直接抛「不支持的档位」。
 PRODUCTS_NO_TIER = (PRODUCT_MP_ARTICLE, PRODUCT_DOUYIN, PRODUCT_BILIBILI,
-                    PRODUCT_XIAOE)
+                    PRODUCT_XIAOE, PRODUCT_MINIAPP)
 
 FEATURE_LABELS = PRODUCT_LABELS
 
@@ -683,6 +692,14 @@ def is_xiaoe_product(info: Optional[dict]) -> bool:
     return has_feature(info, PRODUCT_XIAOE)
 
 
+def is_miniapp_product(info: Optional[dict]) -> bool:
+    """是否小程序短剧产品（不分档）。★ v3.4.6
+
+    客户口径：绿泡泡（小程序短剧）单独卖，视频号码不含它。
+    """
+    return has_feature(info, PRODUCT_MINIAPP)
+
+
 def label_of_product(info: Optional[dict]) -> str:
     """产品展示名（给界面用）。"""
     if not info:
@@ -696,6 +713,8 @@ def label_of_product(info: Optional[dict]) -> str:
         return "B 站视频下载版（不分档）"
     if p == PRODUCT_XIAOE:
         return "小鹅通课程下载版（不分档）"
+    if p == PRODUCT_MINIAPP:
+        return "小程序短剧下载版（不分档）"
     return label_of_tier(info.get("tier") or 0)
 
 

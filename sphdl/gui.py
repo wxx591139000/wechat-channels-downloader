@@ -1289,7 +1289,9 @@ class App:
 
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
-                              allow_images=self.cfg.download_images)
+                              allow_images=self.cfg.download_images,
+                              # ★ v3.4.6：小程序短剧（绿泡泡）独立授权
+                              allow_miniapp=self._has_miniapp())
         # ★ v3.4.4：重复命中也通知 GUI（刷新统计数，不插新行）
         self.addon.on_duplicate = self._on_duplicate
 
@@ -1629,6 +1631,7 @@ class App:
             self._refresh_dy_button()
             self._refresh_bili_button()
             self._refresh_xiaoe_button()
+            self._refresh_mini_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -2044,6 +2047,7 @@ class App:
             self._refresh_dy_button()
             self._refresh_bili_button()
             self._refresh_xiaoe_button()
+            self._refresh_mini_button()
             self._like_stats_ok = self._has_like_stats()
             self._refresh_like_column()
             self._refresh_watermark()
@@ -3548,6 +3552,16 @@ class App:
                          foreground="#78909c")
             st.map("XiaoeLocked.TButton",
                    background=[("active", "#e0e4e7")])
+            # ★ v3.4.6：小程序短剧（绿泡泡）入口。紫色，跟绿/青/粉/橙都分得开。
+            st.configure("Mini.TButton", background="#7c3aed",
+                         foreground="#ffffff")
+            st.map("Mini.TButton",
+                   background=[("active", "#8b5cf6"),
+                               ("pressed", "#6d28d9")])
+            st.configure("MiniLocked.TButton", background="#eceff1",
+                         foreground="#78909c")
+            st.map("MiniLocked.TButton",
+                   background=[("active", "#e0e4e7")])
             # ★ v3.1.4 两个"要找得到"的按钮（客户：授权管理 / 打开文件夹
             #   太不起眼，一眼扫过去以为是普通文字）
             #   · 授权管理 = 权益/解锁路径 → 琥珀色（暖、亮，但避开绿色的
@@ -3579,6 +3593,8 @@ class App:
                                ("BiliLocked.TButton", "#d3dae0"),
                                ("Xiaoe.TButton", "#c2410c"),
                                ("XiaoeLocked.TButton", "#d3dae0"),
+                               ("Mini.TButton", "#6d28d9"),
+                               ("MiniLocked.TButton", "#d3dae0"),
                                ("License.TButton", "#f59e0b"),
                                ("Folder.TButton", "#93c5fd")):
                 try:
@@ -3639,6 +3655,22 @@ class App:
                  "  · 分片级断点续传，关掉工具下次接着下\n"
                  "  · 自动解密 AES-128 并转成 MP4\n\n"
                  "用法：粘贴课程视频链接 → 解析 → 勾选 → 下载")
+        # ★ v3.4.6 新增：小程序短剧（客户口语「绿泡泡短剧」）独立授权
+        self.btn_mini = ttk.Button(_row_plat, text="🧩 绿泡泡短剧 🔒", width=15,
+                                   style="MiniLocked.TButton",
+                                   command=self._on_miniapp)
+        self.btn_mini.pack(side="left", padx=(6, 2))
+        self._tt(self.btn_mini,
+                 "【小程序短剧（绿泡泡）】**独立产品**，需专用授权码。\n"
+                 "未授权时点它会提示购买方式。\n\n"
+                 "⚠ 它和别的平台不一样：**没有窗口、不用粘链接**。\n"
+                 "打开嗅探后，在微信里进小程序播放短剧，播到哪存到哪。\n\n"
+                 "特点：\n"
+                 "  · 边播边存（播放器的流经代理时直接落盘）\n"
+                 "  · 一集播完自动跳下一集 → 挂着就连续抓\n"
+                 "  · 文件存到 <下载目录>\\小程序短剧\\第NN集_xxxx.mp4\n"
+                 "  · 不能一键下整季（小程序本身的技术限制）\n\n"
+                 "用法：开嗅探 → 微信里打开小程序 → 播放 → 自动落盘")
         self._tt(self.btn_mp,
                  "【公众号文章视频】下载公众号文章里的视频（附加功能）。\n"
                  "\n"
@@ -3654,6 +3686,8 @@ class App:
         self._refresh_dy_button()
         self._refresh_bili_button()
         self._refresh_xiaoe_button()
+        self._refresh_mini_button()
+        self._refresh_mini_button()
         self._like_stats_ok = self._has_like_stats()
         self._refresh_like_column()
 
@@ -4902,6 +4936,7 @@ class App:
                 self._refresh_dy_button()
                 self._refresh_bili_button()
                 self._refresh_xiaoe_button()
+                self._refresh_mini_button()
                 self._like_stats_ok = self._has_like_stats()
                 self._refresh_like_column()
                 self._refresh_watermark()
@@ -5922,6 +5957,79 @@ class App:
         except Exception as e:                      # noqa: BLE001
             logger.warn(f"小鹅通按钮外观刷新失败：{e}")
         return has_x
+
+    # ────────── 小程序短剧（绿泡泡）独立授权（v3.4.6）──────────
+    def _has_miniapp(self) -> bool:
+        """是否已购买「小程序短剧（绿泡泡）」授权。"""
+        try:
+            ok = lic.is_miniapp_product(self._license_info(lic.PRODUCT_MINIAPP))
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小程序短剧授权判定失败（按未授权处理）：{e}")
+            ok = False
+        if getattr(self, "_revoked_reason", ""):
+            ok = False
+        return ok
+
+    def _refresh_mini_button(self) -> bool:
+        """刷新「🧩 绿泡泡短剧」按钮，并把授权结果同步给 addon 落盘闸门。
+
+        ★ 关键：`addon.allow_miniapp` 必须**跟着授权实时变** —— 客户在
+          「🔑 授权管理」里粘贴码后，不用重启就能立刻开始落盘。
+        """
+        has_mini = self._has_miniapp()
+        try:
+            if getattr(self, "addon", None) is not None:
+                self.addon.allow_miniapp = has_mini
+        except Exception:
+            pass
+        if getattr(self, "btn_mini", None) is None:
+            return has_mini
+        try:
+            self.btn_mini.config(
+                text="🧩 绿泡泡短剧" if has_mini else "🧩 绿泡泡短剧 🔒",
+                style="Mini.TButton" if has_mini else "MiniLocked.TButton",
+                state="normal")
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小程序短剧按钮外观刷新失败：{e}")
+        return has_mini
+
+    def _on_miniapp(self):
+        """「🧩 绿泡泡短剧」入口：未授权给购买引导；已授权给用法 + 打开目录。"""
+        if not self._refresh_mini_button():
+            if messagebox.askyesno(
+                    "小程序短剧（绿泡泡）未授权",
+                    "「小程序短剧」是**独立产品**，需要专用授权码\n"
+                    "（视频号授权码不含它，它也不能抓视频号）。\n\n"
+                    "它能做什么：\n"
+                    "  · 在微信里打开小程序播放短剧 → 播到哪存到哪\n"
+                    "  · 一集播完自动跳下一集，挂着就连续抓\n"
+                    "  · 文件存到 <下载目录>\\小程序短剧\\第NN集_xxxx.mp4\n\n"
+                    "⚠ 做不到一键下整季：小程序只有播放时才产生地址，"
+                    "这是对方的技术限制。\n\n"
+                    "如需使用，**请联系发布方购买「小程序短剧」授权码**，\n"
+                    "拿到后在「🔑 授权管理」粘贴激活即可（立即生效）。\n\n"
+                    "要去「🔑 授权管理」查看/输入授权码吗？",
+                    parent=self.root):
+                self._on_license_input()
+            return
+        try:
+            from pathlib import Path as _P
+            base = _P(getattr(self.cfg, "download_dir", "") or ".") / "小程序短剧"
+            base.mkdir(parents=True, exist_ok=True)
+            if messagebox.askyesno(
+                    "小程序短剧（绿泡泡）已授权",
+                    "已授权 ✅\n\n"
+                    "用法：点「▶ 开启嗅探」→ 在微信里打开小程序 → 播放短剧。\n"
+                    "播放器的视频流会**边播边存**，一集播完自动跳下一集。\n\n"
+                    f"保存位置：\n{base}\n\n"
+                    "要现在打开这个文件夹吗？",
+                    parent=self.root):
+                # ★ 不能用 self._open_folder()：它无参、且以"选中行"为准；
+                #   这里要开的是固定的小程序短剧目录。
+                import os as _os
+                _os.startfile(str(base))  # noqa: S606
+        except Exception as e:                      # noqa: BLE001
+            logger.warn(f"小程序短剧入口异常（不影响其它功能）：{e}")
 
     def _on_xiaoe(self):
         """「🎓 小鹅通课程」入口。未授权给购买引导，已授权开窗口（单例复用）。"""
