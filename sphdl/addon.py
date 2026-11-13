@@ -1546,6 +1546,29 @@ class SphAddon:
             self._dedup_logged.clear()
         return n
 
+    def _rewrite_plain_body(self, resp, raw: bytes):
+        """改写响应体为**明文**，并保证 Content-Length 与实际发送字节一致。
+
+        ★★★ P68（2026-11-13，客户报「开嗅探视频号完全播不了」）：
+        mitmproxy 的 `resp.content` setter 会按残留的 `Content-Encoding` 头
+        把写入的明文**重新压缩**。若此时再把 Content-Length 设成「明文长度」，
+        就会出现「声明 9431B / 实发 3686B(gzip)」—— 客户端一直等那多出来的
+        字节，HTTP 响应永久挂起：`domcontentloaded` 不触发、播放器不初始化、
+        一个视频流请求都不会发。关掉嗅探走直连就恢复正常。
+
+        实测（channels.weixin.qq.com/finder-preview/pages/sph，Accept-Encoding: gzip）：
+            修复前  content-length=9431  content-encoding=gzip  实收=3686  ✗
+            经 Clash content-length=1100  content-encoding=gzip  实收=1100  ✓
+
+        修法：先删压缩/分块声明 → 再写明文 → 长度按最终明文算。
+        客户端发过 Accept-Encoding 也不要求服务端必须压缩，返回明文是合法的。
+        """
+        for h in ("Content-Encoding", "Transfer-Encoding"):
+            if h in resp.headers:
+                del resp.headers[h]
+        resp.content = raw
+        resp.headers["Content-Length"] = str(len(raw))
+
     # ---------- ③ JS 注入 ----------
     def _inject_js(self, flow: http.HTTPFlow):
         if self.injected:
@@ -1585,8 +1608,8 @@ class SphAddon:
             new_content, n_comment = self.comment_regex.subn(comment_hook, new_content)
 
             if n_media or n_comment:
-                flow.response.content = new_content.encode("utf-8")
-                flow.response.headers["Content-Length"] = str(len(flow.response.content))
+                self._rewrite_plain_body(flow.response,
+                                         new_content.encode("utf-8"))
                 self.injected = True
                 logger.ok(f"✅ JS 注入成功（media 钩子 {n_media} 处 / 评论钩子 {n_comment} 处），JS 回调嗅探已激活")
             else:
@@ -1610,8 +1633,8 @@ class SphAddon:
             else:
                 new_content = content + self.bridge_js
             if new_content != content:
-                flow.response.content = new_content.encode("utf-8")
-                flow.response.headers["Content-Length"] = str(len(flow.response.content))
+                self._rewrite_plain_body(flow.response,
+                                         new_content.encode("utf-8"))
                 self.bridge_hooked_pages += 1
                 logger.ok(
                     f"🌉 bridge 钩子已注入 #{self.bridge_hooked_pages}: "

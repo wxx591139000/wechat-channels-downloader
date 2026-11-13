@@ -2273,3 +2273,106 @@ def response(self, flow):
 **③ 这条链的调试方法**：`try/except` 里打 warn 是**唯一**能捞到这类错误的
 方式（P26/P34 的老规矩）。如果当时写 `except: pass`，就会得出
 「改完没效果，可能是 mitmproxy 的 bug」这种完全错误的结论。
+
+---
+
+## P68 ★★★★ 改写响应体后忘删 Content-Encoding = 「声明长度 ≠ 实发长度」→ 页面永久挂起
+
+### 现象（v3.4.3，客户第二次报「开嗅探视频号播不了」）
+
+v3.4.1（流式转发）、v3.4.2（修 NameError）发出去后，客户**仍然**播不了
+`weixin.qq.com/sph/ARRALTExZ9`。日志看着一切正常：
+
+```
+✅ bridge 钩子已注入 #1: channels.weixin.qq.com/finder-preview/pages/sph?...
+💓 钩子数据 4s前 (心跳×22 / 数据×0) | 流活动 无 | 捕获 0 个
+```
+
+JS 心跳在跑，**但页面主流程没起来**，一个 206 视频流都没有。
+
+### 排查过程（关键：别在上一轮的结论上继续打补丁）
+
+上一轮把锅给了「mitmproxy 全量缓冲 → 首字节慢」。这次先做对照实测把
+旧结论**排除掉**：
+
+| 验证 | 结果 | 结论 |
+|---|---|---|
+| 经 8899 发 Range 0-5MB | `206`、`Content-Range` 正确、5MB 收完、首字节 0.66s | MITM + 流式对视频流**没问题** |
+| 页面 HTML 经 8899 / 7897 / 直连 | 全部 200 | 上游链路没断（Clash 丢失假设排除） |
+| Playwright 经 8899 vs 7897 打开页面 | 8899 **`goto domcontentloaded` 超时 30s**，7897 正常 | 页面加载层被卡住，不是播放器层 |
+
+于是抓响应原始字节：
+
+```bash
+curl -x http://127.0.0.1:8899 -k --raw -H "Accept-Encoding: gzip" \
+     -D hdr -o body URL
+```
+
+```
+经 8899:  content-length: 9431   content-encoding: gzip   实收 = 3686  ✗
+经 7897:  content-length: 1100   content-encoding: gzip   实收 = 1100  ✓
+body 前 2 字节 1f 8b（确实是 gzip）
+```
+
+**声明 9431、实发 3686** → 客户端一直等那 5745 个字节，HTTP 响应永远不结束。
+
+### 根因
+
+```python
+# _inject_bridge_hook / _inject_js（旧）
+flow.response.content = new_content.encode("utf-8")     # 明文
+flow.response.headers["Content-Length"] = str(len(flow.response.content))
+```
+
+mitmproxy 的 `response.content` **setter 会按残留的 `Content-Encoding` 头
+把写入的明文重新压缩**。所以：
+- `.content` getter 返回解压后的明文（长度 9431）
+- 实际发送的是 gzip 流（长度 3686）
+- 而 Content-Length 被写成 9431 → 头体矛盾
+
+客户端（微信 webview / Chrome）按 Content-Length 等数据，`DOMContentLoaded`
+永不触发 → SPA 不初始化 → 播放器不存在 → 「数据×0 / 流活动 无」。
+**关掉嗅探走直连，头体一致，立刻能播。**
+
+⚠️ 为什么以前没炸：注入的旧页面（`web/pages/home`）上游没返回 gzip；
+这次是 `finder-preview/pages/sph` 分享页，上游开了压缩才触发。
+**这个 bug 一直都在，只是等一个会压缩的页面。**
+
+### 修法（单点事实源，别手写两遍）
+
+```python
+def _rewrite_plain_body(self, resp, raw: bytes):
+    for h in ("Content-Encoding", "Transfer-Encoding"):
+        if h in resp.headers:
+            del resp.headers[h]      # ★ 必须在写 content 之前
+    resp.content = raw
+    resp.headers["Content-Length"] = str(len(raw))
+```
+
+删掉编码声明后 mitmproxy 直接发明文，长度按明文算，头体必然一致。
+客户端发过 `Accept-Encoding: gzip` 并不要求服务端必须压缩，返回明文合法。
+
+### 判据（写进测试，别靠人肉）
+
+**HTTP 层唯一判据：`Content-Length == len(response.raw_content)`**
+（`raw_content` 是编码后的实际发送字节，`.content` 是解码后的明文 —— 两者
+在有压缩时不相等，用 `.content` 算长度必错）。
+
+`tests/verify_response_headers.py` 9 项，其中三条结构性护栏：
+1. **先证明「旧写法确实坏」**（对照组），否则测试可能是假绿
+2. 两处注入都调 `_rewrite_plain_body`，源码里手写 `Content-Length`
+   赋值**只剩 helper 一处**
+3. `--online <port>` 用 `curl --raw` 真起代理比对声明长度与实收字节
+
+### 教训
+
+- **「首字节慢」和「响应不结束」是两种完全不同的故障**。前者是缓冲，
+  后者是头体矛盾。上一轮只测了首字节，就以为修完了；这轮补测
+  `Content-Length` 与实收字节才发现真相。
+- **凡是 MITM 里改写响应体，都要连 Content-Encoding / Transfer-Encoding /
+  Content-Length 三个头一起处理**。先搜一遍 `.content =`，每一处都是嫌疑点。
+- 排查「播不了」的正确顺序：**DOM 加载 → 接口数据 → 视频流**，
+  逐层用可量化指标排除（goto 超时 / 请求清单 / 206 计数 / 头体字节数），
+  别一上来就扎进最像的那一层。
+- 与 P67 同族：两次都因「症状和上次一样」就直接沿用上次结论。
+  客户说「还是不行」时，**必须把上一轮的结论重新证伪一遍**。

@@ -5,6 +5,49 @@
 
 
 
+## [3.4.3] - 2026-11-13
+
+### 修「开嗅探后视频号完全播不了」的**真正**根因（v3.4.1 / 3.4.2 都没修到）
+
+**现象**：v3.4.2 启动嗅探后访问 `weixin.qq.com/sph/ARRALTExZ9` 仍无法播放；
+关掉嗅探立刻恢复。日志里 bridge 注入成功、心跳 ×22，却是
+「数据×0 / 流活动 无 / 捕获 0」—— 页面 JS 活着，播放器根本没初始化。
+
+**根因**（`curl --raw` 实测）：注入 JS 后 `_inject_bridge_hook` 把
+`Content-Length` 写成**明文长度**，却没删 `Content-Encoding: gzip`；
+mitmproxy 发送时按该头把明文重新 gzip 压缩：
+
+| 路径 | 声明长度 | 实际发送字节 | 结果 |
+|---|---|---|---|
+| 经工具代理 8899（修复前） | 9431 | **3686** (`1f 8b`) | 客户端永久等 5745 字节 → 响应挂起 |
+| 经 Clash 7897（无 MITM） | 1100 | 1100 | 正常 |
+
+头体自相矛盾 → `DOMContentLoaded` 不触发（Playwright 经 8899 `goto` 超时
+30s，经 7897 正常）→ 播放器不初始化 → 一个视频流请求都不发。
+**这与缓冲/流式无关**，所以 v3.4.1 的 `stream_large_bodies` 修复无效；
+此前一直没炸，是上游对旧页面未返回 gzip，直到这次的 finder-preview 分享页。
+
+### 改动
+
+- 新增 `SphAddon._rewrite_plain_body()`：先删 `Content-Encoding` /
+  `Transfer-Encoding`，再写明文，`Content-Length` 按最终明文算
+- `_inject_js` / `_inject_bridge_hook` 两处统一调用该函数
+  （P65：同一规则不手写两遍）
+- 新增 `tests/verify_response_headers.py` **9 项**：含「旧写法确实坏」的对照、
+  `Content-Length == len(raw_content)` 判据、源码级护栏
+
+### 回归
+
+- 新测试 9 项全绿；既有 `verify_stream_policy.py` 18 项、
+  `verify_v340_xiaoe.py` 78 项全过
+- 真 exe（v3.4.3）在 18901 端口起代理复测：
+  `content-length=9434 / 实收=9434 / 无 Content-Encoding`；
+  Playwright `DOMContentLoaded` **4.85s 完成**（修复前 30s 超时）。
+  修复前对照：`9431 / 3686 / gzip`。
+- exe 三项自检通过（线程引擎 / 授权 / 小鹅通）；系统代理未被验证过程改动
+- ⚠️ 主窗口截图未拍：客户机上 v3.4.2 旧实例仍占用 `Local\sphdl_single_instance`
+  互斥量，新 GUI 会弹「已在运行」退出。关闭旧窗口后即可正常启动，与本次改动无关
+
 ## [3.4.2] - 2026-11-13
 
 - 修 `API直嗅` 路径的 `NameError`：`response()` 里引用了未定义的
