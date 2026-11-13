@@ -31,6 +31,11 @@ class VideoData:
     #   换清晰度/换 CDN 签名就变；object_id 是**这一条视频**本身，恒定不变。
     #   去重优先用它，见 sphdl/dedup.py。
     object_id: str = ""
+    # ★ v3.4.5：发布时间（条目层 createtime，Unix 秒）。0 = 报文没给。
+    #   为什么需要：同一个博主会用**一模一样的文案**连发多条视频，
+    #   清单里就是几行同名 —— 发布时间是唯一「人话」的区分依据。
+    #   不参与去重（去重只看 object_id / video_id / nonce / url）。
+    publish_ts: int = 0
     # ★ v2.2.16：视频号对象 nonce（objectNonceId / exportId）。
     #   评论 payload 里带的是这个 ID，用它才能把评论挂到**正确的视频**上；
     #   只靠「最后捕获的视频」会串视频（实测 72 条评论串到 3 个视频上）。

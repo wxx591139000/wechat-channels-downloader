@@ -575,6 +575,28 @@ def _flatten_comments(nodes, depth: int = 0, out=None):
 
 
 # ============================== 下载记录（持久化列表） ==============================
+def pub_text(ts) -> str:
+    """发布时间显示：`11-12 13:32`；拿不到显示「—」。
+
+    ★ v3.4.5：这一列的存在意义就是让客户自己分清「同名不同条」——
+      同名多行但发布时间不同 = 博主真的发了好几条，不是抓重了。
+
+    ★ 必须是**模块级函数**：`_note_same_title` 会被 duck-typed 测试桩
+      （只有 push_log/store 的 FakeGUI）调用，调 self 上的方法会 AttributeError
+      被外层 except 吞掉 → 提示静默消失（P69 同族坑，别再改成方法）。
+    """
+    try:
+        ts = int(ts or 0)
+    except Exception:
+        ts = 0
+    if ts <= 0:
+        return "—"
+    try:
+        return time.strftime("%m-%d %H:%M", time.localtime(ts))
+    except Exception:
+        return "—"
+
+
 @dataclass
 class Record:
     id: str
@@ -593,6 +615,8 @@ class Record:
     # ★ v3.4.4：feed 对象 ID（同一条视频跨清晰度/跨页面恒定），去重主键。
     #   老记录没有这个字段 → 加载时为空，退回 video_id / URL 旧口径。
     object_id: str = ""
+    # ★ v3.4.5：发布时间（Unix 秒）。同名不同条的**唯一人话区分依据**。
+    publish_ts: int = 0
     renditions: list = field(default_factory=list)  # [{url,size,width,height,bitrate,label}]
     quality_note: str = ""  # 清晰度说明（spec 档位阶梯，仅展示用）
     # v2.0.19：来源平台，用于统一清单里区分/筛选
@@ -660,6 +684,11 @@ class RecordStore:
                        "progress", "is_image", "video_id", "object_id",
                        "quality_note", "platform")}
                 kw["renditions"] = d.get("renditions") or []
+                # ★ v3.4.5：发布时间（漏读 → 重启后「发布」列全变「—」）
+                try:
+                    kw["publish_ts"] = int(d.get("publish_ts") or 0)
+                except Exception:
+                    kw["publish_ts"] = 0
                 # ★ v2.2.1：seq 必须显式读回，否则重启后抓取序号全丢
                 #   （白名单式读取容易漏字段 —— 加新字段时务必同步这里）
                 try:
@@ -2580,6 +2609,8 @@ class App:
                         "info",
                         f"ℹ 同名不同条：标题相同但对象 ID 不同（{short_id(oid_old)} / "
                         f"{short_id(oid_new)}）→ 是两条独立视频，均保留；"
+                        f"发布时间 {pub_text(getattr(r, 'publish_ts', 0))} / "
+                        f"{pub_text(getattr(rec, 'publish_ts', 0))}，"
                         "点赞数不同属正常，不是抓重了。")
                 elif not oid_new or not oid_old:
                     self.push_log(
@@ -3777,7 +3808,7 @@ class App:
         #   只是不占界面 —— 以后要展示时把 "forward"/"recommend"
         #   加回 cols + heads + _row_values 三处即可。
         cols = ("no", "status", "title", "platform", "size", "source",
-                "like", "time", "file")
+                "like", "time", "pub", "file")
         # ★ v3.1.6 修复（P56）：这里原来写死 `_like_stats_ok = False`，
         #   把 _build_ui 前面刚算好的授权状态**覆盖成未授权**。
         #   后果：新捕获的行（走 _on_capture 会重算一次）有数字，
@@ -3809,6 +3840,11 @@ class App:
                  "source": ("捕获方式", 88),
                  "like": ("👍 点赞", 72),
                  "time": ("时间", 76),
+                 # ★ v3.4.5：新增「发布」列。
+                 #   客户 2026-11-13 看到 3 行同名、点赞不同以为抓重了；
+                 #   实际是同一博主拿同一套文案连发的 3 条视频。
+                 #   发布时间不同 = 三条不同视频，一眼可辨（比 oid 好懂）。
+                 "pub": ("发布", 86),
                  "file": ("文件", 180)}
         self._head_text = {c: heads[c][0] for c in cols}
         for c in cols:
@@ -6803,7 +6839,14 @@ class App:
                 self._display_size(r),
                 r.source,
                 self._stat_cell(getattr(r, "like_count", 0)),
-                r.created[5:], fname)
+                r.created[5:],
+                self._pub_cell(getattr(r, "publish_ts", 0)),
+                fname)
+
+    @staticmethod
+    def _pub_cell(ts) -> str:
+        """「发布」列显示（见模块级 pub_text）。"""
+        return pub_text(ts)
 
     def _stat_cell(self, n) -> str:
         """统计数字转显示文本（★ v2.6.0 受「点赞增强包」授权控制）。
@@ -7138,6 +7181,9 @@ class App:
             return (int(r.size or 0), r.created, r.id)
         if col == "time":
             return (r.created, r.id)
+        # ★ v3.4.5：按发布时间排序（0 = 没拿到，排最前）
+        if col == "pub":
+            return (int(getattr(r, "publish_ts", 0) or 0), r.created, r.id)
         if col == "title":
             return ((r.title or "").casefold(), r.created, r.id)
         if col == "platform":
@@ -7365,6 +7411,7 @@ class App:
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
                 object_id=str(getattr(vd, "object_id", "") or ""),
+                publish_ts=int(getattr(vd, "publish_ts", 0) or 0),
                 nonce_id=getattr(vd, "nonce_id", "") or "",
                 # ★ v2.5.0：统计数据（点赞/转发/推荐/收藏/评论数）
                 like_count=int(getattr(vd, "like_count", 0) or 0),

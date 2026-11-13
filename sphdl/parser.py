@@ -355,25 +355,61 @@ def _extract_stats_kwargs(obj, entry=None) -> dict:
 #   ★ 防误判：`id` 这个键太泛（有些报文里是序号/请求号），只接受
 #     ≥15 位纯数字（视频号 feed id 的形态）；显式命名的 ID 键则一律接受。
 #     宁可拿不到对象 ID 退回旧口径，也不能把两条不同视频错误合并。
-_OBJECT_ID_KEYS = ("objectId", "object_id", "feedId", "feed_id",
-                   "exportId", "export_id", "objectNonceId",
-                   "object_nonce_id", "nonceId", "nonce_id")
+# ★ v3.4.5：**绝不能**把 nonce / exportId 当对象 ID。
+#   2026-11-13 真机实测：详情页报文的 object_nonce_id 是
+#   `17525191845727011266_0_140_0_0`（带场景后缀），同一视频在推荐流报文里
+#   的 object_nonce_id 又是另一串；它随「哪个场景/哪次请求」变，跟
+#   `id`（15052933753685936530，跨页面恒定）不是一回事。
+#   把它当身份 → 同一条视频换个入口就被认成两条（P70）。
+_OBJECT_ID_KEYS = ("objectId", "object_id", "feedId", "feed_id")
+
+# 发布时间（条目层的 createtime，秒级 Unix 时间戳）
+_PUBLISH_TS_KEYS = ("createtime", "create_time", "createTime",
+                    "publish_time", "publishTime")
 
 
 def _extract_object_id(entry=None, obj=None) -> str:
-    """从条目层（优先）/ objectDesc 层提取稳定 feed 对象 ID；拿不到返回 ""。"""
+    """从条目层（优先）/ objectDesc 层提取稳定 feed 对象 ID；拿不到返回 ""。
+
+    ★ v3.4.5 顺序修正：`id` 提到最前，且候选键里**去掉** nonce / exportId。
+      真机报文里条目层的 `id` 就是视频号 feed id（20 位数字），
+      同一视频在任何页面/任何清晰度下都不变 —— 这才是身份。
+    """
     for src in (entry, obj):
         if not isinstance(src, dict):
             continue
+        # ① 条目层 `id`：只认视频号 feed id 的形态（长数字串）
+        v = _clean_id(src.get("id"))
+        if v and v.isdigit() and len(v) >= 15:
+            return v
         for k in _OBJECT_ID_KEYS:
             v = _clean_id(src.get(k))
             if v:
                 return v
-        # 泛化的 `id`：只认视频号 feed id 的形态（长数字串）
-        v = _clean_id(src.get("id"))
-        if v and v.isdigit() and len(v) >= 15:
-            return v
     return ""
+
+
+def _extract_publish_ts(entry=None, obj=None) -> int:
+    """条目层的发布时间（Unix 秒）；拿不到返回 0。
+
+    ★ 用途：同名不同条时给用户一个**人话**的区分依据
+      （2026-11-13：博主「屁皮题PPT」用同一套文案连发多条视频，
+       3 行标题一模一样，只能靠发布时间/大小区分）。
+    """
+    for src in (entry, obj):
+        if not isinstance(src, dict):
+            continue
+        for k in _PUBLISH_TS_KEYS:
+            try:
+                n = int(src.get(k) or 0)
+            except Exception:
+                continue
+            # 合理区间：2001-09 ~ 2096；毫秒时间戳先降级成秒
+            if n > 10 ** 12:
+                n //= 1000
+            if 10 ** 9 <= n <= 4 * 10 ** 9:
+                return n
+    return 0
 
 
 def _clean_id(v) -> str:
@@ -527,6 +563,8 @@ def extract_from_object_desc(obj: Any, description_hint: str = "",
             nonce_id=nonce_id,
             # ★ v3.4.4：feed 对象 ID（跨清晰度/跨页面恒定，去重主键）
             object_id=_extract_object_id(entry, obj if isinstance(obj, dict) else None),
+            # ★ v3.4.5：发布时间（仅展示/同名区分用，不参与去重）
+            publish_ts=_extract_publish_ts(entry, obj if isinstance(obj, dict) else None),
             **_extract_stats_kwargs(obj, entry),
             renditions=renditions,
             quality_note=_quality_note(media_list),
