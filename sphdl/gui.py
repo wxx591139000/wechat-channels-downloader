@@ -41,6 +41,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from sphdl import config, license as lic, __version__   # noqa: E402
 from sphdl.entities import VideoData           # noqa: E402
+from sphdl.dedup import aliases_of, max_stats, short_id  # noqa: E402
 from sphdl.logger import logger                # noqa: E402
 from sphdl.pipeline import Pipeline            # noqa: E402
 from sphdl.addon import SphAddon               # noqa: E402
@@ -589,6 +590,9 @@ class Record:
     progress: int = 0
     is_image: bool = False
     video_id: str = ""   # 稳定视频标识（md5sum），用于跨会话去重
+    # ★ v3.4.4：feed 对象 ID（同一条视频跨清晰度/跨页面恒定），去重主键。
+    #   老记录没有这个字段 → 加载时为空，退回 video_id / URL 旧口径。
+    object_id: str = ""
     renditions: list = field(default_factory=list)  # [{url,size,width,height,bitrate,label}]
     quality_note: str = ""  # 清晰度说明（spec 档位阶梯，仅展示用）
     # v2.0.19：来源平台，用于统一清单里区分/筛选
@@ -653,8 +657,8 @@ class RecordStore:
                 kw = {k: d.get(k, "") for k in
                       ("id", "title", "url", "decode_key", "size",
                        "source", "created", "status", "file", "error",
-                       "progress", "is_image", "video_id", "quality_note",
-                       "platform")}
+                       "progress", "is_image", "video_id", "object_id",
+                       "quality_note", "platform")}
                 kw["renditions"] = d.get("renditions") or []
                 # ★ v2.2.1：seq 必须显式读回，否则重启后抓取序号全丢
                 #   （白名单式读取容易漏字段 —— 加新字段时务必同步这里）
@@ -1157,6 +1161,10 @@ class App:
         self._row_of: dict = {}        # record id -> treeview iid
         self._url_to_rid: dict = {}    # url -> record id
         self._vid_index: set = set()   # video_id 集合（v2.0.17：去重 O(1)，不再线性扫全表）
+        # ★ v3.4.4：别名 → 记录 id。启动时从 records.json 重建，捕获时按
+        #   「oid/md5/nonce/url 任一命中」判重，与 addon 共用 sphdl/dedup.py 口径。
+        self._alias_to_rid: dict = {}
+        self._same_title_logged: set = set()  # 同名不同条提示去重（防刷屏）
         self._known_logged: set = set()  # 已提示过"列表中已有"的 video_id/url（防刷屏）
         self._sort_col = None          # 表头排序（v2.0.12）：None=默认最新在前
         self._sort_desc = False
@@ -1190,6 +1198,7 @@ class App:
             self._url_to_rid[r.url] = rid
             if r.video_id:
                 self._vid_index.add(r.video_id)
+            self._register_aliases(rid, r)
 
         # 「🖼 下载图片」关闭时（v2.0.4）：启动即移除历史图片记录，
         # 列表不显示、不参与下载/去重；已下载的图片文件保留在磁盘，
@@ -1200,6 +1209,7 @@ class App:
                 rec = self.store.items.get(rid)
                 if rec is not None and rec.video_id:
                     self._vid_index.discard(rec.video_id)
+                self._release_aliases(rid)
                 self.store.remove(rid)
                 for k in [k for k, v in self._url_to_rid.items() if v == rid]:
                     self._url_to_rid.pop(k, None)
@@ -1251,6 +1261,8 @@ class App:
         self.addon = SphAddon(self.pipeline, on_capture=self._on_capture,
                               auto_download=self.cfg.auto_download,
                               allow_images=self.cfg.download_images)
+        # ★ v3.4.4：重复命中也通知 GUI（刷新统计数，不插新行）
+        self.addon.on_duplicate = self._on_duplicate
 
         # ★ v2.8.0：小程序短剧落盘目录 + 清单回调
         #   ⚠ 必须放在 addon 创建**之后**！
@@ -2474,9 +2486,115 @@ class App:
             return False
         return len(self.store.order) + self._pending_slots >= n
 
+    # ---------------- v3.4.4 别名去重（与 addon 共用 dedup.py 口径） ----------------
+    def _register_aliases(self, rid, obj):
+        """把一条视频的全部别名（oid/md5/nonce/url）登记到记录 id。"""
+        for a in aliases_of(obj):
+            self._alias_to_rid[a] = rid
+
+    def _release_aliases(self, rid):
+        """删记录时把该记录的所有别名一起清掉（含 url 前缀形式）。"""
+        for a in [a for a, r in self._alias_to_rid.items() if r == rid]:
+            self._alias_to_rid.pop(a, None)
+
+    def _alias_owner(self, aliases):
+        """任一别名命中 → 返回记录 id；无命中返回 None。"""
+        for a in aliases:
+            rid = self._alias_to_rid.get(a)
+            if rid and rid in self.store.items:
+                return rid
+        return None
+
+    def _on_duplicate(self, vd, owner=None):
+        """（解析线程调用）addon 判重命中 → 只投事件，主线程刷新统计。"""
+        try:
+            self.push_event(("duplicate", vd))
+        except Exception:
+            pass
+
+    def _refresh_duplicate(self, vd):
+        """同一条视频再次捕获：不插新行，累计数按 max 刷新，别名补全。
+
+        ★ v3.4.4：客户实拍 3 行同名、点赞 4/20/7。旧版 addon 判重后直接
+          return，GUI 永远停在第一次抓到的旧快照；现在重复也刷新到最新值。
+        ★ 绝不做「按标题合并」：同名但对象 ID 不同是**不同帖子**，
+          合并会把别人真实存在的多条内容吃掉。
+        """
+        rid = self._alias_owner(aliases_of(vd))
+        if rid is None:
+            return
+        rec = self.store.items.get(rid)
+        if rec is None:
+            return
+        stats = max_stats(rec, vd)
+        changed = {}
+        for f, v in stats.items():
+            try:
+                old = int(getattr(rec, f, 0) or 0)
+            except Exception:
+                old = 0
+            if v != old:
+                changed[f] = (old, v)
+                setattr(rec, f, v)
+        self._register_aliases(rid, vd)     # 换清晰度带来的新别名也认得出
+        if changed:
+            self._dirty = True
+            self._update_row(rid)
+            if rid not in self._known_logged:
+                self._known_logged.add(rid)
+                if "like_count" in changed:
+                    a, b = changed["like_count"]
+                    detail = f"点赞 {a}→{b}"
+                else:
+                    detail = "统计数已更新"
+                self.push_log(
+                    "info",
+                    f"♻ 同一条视频再次捕获（oid={short_id(getattr(vd, 'object_id', ''))} "
+                    f"md5={short_id(getattr(vd, 'video_id', ''))}）：不新增行，{detail}")
+
+    def _note_same_title(self, rec):
+        """同名但对象 ID 不同 → 明确告诉用户这是两条独立帖子，不是抓重了。
+
+        ★ 客户 2026-11-13 实拍：3 行标题一模一样、点赞 4/20/7。
+          可能是同一条视频被解析成 3 路转码（应合并），也可能是博主连发
+          3 条同标题（不该合并）。有了 object_id 就能明确区分，绝不按标题硬合。
+        """
+        try:
+            title = (rec.title or "").strip()
+            if not title:
+                return
+            for rid in self.store.order[:200]:
+                if rid == rec.id:
+                    continue
+                r = self.store.items.get(rid)
+                if r is None or (r.title or "").strip() != title:
+                    continue
+                oid_new = getattr(rec, "object_id", "") or ""
+                oid_old = getattr(r, "object_id", "") or ""
+                key = (title[:40], oid_old, oid_new)
+                if key in self._same_title_logged:
+                    return
+                self._same_title_logged.add(key)
+                if oid_new and oid_old and oid_new != oid_old:
+                    self.push_log(
+                        "info",
+                        f"ℹ 同名不同条：标题相同但对象 ID 不同（{short_id(oid_old)} / "
+                        f"{short_id(oid_new)}）→ 是两条独立视频，均保留；"
+                        "点赞数不同属正常，不是抓重了。")
+                elif not oid_new or not oid_old:
+                    self.push_log(
+                        "info",
+                        "ℹ 检测到同名记录，但至少一条缺少对象 ID（旧版本抓的）。"
+                        "删掉旧记录后重新播放，新版会按对象 ID 自动合并。")
+                return
+        except Exception:
+            pass
+
     def _is_known_video(self, vd) -> bool:
         """跨会话去重判断（供 addon 在自动下载提交前调用，v2.0.5）：
-        同一视频（video_id=内容哈希）或同一 URL 已在列表 → True。"""
+        同一视频（对象 ID / 内容哈希 / URL 任一命中）已在列表 → True。"""
+        if self._alias_owner(aliases_of(vd)) is not None:
+            return True
         if vd.video_id and vd.video_id in self._vid_index:
             return True
         return vd.url in self._url_to_rid
@@ -6747,6 +6865,10 @@ class App:
         # 同步清理 url 映射（可能有多条：切换清晰度后旧/新 url 都映射本记录）。
         # 否则删除记录后同 URL 再捕获会被误判「重复链接」而无法重新入列表。
         rec = self.store.items.get(rid)
+        # ★ v3.4.4：删记录必须把整组别名一起释放（含 oid / 各路 md5 / URL），
+        #   否则该视频换个清晰度再抓会被别名索引判成"列表中已有"。
+        aliases = [a for a, r in self._alias_to_rid.items() if r == rid]
+        self._release_aliases(rid)
         if rec is not None and rec.video_id:
             self._vid_index.discard(rec.video_id)
             # ★ 释放 addon.seen（v2.0.18）：这是**所有单条删除路径的统一出口**
@@ -6755,7 +6877,13 @@ class App:
             # 被判「重复视频」跳过、清单不动（2026-10-16 用户报告的真实故障）。
             try:
                 if getattr(self, "addon", None) is not None:
-                    self.addon.release_seen([rec.video_id])
+                    self.addon.release_seen([rec.video_id] + aliases)
+            except Exception:
+                pass
+        else:
+            try:
+                if getattr(self, "addon", None) is not None:
+                    self.addon.release_seen(aliases)
             except Exception:
                 pass
         for k in [k for k, v in self._url_to_rid.items() if v == rid]:
@@ -6840,6 +6968,7 @@ class App:
         self._url_to_rid[r.url] = r.id
         if r.video_id:
             self._vid_index.add(r.video_id)
+        self._register_aliases(r.id, r)   # ★ v3.4.4：别名索引同步登记
         self._apply_sort()
 
     def _drop_records_ui(self, rec_list):
@@ -6856,9 +6985,15 @@ class App:
         视频号时，同一批视频会全部命中 seen 被判「重复视频」跳过、清单不动
         （2026-10-16 用户报告的真实故障）。
         """
+        all_ids = []
         for rec in rec_list:
             if rec.video_id:
                 self._vid_index.discard(rec.video_id)
+                all_ids.append(rec.video_id)
+            # ★ v3.4.4：整组别名一起清（对象 ID / 各路 md5 / URL）
+            all_ids.extend([a for a, r in self._alias_to_rid.items()
+                            if r == rec.id])
+            self._release_aliases(rec.id)
             for k in [k for k, v in self._url_to_rid.items() if v == rec.id]:
                 self._url_to_rid.pop(k, None)
             iid = self._row_of.pop(rec.id, None)
@@ -6867,7 +7002,7 @@ class App:
         if rec_list:
             # ★ 释放 addon.seen：使这些视频可被重新捕获（v2.0.18）
             try:
-                self.addon.release_seen(r.video_id for r in rec_list)
+                self.addon.release_seen(all_ids)
             except Exception as e:
                 self.push_log("error", f"释放捕获去重名额失败（不影响列表）：{e}")
             self._after_records_removed()
@@ -7190,6 +7325,12 @@ class App:
             self._apply_engine_state(bool(item[1]))
         elif kind == "ca_state":
             self._apply_ca_state(item[1])
+        elif kind == "duplicate":
+            # ★ v3.4.4：addon 判重命中（本次会话内）→ 只刷新统计，不插新行
+            try:
+                self._refresh_duplicate(item[1])
+            except Exception as e:                  # noqa: BLE001
+                self.push_log("warn", f"重复视频统计刷新失败：{e}")
         elif kind == "capture":
             self._pending_slots = max(0, self._pending_slots - 1)
             vd, source = item[1], item[2]
@@ -7199,9 +7340,13 @@ class App:
                 self._warn_full_once()
                 self._update_status_bar()
                 return
-            # 跨会话去重：同一视频（video_id=md5sum）或同一 URL 已在列表 → 跳过。
-            # （addon 的内存去重只在本次 GUI 运行内有效，重启后靠这里兜底）
-            # v2.0.17：video_id 走集合索引（O(1)），不再线性扫全表（不限档位下会 O(n²)）
+            # ★ v3.4.4：跨会话去重改用别名索引（对象 ID / md5 / nonce / URL 任一命中）。
+            #   老口径只认 md5sum 或完整 URL：同一条视频换一路转码（md5 变）
+            #   就会插出第二、第三行，且每行点赞数是各自报文里的快照 → 数字不同。
+            if self._alias_owner(aliases_of(vd)) is not None:
+                self._refresh_duplicate(vd)
+                return
+            # 下面两条保留为兜底（切换清晰度后 _url_to_rid 里可能有额外旧 URL）
             if vd.video_id and vd.video_id in self._vid_index:
                 if vd.video_id not in self._known_logged:
                     self._known_logged.add(vd.video_id)
@@ -7219,6 +7364,7 @@ class App:
                 decode_key=str(vd.decode_key or ""), size=int(vd.size or 0),
                 source=source, created=time.strftime("%m-%d %H:%M:%S"),
                 status="waiting", is_image=vd.is_image, video_id=vd.video_id,
+                object_id=str(getattr(vd, "object_id", "") or ""),
                 nonce_id=getattr(vd, "nonce_id", "") or "",
                 # ★ v2.5.0：统计数据（点赞/转发/推荐/收藏/评论数）
                 like_count=int(getattr(vd, "like_count", 0) or 0),
@@ -7238,6 +7384,7 @@ class App:
             self._dirty = True
             self.push_log("ok", f"已捕获，加入待下载列表: {rec.title[:30]}"
                               f"（选中后点『下载选中』开始下载）")
+            self._note_same_title(rec)
         elif kind in ("start", "progress", "decrypting", "done", "failed", "cancelled"):
             vd = item[1]
             rid = self._url_to_rid.get(vd.url)

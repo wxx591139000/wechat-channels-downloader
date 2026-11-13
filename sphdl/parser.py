@@ -345,6 +345,48 @@ def _extract_stats_kwargs(obj, entry=None) -> dict:
         return {}
 
 
+# ★★★ v3.4.4（2026-11-13 客户实拍）：feed 对象 ID 才是「这一条视频」的身份。
+#
+#   三条同名记录的 media.md5sum 全不同（同一视频的不同转码档/不同 CDN 签名），
+#   按 md5sum / encfilekey 去重必然漏判。真机报文（见 extract_stats 顶部注释）
+#   里，objectDesc 的**兄弟条目层**带 `id`（如 "15042040784711457411"），
+#   它对同一条视频跨页面、跨清晰度恒定不变。
+#
+#   ★ 防误判：`id` 这个键太泛（有些报文里是序号/请求号），只接受
+#     ≥15 位纯数字（视频号 feed id 的形态）；显式命名的 ID 键则一律接受。
+#     宁可拿不到对象 ID 退回旧口径，也不能把两条不同视频错误合并。
+_OBJECT_ID_KEYS = ("objectId", "object_id", "feedId", "feed_id",
+                   "exportId", "export_id", "objectNonceId",
+                   "object_nonce_id", "nonceId", "nonce_id")
+
+
+def _extract_object_id(entry=None, obj=None) -> str:
+    """从条目层（优先）/ objectDesc 层提取稳定 feed 对象 ID；拿不到返回 ""。"""
+    for src in (entry, obj):
+        if not isinstance(src, dict):
+            continue
+        for k in _OBJECT_ID_KEYS:
+            v = _clean_id(src.get(k))
+            if v:
+                return v
+        # 泛化的 `id`：只认视频号 feed id 的形态（长数字串）
+        v = _clean_id(src.get("id"))
+        if v and v.isdigit() and len(v) >= 15:
+            return v
+    return ""
+
+
+def _clean_id(v) -> str:
+    try:
+        s = str(v or "").strip()
+    except Exception:
+        return ""
+    if not s or s.lower() in ("none", "null", "0", "false"):
+        return ""
+    # 超长的基本不是 ID（可能是 JSON 串 / 签名串）
+    return s if len(s) <= 64 else ""
+
+
 def iter_object_desc_entries(obj: Any, depth: int = 0):
     """递归找出 (objectDesc, 所属条目) 对（生成器）。
 
@@ -373,9 +415,16 @@ def iter_object_desc_entries(obj: Any, depth: int = 0):
                 if isinstance(dv, dict) and dv:
                     yield dv, obj
             elif isinstance(v, list) and v:
+                # ★ v3.4.4：一个容器带多个 objectDesc 时，容器上的 id 是
+                #   **容器自己的 ID**，不是每条视频的 ID。若原样传下去，
+                #   _extract_object_id 会给本页所有视频同一个 object_id，
+                #   去重时把不同视频错误合并成一条。这里把 ID 类键剔掉，
+                #   统计字段（点赞等）仍保留在 entry 里。
+                safe_entry = {k: vv for k, vv in obj.items()
+                              if k != "id" and k not in _OBJECT_ID_KEYS}
                 for it in v:
                     if isinstance(it, dict) and it:
-                        yield it, obj
+                        yield it, safe_entry
         for k, v in obj.items():
             # ★ 视频号 bridge 的坑：真正的数据在**两层 JSON 字符串**里
             #   obj["result"] -> str -> jsapi_resp["resp_json"] -> str -> 真数据
@@ -476,6 +525,8 @@ def extract_from_object_desc(obj: Any, description_hint: str = "",
             cover_url=str(_pick(first, "coverUrl", "cover_url") or ""),
             video_id=video_id,
             nonce_id=nonce_id,
+            # ★ v3.4.4：feed 对象 ID（跨清晰度/跨页面恒定，去重主键）
+            object_id=_extract_object_id(entry, obj if isinstance(obj, dict) else None),
             **_extract_stats_kwargs(obj, entry),
             renditions=renditions,
             quality_note=_quality_note(media_list),

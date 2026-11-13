@@ -5,6 +5,56 @@
 
 
 
+## [3.4.4] - 2026-11-13
+
+- 按 feed 对象 ID 去重：修同一视频抓 3 行、点赞数不一致
+### 修「同一个视频抓成 3 行、3 行点赞数还不同」
+
+**现象**：v3.4.3 终于能播也能抓之后，客户截图里同一标题
+「6步年终晋升汇报…」出现 3 行，点赞 **4 / 20 / 7**，
+时间 13:32:32 / 13:32:33 / 13:32:33，来源都是 `bridge钩子`。
+
+**取证**（`%LOCALAPPDATA%/sphdl/records.json` + v3.4.3 日志）：
+三行的 `video_id`(md5sum) 是 `5d704157… / 355465de… / c400a1fa…`，
+`encfilekey`、`decode_key`、URL 全不同 → 旧去重键
+`vd.video_id or (vd.url, vd.decode_key)` 三次全落空。
+13:32:32 单条 payload 抓 1 条，13:32:33 含 15 个 objectDesc 的列表
+payload 又按锚点抓 2 条，13:32:35 再遇到同标题时才被判重跳过。
+
+**根因**：`media.md5sum` 是**某一路转码文件**的哈希，不是**这一条 feed 对象**
+的身份；同一条视频在详情/推荐流/相关视频报文里首条 media 可能落在不同清晰度
+档。点赞数不同则是各报文的统计快照不同，而旧版判重后直接 `return`，
+列表永远停在第一次抓到的旧值。
+
+### 改动
+
+- 新增 `sphdl/dedup.py`（唯一口径）：`oid:/md5:/nonce:/url:` 别名索引，
+  任一别名命中即同一条视频；`max_stats()` 把累计数刷新到最新快照。
+- `parser._extract_object_id()` 从条目层取 feed 对象 ID；泛化的 `id`
+  只接受 ≥15 位纯数字（防误合并）；`object_desc` 为列表时剔除容器 ID。
+- `VideoData` / `Record` 增 `object_id`，写进 `records.json` 并在 `_load`
+  白名单读回；启动时重建别名索引。
+- `addon._handle()` 判重后通过 `on_duplicate` 通知 GUI 刷新统计（不插新行）；
+  候选缓存 / 置顶锚点 / `release_seen` / `clear_seen` 四处同步别名口径。
+- GUI 捕获分支按别名判重；**同名但对象 ID 不同仍保留多行**，
+  日志明确提示「是两条独立视频，点赞数不同属正常」。
+- 捕获日志加 `oid=… md5=… 赞=…`，下一次实拍可直接判定是同一条视频
+  还是博主发了多条同标题。
+- 文档：`docs/PITFALLS.md` P69；`docs/新平台接入检查单.md` 补 2.7 / 6.8。
+
+### 回归
+
+- 新增 `tests/verify_dup_object_id.py` **53 项全绿**（含「同名不同对象不误合并」
+  反例、无 object_id 退回旧口径、删记录整组释放、跨会话写盘读回）。
+- 既有 `verify_max_records` / `verify_seen_release` / `verify_replay_bulk_capture`
+  / `verify_stream_policy`(18) / `verify_response_headers`(9) /
+  `verify_v340_xiaoe`(78) 全过。
+- ⚠️ 老清单里的 3 行**没有** object_id，新版不会追溯合并：请先删掉这 3 行
+  再重播一次；新抓的会按对象 ID 合并成 1 行（若确实是同一条），
+  点赞取最新快照。若是 3 条同标题的不同帖子，则仍保留 3 行并给出提示。
+- 另：`tests/verify_v218_delivery.py` 是 v2.0.18 的历史版本锁定测试，
+  引用的 `../docs/PITFALLS.md` 路径早已失效，与本次改动无关。
+
 ## [3.4.3] - 2026-11-13
 
 ### 修「开嗅探后视频号完全播不了」的**真正**根因（v3.4.1 / 3.4.2 都没修到）

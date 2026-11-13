@@ -26,6 +26,8 @@ from mitmproxy import tls as _tls
 
 from . import config
 from . import shared
+from .dedup import (PREFIX_MD5, PREFIX_NONCE, PREFIX_OID, PREFIX_URL,
+                    aliases_of, is_known_in, legacy_key, short_id)
 from .logger import logger
 from .parser import (extract_from_object_desc, iter_object_descs,
                      iter_object_desc_entries, extract_comments)
@@ -303,6 +305,11 @@ class SphAddon:
         self._passthrough_logged = set()
         self.pipeline = pipeline
         self.on_capture = on_capture  # 可选回调 fn(vd, source)（GUI 用于更新列表）
+        # ★ v3.4.4：重复命中回调 fn(vd, canonical_key)。
+        #   旧版在 _handle 里判重后直接 return，GUI 收不到这次新报文 →
+        #   列表里那条永远是第一次抓到的旧统计数。现在重复也通知 GUI 一次，
+        #   由 GUI 把点赞/转发等累计数按 max 刷新（不插新行）。
+        self.on_duplicate = None
         # ★ v2.7.8：小程序短剧
         self.out_dir = None           # 下载根目录（GUI 按用户配置注入）
         self.on_miniapp = None        # 回调 fn(ep_id, path, size)（GUI 加入清单）
@@ -352,7 +359,12 @@ class SphAddon:
         self.stat_captured = 0           # 本次会话捕获到的视频数
         self.stat_comment_payloads = 0   # 收到的评论 payload 数
         self.stat_last_hit_ts = 0.0      # 最近一次微信页面请求时间
-        self.seen = set()          # 去重: (url, decode_key)
+        self.seen = set()          # 兼容旧契约：canonical key = video_id 或 (url, decode_key)
+        # ★ v3.4.4：别名索引 —— 同一条视频的 oid/md5/nonce/url 全部指到同一个
+        #   canonical key。任一别名命中即判重（详见 sphdl/dedup.py）。
+        #   _alias_owner: alias -> canonical；_owner_aliases: canonical -> set(alias)
+        self._alias_owner = {}
+        self._owner_aliases = {}
         self._dedup_logged = set()  # 已提示过的重复视频 key（同一视频只提示一次，防刷屏）
         self._multi_payload_logged = False  # 多视频 payload 诊断提示只打一次
         # ---- 自然捕获（v2.0.7）----
@@ -1342,7 +1354,8 @@ class SphAddon:
                 if not vd:
                     continue
                 key = vd.video_id or (vd.url, vd.decode_key)
-                if key in seen or key in self.seen:
+                # ★ v3.4.4：候选也要按别名判重（同一对象换清晰度 md5 会变）
+                if key in seen or is_known_in(self, vd):
                     continue
                 efk = _extract_encfilekey(vd.url)
                 if not efk:
@@ -1386,7 +1399,7 @@ class SphAddon:
             if not vd:
                 continue
             key = vd.video_id or (vd.url, vd.decode_key)
-            if key in self.seen:
+            if is_known_in(self, vd):
                 continue
             grabbed += 1
             self._handle(vd, source=source)
@@ -1404,7 +1417,7 @@ class SphAddon:
             if not vd:
                 continue
             key = vd.video_id or (vd.url, vd.decode_key)
-            if key in self.seen:
+            if is_known_in(self, vd):
                 continue
             long_added += 1
             self._handle(vd, source=source)
@@ -1434,30 +1447,73 @@ class SphAddon:
             for p in batch:
                 self._handle(p["vd"], source=p["source"])
 
+    # ---------- v3.4.4 别名去重（调用方需持有 _seen_lock 的部分见注释） ----------
+    def _owner_of_aliases(self, aliases):
+        """任一别名已归属的 canonical key；无则 None。**调用方持 _seen_lock**。"""
+        for a in aliases:
+            owner = self._alias_owner.get(a)
+            if owner is not None:
+                return owner
+        return None
+
+    def _register_aliases(self, aliases, key):
+        """把本条视频的全部别名登记到 canonical key。**调用方持 _seen_lock**。"""
+        self._owner_aliases.setdefault(key, set()).update(aliases)
+        for a in aliases:
+            self._alias_owner[a] = key
+
+    def _release_owner_locked(self, key):
+        """释放一个 canonical key 及其全部别名。**调用方持 _seen_lock**。"""
+        self.seen.discard(key)
+        self._dedup_logged.discard(key)
+        for a in self._owner_aliases.pop(key, ()):
+            if self._alias_owner.get(a) == key:
+                self._alias_owner.pop(a, None)
+
     def _handle(self, vd, source: str):
         # v2.0.4「🖼 下载图片」关闭时：图片直接跳过（不显示、不下载）。
         # 放在去重之前：不占 seen 名额，重新开启开关后同一图片可再捕获。
         if vd.is_image and not self.allow_images:
             logger.info(f"🖼 跳过图片（下载图片已关闭）: {vd.description or '(无描述)'}")
             return
-        # 去重优先用稳定视频 ID（md5sum/encfilekey）：同一视频反复播放
-        # 会带新 token 产生新 URL，按 URL 去重会把同一视频重复下载多份
-        key = vd.video_id or (vd.url, vd.decode_key)
+        # ★ v3.4.4：去重不再只看 md5sum/URL。
+        #   md5sum 是「某一路转码文件」的哈希，同一条视频换清晰度就变；
+        #   feed 对象 ID（oid）才是这一条视频的身份。任一别名命中即同一条。
+        key = legacy_key(vd)
+        aliases = aliases_of(vd)
         with self._seen_lock:
-            if key in self.seen:
-                if key not in self._dedup_logged:
-                    self._dedup_logged.add(key)
-                    logger.info(f"⏭ 重复视频（已捕获过），跳过: "
-                                f"{vd.description or '(无描述)'}")
-                else:
-                    logger.debug("重复视频，跳过")
-                return
-            self.seen.add(key)
+            owner = key if key in self.seen else None
+            if owner is None:
+                owner = self._owner_of_aliases(aliases)
+            if owner is None:
+                self.seen.add(key)
+                self._register_aliases(aliases, key)
+            else:
+                # 重复命中也把新别名补进归属组（下次再换一路清晰度也认得出）
+                self._register_aliases(aliases, owner)
+        if owner is not None:
+            if owner not in self._dedup_logged:
+                self._dedup_logged.add(owner)
+                logger.info(f"⏭ 重复视频（已捕获过），跳过插行: "
+                            f"{vd.description or '(无描述)'}")
+            else:
+                logger.debug("重复视频，跳过插行")
+            # 统计数按 max 刷新（旧版直接 return，列表永远停在第一次的旧值）
+            if self.on_duplicate:
+                try:
+                    self.on_duplicate(vd, owner)
+                except Exception:
+                    pass
+            return
         self.capture_count += 1
         self.last_capture_ts = time.time()
         if self.batch_mode:
             self.batch_count += 1
-        logger.info(f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'}")
+        logger.info(
+            f"🎬 捕获到视频（{source}）: {vd.description or '(无描述)'} "
+            f"| oid={short_id(getattr(vd, 'object_id', ''))} "
+            f"md5={short_id(getattr(vd, 'video_id', ''))} "
+            f"赞={int(getattr(vd, 'like_count', 0) or 0)}")
         logger.debug(f"🧬 捕获结构: {describe_capture(vd)}")
         accepted = True
         if self.on_capture:
@@ -1472,8 +1528,7 @@ class SphAddon:
             # 关键：撤回「已见」标记 —— 否则用户调高档位后重新拉取时，
             # 这条会被内存去重永远挡掉，等于白拉。
             with self._seen_lock:
-                self.seen.discard(key)
-                self._dedup_logged.discard(key)
+                self._release_owner_locked(key)
             self.rejected_count += 1
             if self.rejected_count in (1, 10, 50) or self.rejected_count % 100 == 0:
                 logger.warn(f"📵 列表已满，本条未加载"
@@ -1527,10 +1582,25 @@ class SphAddon:
         released = 0
         with self._seen_lock:
             for vid in ids:
-                if vid in self.seen:
-                    self.seen.discard(vid)
-                    released += 1
-                self._dedup_logged.discard(vid)
+                # ★ v3.4.4：调用方可能传裸 video_id（旧契约），也可能传带前缀
+                #   的别名（GUI 删记录时会把整组别名一起传）。两种都要能释放。
+                owner = None
+                for cand in (vid, PREFIX_MD5 + str(vid),
+                             PREFIX_OID + str(vid),
+                             PREFIX_NONCE + str(vid),
+                             PREFIX_URL + str(vid)):
+                    if cand in self.seen:
+                        owner = cand
+                        break
+                    if cand in self._alias_owner:
+                        owner = self._alias_owner[cand]
+                        break
+                if owner is not None:
+                    if owner in self.seen:
+                        released += 1
+                    self._release_owner_locked(owner)
+                else:
+                    self._dedup_logged.discard(vid)
         return released
 
     def clear_seen(self):
@@ -1543,6 +1613,8 @@ class SphAddon:
         with self._seen_lock:
             n = len(self.seen)
             self.seen.clear()
+            self._alias_owner.clear()
+            self._owner_aliases.clear()
             self._dedup_logged.clear()
         return n
 

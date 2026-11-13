@@ -50,7 +50,7 @@
 
 ### 方式 A：免安装便携版（推荐，无需 Python 环境）
 
-1. 下载 `dist/微信视频号下载器-v3.4.3-win64-portable.zip`，解压到任意目录
+1. 下载 `dist/微信视频号下载器-v3.4.4-win64-portable.zip`，解压到任意目录
    （建议路径不含中文/空格，如 `D:\sphdl\`）
 2. 双击 `微信视频号下载器.exe`
 3. 首次使用先装 CA 证书（见下节）
@@ -240,10 +240,11 @@ CDN 对单连接限速（约 400KB 一掐 + 微信 UA 50-85KB/s），这是上�
 
 ## 版本
 
-当前版本：**v3.4.3**
+当前版本：**v3.4.4**
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| **v3.4.4** | 2026-11-13 | **修「同一个视频抓成 3 行、点赞数 4/20/7 还不一样」**。取证：三行的 `md5sum` / `encfilekey` / `decode_key` / URL 全不同 —— 旧去重键把「一路转码文件」当成了「这一条视频」。新增 `dedup.py` 别名索引（对象 ID / md5 / nonce / URL 任一命中即同一条），`parser` 提取 feed 对象 ID 并写进 `records.json`，重复命中不再静默 return 而是把统计数按 `max()` 刷新；同名但对象 ID 不同的**独立帖子仍保留多行**并明确提示。`verify_dup_object_id.py` 53 项（含反例）。⚠️ 老清单里的 3 行没有对象 ID，需删掉后重播一次 |
 | **v3.4.3** | 2026-11-13 | **修「开嗅探后视频号完全播不了」的真正根因**（v3.4.1/3.4.2 的流式转发没修到）。注入 JS 后把 `Content-Length` 写成明文长度却没删 `Content-Encoding: gzip`，mitmproxy 发送时重新压缩 → 实测「声明 9431B / 实发 3686B」，客户端永久等待 → DOM 不加载完、播放器不初始化。改为 `_rewrite_plain_body()` 统一删编码头并按明文重算长度；`verify_response_headers.py` 9 项（含旧写法对照与线上头体一致实测） |
 | **v3.4.2** | 2026-11-13 | 修 `API直嗅` 路径的 `NameError`（`response()` 引用未定义的 `_entries_map`；`_buffer_pending()` 把参数写成同名变量）。日志里每收到一次 bridge 回传就刷 `bridge钩子 解析失败: name '_entries_map' is not defined`，**自然捕获的候选缓存实际从未生效**，只因 JS 回调兜住了才没被察觉。`verify_v341_stream.py` 增至 18 项 |
 | **v3.4.1** | 2026-11-13 | **修「打开嗅探后微信视频号无法播放」**（关掉嗅探就恢复、重启微信无效）。根因：mitmproxy 的 `stream_large_bodies` 默认 `None` = 每个响应完整缓冲后才转发，首字节延迟等于整个文件下载时间（同一 5MB Range 实测 5.94s/10.18s/15.96s；直连 0.34s），视频播放器等不到数据直接判失败。改为 `1m` 阈值流式转发后首字节 **0.51s（GUI）/ 0.63s（exe）**。策略集中在 `proxy_manager.apply_stream_policy`，GUI 与 CLI 两套启动代码共用；小程序短剧「边播边存」因需要完整字节单独退出流式（>64MB 不硬扛）。`verify_v341_stream.py` 15 项 + exe/GUI 两条路径各一个实测脚本 |

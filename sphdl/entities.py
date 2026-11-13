@@ -26,6 +26,11 @@ class VideoData:
     # 稳定视频标识：media.md5sum（同一视频内容恒定，与 token/URL 无关）。
     # 用于去重——同一视频反复播放会产生新 token/URL，按 URL 去重会失效。
     video_id: str = ""
+    # ★ v3.4.4：feed 对象 ID（条目层的 id / objectId / exportId …）。
+    #   与 video_id 的区别：video_id 是**某一路转码文件**的 md5sum，同一条视频
+    #   换清晰度/换 CDN 签名就变；object_id 是**这一条视频**本身，恒定不变。
+    #   去重优先用它，见 sphdl/dedup.py。
+    object_id: str = ""
     # ★ v2.2.16：视频号对象 nonce（objectNonceId / exportId）。
     #   评论 payload 里带的是这个 ID，用它才能把评论挂到**正确的视频**上；
     #   只靠「最后捕获的视频」会串视频（实测 72 条评论串到 3 个视频上）。
