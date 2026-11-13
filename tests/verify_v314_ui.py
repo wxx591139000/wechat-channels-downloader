@@ -142,7 +142,7 @@ def main():
     others_wide = {c: int(app.tree.column(c, "width")) for c in cols
                    if c not in ("title", "no", "size")}
     others_before = {"status": 96, "platform": 80, "source": 88,
-                     "like": 72, "time": 76, "file": 180}
+                     "like": 72, "time": 76, "pub": 86, "file": 180}
     check("窗口变宽后标题列变大", w_wide > w_before, f"{w_before} → {w_wide}px")
     check("其它列宽度不变（不再平分多出来的宽度）",
           others_wide == others_before, f"{others_wide}")

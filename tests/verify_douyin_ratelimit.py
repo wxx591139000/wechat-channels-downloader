@@ -215,11 +215,31 @@ import tkinter as tk
 from tkinter import ttk
 import sphdl.gui as G
 
+# ★ 2026-11-13：本段会**点开平台窗口**。未授权时 App 会弹「未授权」模态框，
+#   无人点击 → 测试挂死，而且在作者桌面上真的会弹窗（用户报过"一直弹抖音授权"）。
+#   这里把本机真实配置里的产品码带进临时配置，让闸门走"已授权"分支。
+def _seed_license(p):
+    try:
+        import os as _os
+        import json as _json
+        real = Path(_os.environ.get("LOCALAPPDATA", "")) / "sphdl" / "config.json"
+        if real.exists():
+            d = _json.loads(real.read_text(encoding="utf-8"))
+            if d.get("license_codes"):
+                p.write_text(_json.dumps({"license_codes": d["license_codes"]},
+                                         ensure_ascii=False), encoding="utf-8")
+                return True
+    except Exception:
+        pass
+    return False
+
+
 cfgdir = Path(tempfile.mkdtemp(prefix="dylimit_ui_"))
 G.CONFIG_FILE = cfgdir / "config.json"
 G.RECORDS_FILE = cfgdir / "records.json"
 G.CONFIG_FILE.write_text("{}", encoding="utf-8")
 G.RECORDS_FILE.write_text("[]", encoding="utf-8")
+_seed_license(G.CONFIG_FILE)   # 已购产品码 → 不弹未授权模态框
 
 app = G.App()
 app.root.deiconify()
